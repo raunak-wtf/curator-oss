@@ -14,4 +14,10 @@ describe("publishSlugFromTitle", () => {
   it("keeps slugs within the publishing limit", () => {
     expect(publishSlugFromTitle("a".repeat(80))).toHaveLength(48);
   });
+
+  it("avoids reserved system subdomain slugs", () => {
+    expect(publishSlugFromTitle("Dashboard")).toBe("dashboard-app");
+    expect(publishSlugFromTitle("API")).toBe("api-app");
+    expect(publishSlugFromTitle("Preview")).toBe("preview-app");
+  });
 });

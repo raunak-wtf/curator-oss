@@ -1,12 +1,12 @@
 "use client";
 
-import { Check, Copy, ExternalLink } from "lucide-react";
+import { Check, Copy, ExternalLink, Sparkles } from "lucide-react";
 import { useId, useState } from "react";
 import { toast } from "sonner";
 import { PixelLoader } from "@/components/pixel-loader";
 import { RemixDialog } from "@/components/remix-dialog";
 import type { Project } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, publishSlugFromTitle } from "@/lib/utils";
 
 type Setting = "showBadge" | "publicRemix";
 
@@ -14,6 +14,7 @@ type Setting = "showBadge" | "publicRemix";
 export function ProjectSettings({ project, onProjectChange }: { project: Project; onProjectChange: (project: Project) => void }) {
   const [title, setTitle] = useState(project.title);
   const [savingTitle, setSavingTitle] = useState(false);
+  const [generatingTitle, setGeneratingTitle] = useState(false);
   const [instructions, setInstructions] = useState(project.customInstructions ?? "");
   const [savingInstructions, setSavingInstructions] = useState(false);
   const [saving, setSaving] = useState<Setting | null>(null);
@@ -65,6 +66,24 @@ export function ProjectSettings({ project, onProjectChange }: { project: Project
     }
   }
 
+  async function suggestDomainName() {
+    if (generatingTitle || savingTitle) return;
+    setGeneratingTitle(true);
+    try {
+      const response = await fetch(`/api/projects/${project.id}/generate-name`, { method: "POST" });
+      const payload = (await response.json().catch(() => ({}))) as { title?: string; slug?: string; error?: string };
+      if (!response.ok || !payload.title) {
+        throw new Error(payload.error ?? "Could not generate a project name. Try again.");
+      }
+      setTitle(payload.title);
+      toast.message(`Suggested “${payload.title}” (${payload.slug ?? publishSlugFromTitle(payload.title)}). Click Save to apply.`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not generate a project name. Try again.");
+    } finally {
+      setGeneratingTitle(false);
+    }
+  }
+
   const card = "rounded-lg border border-white/10 bg-white/[0.02] p-4";
 
   return (
@@ -77,23 +96,37 @@ export function ProjectSettings({ project, onProjectChange }: { project: Project
       </div>
 
       <form onSubmit={(event) => void rename(event)} className={card}>
-        <label htmlFor={nameId} className="text-[13px] font-medium text-white">
-          Project name
-        </label>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <label htmlFor={nameId} className="text-[13px] font-medium text-white">
+            Project name
+          </label>
+          <span className="font-mono text-[11.5px] text-white/45">
+            Slug: {publishSlugFromTitle(title.trim() || project.title)}
+          </span>
+        </div>
         <div className="mt-2 flex flex-wrap gap-2">
           <input
             id={nameId}
             value={title}
             maxLength={120}
             onChange={(event) => setTitle(event.target.value)}
-            className="h-9 min-w-0 flex-1 rounded-lg border border-white/[0.12] bg-[#101010] px-3 text-[13px] text-white outline-none focus:border-white/35 [@media(pointer:coarse)]:h-11"
+            className="h-9 min-w-0 flex-1 rounded-lg border border-white/[0.12] bg-[#101010] px-3 text-[13px] text-white outline-none focus-visible:outline-2 focus-visible:outline-[#9f94ff] focus:border-white/35 [@media(pointer:coarse)]:h-11"
           />
+          <button
+            type="button"
+            disabled={generatingTitle || savingTitle}
+            onClick={() => void suggestDomainName()}
+            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-white/10 px-3 text-[12.5px] font-medium text-white/80 hover:bg-white/[0.06] hover:text-white focus-visible:outline-2 focus-visible:outline-[#9f94ff] disabled:opacity-40 [@media(pointer:coarse)]:h-11"
+          >
+            {generatingTitle ? <PixelLoader /> : <Sparkles className="size-3.5" aria-hidden="true" />}
+            {generatingTitle ? "Generating…" : "Suggest name"}
+          </button>
           <button
             type="submit"
             disabled={savingTitle || !title.trim() || title.trim() === project.title}
-            className="inline-flex h-9 items-center gap-2 rounded-lg border border-white/10 px-3 text-[12.5px] font-medium text-white/80 hover:bg-white/[0.06] hover:text-white disabled:opacity-40 [@media(pointer:coarse)]:h-11"
+            className="inline-flex h-9 items-center gap-2 rounded-lg bg-white px-3 text-[12.5px] font-semibold text-black hover:bg-white/85 focus-visible:outline-2 focus-visible:outline-[#9f94ff] disabled:opacity-40 [@media(pointer:coarse)]:h-11"
           >
-            {savingTitle ? <PixelLoader /> : null} Save
+            {savingTitle ? <PixelLoader className="text-black" /> : null} Save
           </button>
         </div>
       </form>

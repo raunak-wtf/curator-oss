@@ -2221,7 +2221,12 @@ export function WorkspaceClient({
                       cloudBusy={cloudBusy}
                       onSetCloudEnabled={(enabled, feature) => void handlePanelCloudToggle(enabled, feature)}
                       onAskAgent={askAgent}
-                      onProjectChange={(next) => setProject((current) => ({ ...next, previewUrl: current.previewUrl }))}
+                      onProjectChange={(next) => {
+                        if (!project.publishedAt && publishSlug === publishSlugFromTitle(project.title)) {
+                          setPublishSlug(publishSlugFromTitle(next.title));
+                        }
+                        setProject((current) => ({ ...next, previewUrl: current.previewUrl }));
+                      }}
                       onSlugChange={setPublishSlug}
                       onPublish={() => void publishProject()}
                       onUnpublish={() => void unpublishProject()}

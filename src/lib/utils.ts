@@ -1,8 +1,35 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
+const RESERVED_PUBLISH_SLUGS = new Set([
+  "www",
+  "edge",
+  "api",
+  "app",
+  "apps",
+  "admin",
+  "auth",
+  "cdn",
+  "static",
+  "assets",
+  "mail",
+  "smtp",
+  "imap",
+  "ftp",
+  "ns1",
+  "ns2",
+  "status",
+  "health",
+  "preview",
+  "staging",
+  "dev",
+  "dashboard",
+  "curator",
+  "cognix",
+]);
+
 export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
+  return twMerge(clsx(...inputs));
 }
 
 export function titleFromPrompt(prompt: string) {
@@ -37,7 +64,11 @@ export function publishSlugFromTitle(title: string) {
     .replace(/^-+|-+$/g, "")
     .slice(0, 48)
     .replace(/-+$/g, "");
-  return slug.length >= 3 ? slug : `app-${slug || "site"}`;
+  const base = slug.length >= 3 ? slug : `app-${slug || "site"}`;
+  if (RESERVED_PUBLISH_SLUGS.has(base) || base.startsWith("preview-")) {
+    return `${base.slice(0, 44).replace(/-+$/g, "")}-app`;
+  }
+  return base;
 }
 
 export function formatRelativeDate(value: string | Date, now: string | Date | number = Date.now()) {

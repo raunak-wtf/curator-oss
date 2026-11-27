@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { generateProjectName } from "@/lib/ai/project-name";
 import { requireViewer } from "@/lib/auth0";
 import { githubErrorResponse } from "@/lib/github/http";
 import { resolveSecuritySource } from "@/lib/github/security-source";
@@ -39,7 +40,8 @@ export async function POST(request: Request) {
       });
       return Response.json({ project }, { status: 201 });
     }
-    const project = await createProject(viewer, body.prompt);
+    const generatedName = await generateProjectName(body.prompt);
+    const project = await createProject(viewer, body.prompt, { title: generatedName.title });
     return Response.json({ project }, { status: 201 });
   } catch (error) {
     return githubErrorResponse(error);
