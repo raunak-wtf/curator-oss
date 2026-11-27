@@ -1,0 +1,9 @@
+name = "cognix-edge"
+main = "edge-worker.js"
+compatibility_date = "2026-10-01"
+
+# Runs for every hostname on the Cognix zone, including Cloudflare for SaaS customer hostnames.
+routes = [{ pattern = "*/*", zone_name = "curator.codes" }]
+
+[vars]
+COGNIX_ORIGIN = "https://curator.codes"

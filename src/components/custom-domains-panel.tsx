@@ -1,6 +1,7 @@
 "use client";
 
-import { CircleAlert, CircleCheck, Copy, Globe2, LoaderCircle, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { CircleAlert, CircleCheck, Copy, Globe2, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { PixelLoader } from "@/components/pixel-loader";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import type { DomainDnsRecord, DomainSetup, ProjectDomainView } from "@/lib/types";
@@ -192,7 +193,7 @@ export function CustomDomainsPanel({ projectId, published, disabled, refreshKey 
           aria-label="Reload custom domains"
           title="Reload custom domains"
         >
-          <RefreshCw className={cn("size-3.5", loadState === "loading" && "animate-spin")} aria-hidden="true" />
+          {loadState === "loading" ? <PixelLoader /> : <RefreshCw className="size-3.5" aria-hidden="true" />}
         </button>
       </header>
 
@@ -227,7 +228,7 @@ export function CustomDomainsPanel({ projectId, published, disabled, refreshKey 
         />
         <button type="button" onClick={() => void addDomain()} disabled={disabled || adding || !hostname.trim()}>
           {adding ? (
-            <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
+            <PixelLoader />
           ) : (
             <Plus className="size-3.5" aria-hidden="true" />
           )}
@@ -286,7 +287,7 @@ export function CustomDomainsPanel({ projectId, published, disabled, refreshKey 
                     title={routingUnavailable ? "Available once Cognix has a public address" : `Check DNS for ${domain.hostname}`}
                   >
                     {busy ? (
-                      <LoaderCircle className="size-3 animate-spin" aria-hidden="true" />
+                      <PixelLoader size="sm" />
                     ) : (
                       <RefreshCw className="size-3" aria-hidden="true" />
                     )}

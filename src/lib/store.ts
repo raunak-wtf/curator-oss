@@ -1,8 +1,13 @@
 import { encryptSecret, decryptSecret } from './secrets-crypto';
-import { and, asc, desc, eq, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lte, ne, sql } from "drizzle-orm";
 import { db } from "./db";
-import { attachments, messages, projectDomains, projectFiles, projects, users, projectSecrets, projectCloud } from "./db/schema";
+import { agentApprovals, attachments, githubConnections, messages, projectDomains, projectFiles, projectRepositories, projects, users, projectSecrets, projectCloud, skills } from "./db/schema";
+import { previewSlugForProjectId } from "./domains";
+import { SKILLS_PER_ACCOUNT, SkillRequestError } from "./skills";
 import type {
+  AgentApprovalDecision,
+  AgentApprovalItem,
+  AgentApprovalRequest,
   Attachment,
   Message,
   MessageRole,
@@ -15,8 +20,35 @@ import type {
   ProjectSecret,
   ProjectCloud,
   ProjectCloudStatus,
+  Skill,
+  SkillSource,
+  GitHubConnection,
+  ProjectRepository,
+  ProjectMode,
+  RepositoryCache,
+  SecuritySource,
 } from "./types";
 import { titleFromPrompt } from "./utils";
+
+/** Plain token values. Expiry fields are null for OAuth App tokens, which do not expire. */
+export type GitHubTokens = {
+  accessToken: string;
+  expiresAt: string | null;
+  refreshToken: string | null;
+  refreshExpiresAt: string | null;
+};
+export type GitHubTokenRecord = GitHubTokens;
+
+type StoredGitHubTokens = {
+  tokenCiphertext: string;
+  tokenIv: string;
+  tokenAuthTag: string;
+  tokenExpiresAt: Date | null;
+  refreshCiphertext: string | null;
+  refreshIv: string | null;
+  refreshAuthTag: string | null;
+  refreshExpiresAt: Date | null;
+};
 
 type MemoryStore = {
   projects: Project[];
@@ -26,6 +58,10 @@ type MemoryStore = {
   domains: ProjectDomain[];
   secrets: (ProjectSecret & { ciphertext: string; iv: string; authTag: string })[];
   clouds: ProjectCloud[];
+  skills: Skill[];
+  githubConnections: (GitHubConnection & StoredGitHubTokens)[];
+  repositories: ProjectRepository[];
+  repositoryCache: Map<string, RepositoryCache>;
 };
 
 declare global {
@@ -42,12 +78,20 @@ const memory =
     domains: [],
     secrets: [],
     clouds: [],
+    skills: [],
+    githubConnections: [],
+    repositories: [],
+    repositoryCache: new Map<string, RepositoryCache>(),
   });
 
 // Keeps development sessions working when an older in-memory store is reused after a reload.
 memory.domains ??= [];
+memory.repositoryCache ??= new Map();
 memory.secrets ??= [];
 memory.clouds ??= [];
+memory.skills ??= [];
+memory.githubConnections ??= [];
+memory.repositories ??= [];
 
 function mapProject(row: typeof projects.$inferSelect): Project {
   return {
@@ -61,6 +105,10 @@ function mapProject(row: typeof projects.$inferSelect): Project {
     previewUrl: row.previewUrl,
     publishSlug: row.publishSlug,
     publishedAt: row.publishedAt?.toISOString() ?? null,
+    showBadge: row.showBadge,
+    publicRemix: row.publicRemix,
+    mode: row.mode === "security" ? "security" : "build",
+    securitySource: row.securitySource ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -175,6 +223,25 @@ export async function getProject(id: string, ownerId: string): Promise<Project |
   return row ? mapProject(row) : null;
 }
 
+/**
+ * Loads a project for remixing: the owner always, anyone else only when public remixing is on.
+ * Never use this for editing; it ignores ownership on purpose.
+ */
+export async function getRemixableProject(id: string, viewerId: string | null): Promise<Project | null> {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+  const project = !db
+    ? memory.projects.find((item) => item.id === id) ?? null
+    : await db.select().from(projects).where(eq(projects.id, id)).limit(1).then(([row]) => (row ? mapProject(row) : null));
+  if (!project) return null;
+  return project.ownerId === viewerId || project.publicRemix ? project : null;
+}
+
+export async function getUserName(id: string): Promise<string | null> {
+  if (!db) return null;
+  const [row] = await db.select({ name: users.name }).from(users).where(eq(users.id, id)).limit(1);
+  return row?.name ?? null;
+}
+
 export async function getProjectByPublishSlug(slug: string): Promise<Project | null> {
   if (!db) {
     return memory.projects.find((project) => project.publishSlug === slug) ?? null;
@@ -188,14 +255,18 @@ export async function getPublishedProject(slug: string): Promise<Project | null>
   return project?.publishedAt ? project : null;
 }
 
-export async function createProject(viewer: Viewer, prompt: string): Promise<Project> {
+export async function createProject(
+  viewer: Viewer,
+  prompt: string,
+  options: { mode?: ProjectMode; securitySource?: SecuritySource | null; title?: string } = {},
+): Promise<Project> {
   await ensureUser(viewer);
   const now = new Date();
   const gradients = ["aurora", "ember", "violet", "cloud"];
   const project: Project = {
     id: crypto.randomUUID(),
     ownerId: viewer.id,
-    title: titleFromPrompt(prompt),
+    title: options.title ?? titleFromPrompt(prompt),
     description: prompt.trim().slice(0, 240),
     status: "draft",
     coverGradient: gradients[Math.floor(Math.random() * gradients.length)],
@@ -203,6 +274,10 @@ export async function createProject(viewer: Viewer, prompt: string): Promise<Pro
     previewUrl: null,
     publishSlug: null,
     publishedAt: null,
+    showBadge: true,
+    publicRemix: false,
+    mode: options.mode ?? "build",
+    securitySource: options.securitySource ?? null,
     createdAt: now.toISOString(),
     updatedAt: now.toISOString(),
   };
@@ -220,6 +295,8 @@ export async function createProject(viewer: Viewer, prompt: string): Promise<Pro
       description: project.description,
       status: project.status,
       coverGradient: project.coverGradient,
+      mode: project.mode,
+      securitySource: project.securitySource,
     })
     .returning();
   return mapProject(row);
@@ -231,7 +308,7 @@ export async function updateProject(
   patch: Partial<
     Pick<
       Project,
-      "title" | "description" | "status" | "sandboxId" | "previewUrl" | "publishSlug" | "publishedAt"
+      "title" | "description" | "status" | "sandboxId" | "previewUrl" | "publishSlug" | "publishedAt" | "showBadge" | "publicRemix" | "securitySource"
     >
   >,
 ): Promise<Project | null> {
@@ -394,6 +471,36 @@ export async function getAttachment(id: string, ownerId: string): Promise<Attach
   return row ? mapAttachment(row) : null;
 }
 
+export async function listProjectAttachmentKeys(projectId: string): Promise<string[]> {
+  if (!db) {
+    return memory.attachments.filter((item) => item.projectId === projectId).map((item) => item.objectKey);
+  }
+  const rows = await db.select({ objectKey: attachments.objectKey }).from(attachments).where(eq(attachments.projectId, projectId));
+  return rows.map((row) => row.objectKey);
+}
+
+/** Deletes a project and, through cascades, its messages, files, attachments, domains, secrets, and cloud settings. */
+export async function deleteProject(id: string, ownerId: string): Promise<boolean> {
+  if (!db) {
+    const before = memory.projects.length;
+    memory.projects = memory.projects.filter((project) => project.id !== id || project.ownerId !== ownerId);
+    if (memory.projects.length === before) return false;
+    memory.messages = memory.messages.filter((item) => item.projectId !== id);
+    memory.files = memory.files.filter((item) => item.projectId !== id);
+    memory.attachments = memory.attachments.filter((item) => item.projectId !== id);
+    memory.domains = memory.domains.filter((item) => item.projectId !== id);
+    memory.secrets = memory.secrets.filter((item) => item.projectId !== id);
+    memory.clouds = memory.clouds.filter((item) => item.projectId !== id);
+    memory.repositories = memory.repositories.filter((item) => item.projectId !== id);
+    return true;
+  }
+  const deleted = await db
+    .delete(projects)
+    .where(and(eq(projects.id, id), eq(projects.ownerId, ownerId)))
+    .returning({ id: projects.id });
+  return deleted.length > 0;
+}
+
 export async function updateAttachmentSandboxPath(id: string, sandboxPath: string): Promise<Attachment | null> {
   if (!db) {
     const index = memory.attachments.findIndex((item) => item.id === id);
@@ -530,6 +637,42 @@ export async function getPublishedProjectByHostname(
   const project = await getProjectById(domain.projectId);
   if (!project?.publishedAt) return null;
   return { project, domain };
+}
+
+export async function getProjectForEdgePreview(lookup: {
+  slug: string;
+  hex8?: string;
+  projectId?: string;
+}): Promise<Project | null> {
+  if (lookup.projectId) {
+    const project = await getProjectById(lookup.projectId);
+    if (!project || project.mode === "security" || !project.sandboxId) return null;
+    return project;
+  }
+  if (!lookup.hex8) return null;
+  if (!db) {
+    const match = memory.projects.find(
+      (project) =>
+        project.id.toLowerCase().startsWith(`${lookup.hex8}-`) &&
+        previewSlugForProjectId(project.id) === lookup.slug,
+    );
+    if (!match || match.mode === "security" || !match.sandboxId) return null;
+    return match;
+  }
+  const lowUuid = `${lookup.hex8}-0000-0000-0000-000000000000`;
+  const highUuid = `${lookup.hex8}-ffff-ffff-ffff-ffffffffffff`;
+  const rows = await db
+    .select()
+    .from(projects)
+    .where(and(gte(projects.id, lowUuid), lte(projects.id, highUuid)))
+    .limit(5);
+  const mapped = rows.map(mapProject).find((project) => previewSlugForProjectId(project.id) === lookup.slug);
+  if (!mapped || mapped.mode === "security" || !mapped.sandboxId) return null;
+  return mapped;
+}
+
+export async function hasRegisteredDomain(hostname: string): Promise<boolean> {
+  return Boolean(await getProjectDomainByHostname(hostname));
 }
 
 async function getProjectById(id: string): Promise<Project | null> {
@@ -722,4 +865,441 @@ export async function updateProjectCloud(projectId: string, patch: Partial<Omit<
   }).returning();
 
   return mapCloud(row);
+}
+
+function mapSkill(row: typeof skills.$inferSelect): Skill {
+  return {
+    id: row.id,
+    ownerId: row.ownerId,
+    name: row.name,
+    description: row.description,
+    body: row.body,
+    source: row.source as SkillSource,
+    sourceUrl: row.sourceUrl,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+type SkillInput = Pick<Skill, "name" | "description" | "body" | "source" | "sourceUrl">;
+
+function duplicateSkillError(name: string) {
+  return new SkillRequestError(`You already have a skill named /${name}. Choose another name or edit the existing skill.`, 409);
+}
+
+function isUniqueViolation(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && String(error.code) === "23505";
+}
+
+export async function listSkills(ownerId: string): Promise<Skill[]> {
+  if (!db) {
+    return memory.skills.filter((skill) => skill.ownerId === ownerId).sort((a, b) => a.name.localeCompare(b.name));
+  }
+  return (await db.select().from(skills).where(eq(skills.ownerId, ownerId)).orderBy(asc(skills.name))).map(mapSkill);
+}
+
+export async function getSkillsByNames(ownerId: string, names: string[]): Promise<Skill[]> {
+  if (!names.length) return [];
+  const owned = await listSkills(ownerId);
+  // Keep the order the prompt mentioned them in.
+  return names.flatMap((name) => owned.filter((skill) => skill.name === name));
+}
+
+export async function createSkill(ownerId: string, input: SkillInput): Promise<Skill> {
+  if (!db) {
+    const owned = memory.skills.filter((skill) => skill.ownerId === ownerId);
+    if (owned.some((skill) => skill.name === input.name)) throw duplicateSkillError(input.name);
+    if (owned.length >= SKILLS_PER_ACCOUNT) {
+      throw new SkillRequestError(`You can save up to ${SKILLS_PER_ACCOUNT} skills. Delete one with /skills, then try again.`, 409);
+    }
+    const now = new Date().toISOString();
+    const skill: Skill = { ...input, id: crypto.randomUUID(), ownerId, createdAt: now, updatedAt: now };
+    memory.skills.push(skill);
+    return skill;
+  }
+
+  const [{ count }] = await db.select({ count: sql<number>`count(*)::int` }).from(skills).where(eq(skills.ownerId, ownerId));
+  if (count >= SKILLS_PER_ACCOUNT) {
+    throw new SkillRequestError(`You can save up to ${SKILLS_PER_ACCOUNT} skills. Delete one with /skills, then try again.`, 409);
+  }
+  try {
+    const [row] = await db.insert(skills).values({ ...input, ownerId }).returning();
+    return mapSkill(row);
+  } catch (error) {
+    if (isUniqueViolation(error)) throw duplicateSkillError(input.name);
+    throw error;
+  }
+}
+
+export async function updateSkill(
+  id: string,
+  ownerId: string,
+  patch: Pick<Skill, "name" | "description" | "body">,
+): Promise<Skill | null> {
+  if (!db) {
+    const index = memory.skills.findIndex((skill) => skill.id === id && skill.ownerId === ownerId);
+    if (index < 0) return null;
+    if (memory.skills.some((skill) => skill.ownerId === ownerId && skill.name === patch.name && skill.id !== id)) {
+      throw duplicateSkillError(patch.name);
+    }
+    memory.skills[index] = { ...memory.skills[index], ...patch, updatedAt: new Date().toISOString() };
+    return memory.skills[index];
+  }
+  try {
+    const [row] = await db
+      .update(skills)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(and(eq(skills.id, id), eq(skills.ownerId, ownerId)))
+      .returning();
+    return row ? mapSkill(row) : null;
+  } catch (error) {
+    if (isUniqueViolation(error)) throw duplicateSkillError(patch.name);
+    throw error;
+  }
+}
+
+export async function deleteSkill(id: string, ownerId: string): Promise<boolean> {
+  if (!db) {
+    const before = memory.skills.length;
+    memory.skills = memory.skills.filter((skill) => skill.id !== id || skill.ownerId !== ownerId);
+    return memory.skills.length < before;
+  }
+  const removed = await db
+    .delete(skills)
+    .where(and(eq(skills.id, id), eq(skills.ownerId, ownerId)))
+    .returning({ id: skills.id });
+  return removed.length > 0;
+}
+
+// ── GitHub ──────────────────────────────────────────────────────────────
+
+function mapGitHubConnection(row: typeof githubConnections.$inferSelect): GitHubConnection {
+  return {
+    ownerId: row.ownerId,
+    githubUserId: row.githubUserId,
+    login: row.login,
+    avatarUrl: row.avatarUrl,
+    scopes: row.scopes,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapRepository(row: typeof projectRepositories.$inferSelect): ProjectRepository {
+  return {
+    projectId: row.projectId,
+    ownerId: row.ownerId,
+    repoId: row.repoId,
+    fullName: row.fullName,
+    htmlUrl: row.htmlUrl,
+    defaultBranch: row.defaultBranch,
+    private: row.private,
+    autoCommit: row.autoCommit,
+    syncBaseSha: row.syncBaseSha,
+    syncedPaths: row.syncedPaths,
+    lastCommitSha: row.lastCommitSha,
+    lastCommitUrl: row.lastCommitUrl,
+    lastPushedAt: row.lastPushedAt?.toISOString() ?? null,
+    lastError: row.lastError,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+export async function getGitHubConnection(ownerId: string): Promise<GitHubConnection | null> {
+  if (!db) {
+    const found = memory.githubConnections.find((item) => item.ownerId === ownerId);
+    if (!found) return null;
+    return {
+      ownerId: found.ownerId,
+      githubUserId: found.githubUserId,
+      login: found.login,
+      avatarUrl: found.avatarUrl,
+      scopes: found.scopes,
+      createdAt: found.createdAt,
+      updatedAt: found.updatedAt,
+    };
+  }
+  const [row] = await db.select().from(githubConnections).where(eq(githubConnections.ownerId, ownerId)).limit(1);
+  return row ? mapGitHubConnection(row) : null;
+}
+
+/** Server-only: the decrypted token record. Never send it to a browser, a log, or a sandbox. */
+export async function getGitHubTokenRecord(ownerId: string): Promise<GitHubTokenRecord | null> {
+  const row = !db
+    ? memory.githubConnections.find((item) => item.ownerId === ownerId)
+    : (await db.select().from(githubConnections).where(eq(githubConnections.ownerId, ownerId)).limit(1))[0];
+  if (!row) return null;
+  const toIso = (value: Date | string | null | undefined) => (value ? new Date(value).toISOString() : null);
+  return {
+    accessToken: decryptSecret({ ciphertext: row.tokenCiphertext, iv: row.tokenIv, authTag: row.tokenAuthTag }),
+    expiresAt: toIso(row.tokenExpiresAt),
+    refreshToken:
+      row.refreshCiphertext && row.refreshIv && row.refreshAuthTag
+        ? decryptSecret({ ciphertext: row.refreshCiphertext, iv: row.refreshIv, authTag: row.refreshAuthTag })
+        : null,
+    refreshExpiresAt: toIso(row.refreshExpiresAt),
+  };
+}
+
+/** Server-only: returns the decrypted access token as stored, without refreshing it. */
+export async function getGitHubAccessToken(ownerId: string): Promise<string | null> {
+  return (await getGitHubTokenRecord(ownerId))?.accessToken ?? null;
+}
+
+function encryptedTokenFields(tokens: GitHubTokens) {
+  const access = encryptSecret(tokens.accessToken);
+  const refresh = tokens.refreshToken ? encryptSecret(tokens.refreshToken) : null;
+  return {
+    tokenCiphertext: access.ciphertext,
+    tokenIv: access.iv,
+    tokenAuthTag: access.authTag,
+    tokenExpiresAt: tokens.expiresAt ? new Date(tokens.expiresAt) : null,
+    refreshCiphertext: refresh?.ciphertext ?? null,
+    refreshIv: refresh?.iv ?? null,
+    refreshAuthTag: refresh?.authTag ?? null,
+    refreshExpiresAt: tokens.refreshExpiresAt ? new Date(tokens.refreshExpiresAt) : null,
+  };
+}
+
+/** Replaces the stored tokens after a refresh. GitHub refresh tokens are single-use, so this must run every time. */
+export async function updateGitHubTokens(ownerId: string, tokens: GitHubTokens) {
+  const fields = encryptedTokenFields(tokens);
+  if (!db) {
+    const index = memory.githubConnections.findIndex((item) => item.ownerId === ownerId);
+    if (index >= 0) memory.githubConnections[index] = { ...memory.githubConnections[index], ...fields, updatedAt: new Date().toISOString() };
+    return;
+  }
+  await db.update(githubConnections).set({ ...fields, updatedAt: new Date() }).where(eq(githubConnections.ownerId, ownerId));
+}
+
+export async function saveGitHubConnection(
+  ownerId: string,
+  input: { githubUserId: string; login: string; avatarUrl: string | null; scopes: string } & GitHubTokens,
+): Promise<GitHubConnection> {
+  const now = new Date();
+  const fields = {
+    githubUserId: input.githubUserId,
+    login: input.login,
+    avatarUrl: input.avatarUrl,
+    scopes: input.scopes,
+    ...encryptedTokenFields(input),
+  };
+  if (!db) {
+    const index = memory.githubConnections.findIndex((item) => item.ownerId === ownerId);
+    const record = {
+      ownerId,
+      ...fields,
+      createdAt: index >= 0 ? memory.githubConnections[index].createdAt : now.toISOString(),
+      updatedAt: now.toISOString(),
+    };
+    if (index >= 0) memory.githubConnections[index] = record;
+    else memory.githubConnections.push(record);
+    return (await getGitHubConnection(ownerId))!;
+  }
+  const [row] = await db
+    .insert(githubConnections)
+    .values({ ownerId, ...fields })
+    .onConflictDoUpdate({ target: githubConnections.ownerId, set: { ...fields, updatedAt: now } })
+    .returning();
+  return mapGitHubConnection(row);
+}
+
+export async function deleteGitHubConnection(ownerId: string): Promise<boolean> {
+  if (!db) {
+    const before = memory.githubConnections.length;
+    memory.githubConnections = memory.githubConnections.filter((item) => item.ownerId !== ownerId);
+    return memory.githubConnections.length < before;
+  }
+  const removed = await db.delete(githubConnections).where(eq(githubConnections.ownerId, ownerId)).returning({ ownerId: githubConnections.ownerId });
+  return removed.length > 0;
+}
+
+export async function getProjectRepository(projectId: string, ownerId: string): Promise<ProjectRepository | null> {
+  if (!db) {
+    return memory.repositories.find((item) => item.projectId === projectId && item.ownerId === ownerId) ?? null;
+  }
+  const [row] = await db
+    .select()
+    .from(projectRepositories)
+    .where(and(eq(projectRepositories.projectId, projectId), eq(projectRepositories.ownerId, ownerId)))
+    .limit(1);
+  return row ? mapRepository(row) : null;
+}
+
+export async function linkProjectRepository(
+  input: Pick<ProjectRepository, "projectId" | "ownerId" | "repoId" | "fullName" | "htmlUrl" | "defaultBranch" | "private" | "syncBaseSha">,
+): Promise<ProjectRepository> {
+  const now = new Date();
+  if (!db) {
+    memory.repositories = memory.repositories.filter((item) => item.projectId !== input.projectId);
+    const record: ProjectRepository = {
+      ...input,
+      autoCommit: true,
+      syncedPaths: [],
+      lastCommitSha: null,
+      lastCommitUrl: null,
+      lastPushedAt: null,
+      lastError: null,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    };
+    memory.repositories.push(record);
+    return record;
+  }
+  const reset = { syncedPaths: [] as string[], lastCommitSha: null, lastCommitUrl: null, lastPushedAt: null, lastError: null, autoCommit: true };
+  const [row] = await db
+    .insert(projectRepositories)
+    .values({ ...input, ...reset })
+    .onConflictDoUpdate({ target: projectRepositories.projectId, set: { ...input, ...reset, createdAt: now, updatedAt: now } })
+    .returning();
+  return mapRepository(row);
+}
+
+export async function updateProjectRepository(
+  projectId: string,
+  ownerId: string,
+  patch: Partial<
+    Pick<ProjectRepository, "autoCommit" | "syncBaseSha" | "syncedPaths" | "lastCommitSha" | "lastCommitUrl" | "lastPushedAt" | "lastError" | "defaultBranch" | "fullName" | "htmlUrl" | "private">
+  >,
+): Promise<ProjectRepository | null> {
+  if (!db) {
+    const index = memory.repositories.findIndex((item) => item.projectId === projectId && item.ownerId === ownerId);
+    if (index < 0) return null;
+    memory.repositories[index] = { ...memory.repositories[index], ...patch, updatedAt: new Date().toISOString() };
+    return memory.repositories[index];
+  }
+  const { lastPushedAt, ...rest } = patch;
+  const [row] = await db
+    .update(projectRepositories)
+    .set({
+      ...rest,
+      ...(lastPushedAt !== undefined ? { lastPushedAt: lastPushedAt ? new Date(lastPushedAt) : null } : {}),
+      updatedAt: new Date(),
+    })
+    .where(and(eq(projectRepositories.projectId, projectId), eq(projectRepositories.ownerId, ownerId)))
+    .returning();
+  return row ? mapRepository(row) : null;
+}
+
+export async function unlinkProjectRepository(projectId: string, ownerId: string): Promise<boolean> {
+  memory.repositoryCache.delete(projectId);
+  if (!db) {
+    const before = memory.repositories.length;
+    memory.repositories = memory.repositories.filter((item) => item.projectId !== projectId || item.ownerId !== ownerId);
+    return memory.repositories.length < before;
+  }
+  const removed = await db
+    .delete(projectRepositories)
+    .where(and(eq(projectRepositories.projectId, projectId), eq(projectRepositories.ownerId, ownerId)))
+    .returning({ projectId: projectRepositories.projectId });
+  return removed.length > 0;
+}
+
+/** Git details saved from the last GitHub fetch. Null when no repository is linked. */
+export async function getRepositoryCache(projectId: string, ownerId: string): Promise<RepositoryCache | null> {
+  if (!db) {
+    const linked = memory.repositories.some((item) => item.projectId === projectId && item.ownerId === ownerId);
+    return linked ? memory.repositoryCache.get(projectId) ?? { sync: null, commits: null, commitsFetchedAt: null } : null;
+  }
+  const [row] = await db
+    .select({
+      sync: projectRepositories.cachedSync,
+      commits: projectRepositories.cachedCommits,
+      commitsFetchedAt: projectRepositories.commitsFetchedAt,
+    })
+    .from(projectRepositories)
+    .where(and(eq(projectRepositories.projectId, projectId), eq(projectRepositories.ownerId, ownerId)))
+    .limit(1);
+  if (!row) return null;
+  return { sync: row.sync ?? null, commits: row.commits ?? null, commitsFetchedAt: row.commitsFetchedAt?.toISOString() ?? null };
+}
+
+/** Saves the latest sync status and/or commit list. `commitsFetchedAt: null` marks the commits out of date. */
+export async function saveRepositoryCache(projectId: string, ownerId: string, patch: Partial<RepositoryCache>) {
+  if (!db) {
+    const current = memory.repositoryCache.get(projectId) ?? { sync: null, commits: null, commitsFetchedAt: null };
+    memory.repositoryCache.set(projectId, { ...current, ...patch });
+    return;
+  }
+  const set: Partial<typeof projectRepositories.$inferInsert> = {};
+  if (patch.sync !== undefined) set.cachedSync = patch.sync;
+  if (patch.commits !== undefined) set.cachedCommits = patch.commits;
+  if (patch.commitsFetchedAt !== undefined) set.commitsFetchedAt = patch.commitsFetchedAt ? new Date(patch.commitsFetchedAt) : null;
+  if (!Object.keys(set).length) return;
+  // Leaves updatedAt alone: the cache isn't a change to the link itself.
+  await db
+    .update(projectRepositories)
+    .set(set)
+    .where(and(eq(projectRepositories.projectId, projectId), eq(projectRepositories.ownerId, ownerId)));
+}
+
+// ── Agent approvals (Request review mode) ───────────────────────────────
+
+const memoryApprovals = new Map<string, { projectId: string; ownerId: string; items: AgentApprovalItem[]; decisions: AgentApprovalDecision[] | null; status: "pending" | "resolved" | "expired"; createdAt: string }>();
+
+export async function createAgentApproval(projectId: string, ownerId: string, items: AgentApprovalItem[]): Promise<AgentApprovalRequest> {
+  if (!db) {
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    memoryApprovals.set(id, { projectId, ownerId, items, decisions: null, status: "pending", createdAt });
+    return { id, items, createdAt };
+  }
+  const [row] = await db.insert(agentApprovals).values({ projectId, ownerId, items }).returning();
+  return { id: row.id, items: row.items, createdAt: row.createdAt.toISOString() };
+}
+
+/** The user's decisions, or null while the request is still pending. */
+export async function getAgentApprovalDecisions(id: string): Promise<AgentApprovalDecision[] | null> {
+  if (!db) {
+    const found = memoryApprovals.get(id);
+    return found?.status === "resolved" ? found.decisions : null;
+  }
+  const [row] = await db
+    .select({ status: agentApprovals.status, decisions: agentApprovals.decisions })
+    .from(agentApprovals)
+    .where(eq(agentApprovals.id, id))
+    .limit(1);
+  return row?.status === "resolved" ? row.decisions ?? [] : null;
+}
+
+/** Records the owner's answer. Returns false if the request doesn't exist, isn't theirs, or was already answered. */
+export async function resolveAgentApproval(id: string, projectId: string, ownerId: string, decisions: AgentApprovalDecision[]) {
+  if (!db) {
+    const found = memoryApprovals.get(id);
+    if (!found || found.projectId !== projectId || found.ownerId !== ownerId || found.status !== "pending") return false;
+    memoryApprovals.set(id, { ...found, decisions, status: "resolved" });
+    return true;
+  }
+  const updated = await db
+    .update(agentApprovals)
+    .set({ decisions, status: "resolved", resolvedAt: new Date() })
+    .where(and(eq(agentApprovals.id, id), eq(agentApprovals.projectId, projectId), eq(agentApprovals.ownerId, ownerId), eq(agentApprovals.status, "pending")))
+    .returning({ id: agentApprovals.id });
+  return updated.length > 0;
+}
+
+/** Marks an unanswered request as expired, so a late answer can't be applied to a finished run. */
+export async function expireAgentApproval(id: string) {
+  if (!db) {
+    const found = memoryApprovals.get(id);
+    if (found?.status === "pending") memoryApprovals.set(id, { ...found, status: "expired" });
+    return;
+  }
+  await db.update(agentApprovals).set({ status: "expired", resolvedAt: new Date() }).where(and(eq(agentApprovals.id, id), eq(agentApprovals.status, "pending")));
+}
+
+/** The newest still-pending request for a project, so a reloaded page can show it again. */
+export async function getPendingAgentApproval(projectId: string, ownerId: string): Promise<AgentApprovalRequest | null> {
+  if (!db) {
+    const found = [...memoryApprovals.entries()].reverse().find(([, item]) => item.projectId === projectId && item.ownerId === ownerId && item.status === "pending");
+    return found ? { id: found[0], items: found[1].items, createdAt: found[1].createdAt } : null;
+  }
+  const [row] = await db
+    .select()
+    .from(agentApprovals)
+    .where(and(eq(agentApprovals.projectId, projectId), eq(agentApprovals.ownerId, ownerId), eq(agentApprovals.status, "pending")))
+    .orderBy(desc(agentApprovals.createdAt))
+    .limit(1);
+  return row ? { id: row.id, items: row.items, createdAt: row.createdAt.toISOString() } : null;
 }

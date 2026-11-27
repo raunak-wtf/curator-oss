@@ -69,3 +69,11 @@ export async function createSignedObjectReadUrl(objectKey: string, expiresInMs =
   });
   return url;
 }
+
+export async function deleteObject(objectKey: string) {
+  if (!storageBucket) {
+    memoryObjects.delete(objectKey);
+    return;
+  }
+  await getStorage().bucket(storageBucket).file(objectKey).delete({ ignoreNotFound: true });
+}

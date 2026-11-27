@@ -1,0 +1,35 @@
+# Drop into `/data/coolify/proxy/dynamic/cognix.yaml` when sharing a VM with Coolify (`coolify-proxy`).
+# Priority 1 ensures every specific Coolify application router (`Host(...)`) matches FIRST, while
+# Cognix's builder domain, wildcard `*.curatorsite.in`, ACME HTTP-01 challenges, and arbitrary
+# customer custom domains pass cleanly through to Caddy on the Docker host gateway (`10.0.0.1`).
+
+http:
+  routers:
+    cognix-http-catchall:
+      entryPoints:
+        - http
+      rule: "HostRegexp(`.+`)"
+      priority: 1
+      service: cognix-caddy-http
+  services:
+    cognix-caddy-http:
+      loadBalancer:
+        passHostHeader: true
+        servers:
+          - url: "http://10.0.0.1:8088"
+
+tcp:
+  routers:
+    cognix-tls-passthrough:
+      entryPoints:
+        - https
+      rule: "HostSNIRegexp(`.+`)"
+      priority: 1
+      tls:
+        passthrough: true
+      service: cognix-caddy-tls
+  services:
+    cognix-caddy-tls:
+      loadBalancer:
+        servers:
+          - address: "10.0.0.1:8443"

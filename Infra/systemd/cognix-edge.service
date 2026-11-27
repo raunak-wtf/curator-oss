@@ -1,0 +1,16 @@
+[Unit]
+Description=Cognix Daytona Custom Preview & Custom-Domain Edge Proxy
+After=network-online.target cognix-app.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cognix
+EnvironmentFile=/etc/cognix/infra.env
+ExecStart=/usr/bin/node /opt/cognix/edge-proxy.mjs
+Restart=always
+RestartSec=2
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

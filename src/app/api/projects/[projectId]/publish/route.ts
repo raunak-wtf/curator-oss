@@ -2,7 +2,7 @@ import { z } from "zod";
 import { requireViewer } from "@/lib/auth0";
 import { deployPublishedApp, stopPublishedApp } from "@/lib/daytona";
 import { verifyProjectDomains } from "@/lib/dns";
-import { domainView } from "@/lib/domains";
+import { domainView, isReservedPublishSlug } from "@/lib/domains";
 import { errorResponse, notFound } from "@/lib/http";
 import { publishedAppUrl } from "@/lib/publish-url";
 import {
@@ -91,6 +91,9 @@ export async function POST(request: Request, context: Context) {
       return Response.json({ error: "Build the app successfully before publishing it." }, { status: 409 });
     }
     const { slug } = publishSchema.parse(await request.json());
+    if (isReservedPublishSlug(slug)) {
+      return Response.json({ error: "That subdomain is reserved. Choose another address." }, { status: 409 });
+    }
     const existing = await getProjectByPublishSlug(slug);
     if (existing && existing.id !== project.id) {
       return Response.json({ error: "That address is already taken. Choose another slug." }, { status: 409 });

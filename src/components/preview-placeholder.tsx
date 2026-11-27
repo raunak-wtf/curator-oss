@@ -1,10 +1,11 @@
-import { ArrowLeft, LoaderCircle, MonitorUp } from "lucide-react";
+import { ArrowLeft, MonitorUp } from "lucide-react";
+import { PixelLoader } from "@/components/pixel-loader";
 
 export function PreviewPlaceholder({ reconnecting = false }: { reconnecting?: boolean }) {
   return (
     <div className="preview-placeholder">
       <div className="preview-empty-state">
-        <span>{reconnecting ? <LoaderCircle className="size-5 animate-spin" /> : <MonitorUp className="size-5" />}</span>
+        <span>{reconnecting ? <PixelLoader size="lg" /> : <MonitorUp className="size-5" />}</span>
         <h2>{reconnecting ? "Starting live preview" : "Your preview will appear here"}</h2>
         <p>
           {reconnecting

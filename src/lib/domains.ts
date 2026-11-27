@@ -17,6 +17,52 @@ export function domainProbeBody(hostname: string) {
   return `cognix-domain-check ${hostname}`;
 }
 
+/**
+ * Set by the Cognix edge worker (cloudflare/edge-worker.js). The worker forwards customer-domain traffic to the
+ * Cognix app host, so the hosting proxy only ever sees a hostname it already routes. The real customer
+ * hostname travels in this header, authenticated by COGNIX_EDGE_SECRET.
+ */
+export const EDGE_HOST_HEADER = "x-cognix-edge-host";
+export const EDGE_SECRET_HEADER = "x-cognix-edge-secret";
+
+function constantTimeEqual(a: string, b: string) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let index = 0; index < a.length; index += 1) diff |= a.charCodeAt(index) ^ b.charCodeAt(index);
+  return diff === 0;
+}
+
+/** True when the request carries the shared secret of the Cognix edge worker. */
+export function isTrustedEdgeRequest(headers: Pick<Headers, "get">, env: DomainEnv = process.env) {
+  const secret = env.COGNIX_EDGE_SECRET?.trim();
+  const provided = headers.get(EDGE_SECRET_HEADER)?.trim();
+  return Boolean(secret && provided && constantTimeEqual(provided, secret));
+}
+
+/**
+ * True when the request carries COGNIX_EDGE_SECRET in either `x-cognix-edge-secret`
+ * or `?secret=...` (used by Caddy's `on_demand_tls` `ask` webhook).
+ */
+export function isTrustedEdgeQueryOrHeader(
+  request: Pick<Request, "headers" | "url">,
+  env: DomainEnv = process.env,
+) {
+  if (isTrustedEdgeRequest(request.headers, env)) return true;
+  const secret = env.COGNIX_EDGE_SECRET?.trim();
+  if (!secret) return false;
+  const provided = new URL(request.url).searchParams.get("secret")?.trim();
+  return Boolean(provided && constantTimeEqual(provided, secret));
+}
+
+/** Returns the customer hostname forwarded by the edge worker, or "" when the request is not from it. */
+export function trustedEdgeHostname(
+  headers: Pick<Headers, "get">,
+  env: DomainEnv = process.env,
+) {
+  if (!isTrustedEdgeRequest(headers, env)) return "";
+  return hostnameFromHeader(headers.get(EDGE_HOST_HEADER));
+}
+
 const MAX_HOSTNAME_LENGTH = 253;
 const LABEL_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 
@@ -124,11 +170,127 @@ function isLocalHostname(hostname: string) {
   );
 }
 
-/** True when the request should be served by the builder instead of a published app. */
+export type AppsHostnameMatch =
+  | { kind: "preview"; slug: string; hex8?: string; projectId?: string }
+  | { kind: "published"; slug: string }
+  | { kind: "reserved"; label: string }
+  | { kind: "root" };
+
+const PREVIEW_ADJECTIVES = [
+  "amber", "arctic", "astral", "aurora", "breeze", "bright", "cobalt", "coral",
+  "cosmic", "crystal", "dawn", "ember", "frost", "golden", "harbor", "indigo",
+  "ivory", "jade", "lunar", "maple", "meadow", "misty", "nimble", "noble",
+  "nova", "opal", "quiet", "radiant", "silver", "solar", "swift", "velvet",
+] as const;
+
+const PREVIEW_NOUNS = [
+  "anchor", "beacon", "bloom", "bridge", "canyon", "canvas", "cloud", "comet",
+  "compass", "crest", "delta", "dune", "echo", "falcon", "field", "fjord",
+  "forge", "garden", "glade", "grove", "haven", "horizon", "island", "lagoon",
+  "lantern", "marsh", "meteor", "orbit", "peak", "prism", "river", "summit",
+] as const;
+
+const PREVIEW_ADJECTIVE_SET = new Set<string>(PREVIEW_ADJECTIVES);
+const PREVIEW_NOUN_SET = new Set<string>(PREVIEW_NOUNS);
+
+const RESERVED_APPS_SUBDOMAINS = new Set([
+  "www", "edge", "api", "app", "apps", "admin", "auth", "cdn", "static", "assets",
+  "mail", "smtp", "imap", "ftp", "ns1", "ns2", "status", "health", "preview",
+  "staging", "dev", "dashboard", "curator", "cognix",
+]);
+
+const UUID_HEX_PATTERN = /^([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{12})$/;
+const PREVIEW_SLUG_PATTERN = /^([a-z]+)-([a-z]+)-([0-9a-f]{8})$/;
+
+/**
+ * Deterministic Lovable-style random preview subdomain slug for a project ID
+ * (e.g. `cosmic-orbit-d4ebb9ff` for a UUID, or `preview-<id>` for non-UUID test IDs).
+ */
+export function previewSlugForProjectId(projectId: string): string | null {
+  const clean = projectId.trim().toLowerCase();
+  if (!clean) return null;
+  const uuidMatch = UUID_HEX_PATTERN.exec(clean);
+  if (uuidMatch) {
+    const hex = uuidMatch.slice(1).join("");
+    const adjIndex = Number.parseInt(hex.slice(8, 14), 16) % PREVIEW_ADJECTIVES.length;
+    const nounIndex = Number.parseInt(hex.slice(14, 20), 16) % PREVIEW_NOUNS.length;
+    const hex8 = hex.slice(0, 8);
+    return `${PREVIEW_ADJECTIVES[adjIndex]}-${PREVIEW_NOUNS[nounIndex]}-${hex8}`;
+  }
+  const fallback = `preview-${clean}`;
+  if (fallback.length > 63 || !LABEL_PATTERN.test(fallback)) return null;
+  return fallback;
+}
+
+export function parsePreviewSubdomain(
+  label: string,
+): { slug: string; hex8?: string; projectId?: string } | null {
+  const wordMatch = PREVIEW_SLUG_PATTERN.exec(label);
+  if (wordMatch) {
+    const [, adj, noun, hex8] = wordMatch;
+    if (PREVIEW_ADJECTIVE_SET.has(adj) && PREVIEW_NOUN_SET.has(noun)) {
+      return { slug: label, hex8 };
+    }
+  }
+  if (label.startsWith("preview-") && label.length > "preview-".length) {
+    return { slug: label, projectId: label.slice("preview-".length) };
+  }
+  return null;
+}
+
+/** True when a subdomain on COGNIX_APPS_DOMAIN is reserved for system routing or live previews. */
+export function isReservedPublishSlug(slug: string) {
+  const clean = slug.trim().toLowerCase();
+  if (!clean) return true;
+  return RESERVED_APPS_SUBDOMAINS.has(clean) || Boolean(parsePreviewSubdomain(clean));
+}
+
+/**
+ * Wildcard domain for direct previews (`<random-slug>.<base>`) and published apps (`<name>.<base>`),
+ * such as `curatorsite.in`.
+ */
+export function appsDomain(env: DomainEnv = process.env): string | null {
+  const candidate = hostnameFromValue(env.COGNIX_APPS_DOMAIN ?? "");
+  return isPublicHostname(candidate) ? candidate : null;
+}
+
+/** Classifies a hostname under COGNIX_APPS_DOMAIN into root, reserved, preview, or published slug. */
+export function parseAppsHostname(hostname: string, env: DomainEnv = process.env): AppsHostnameMatch | null {
+  const normalized = hostnameFromValue(hostname);
+  const base = appsDomain(env);
+  if (!normalized || !base) return null;
+  if (normalized === base || normalized === `www.${base}`) return { kind: "root" };
+  const suffix = `.${base}`;
+  if (!normalized.endsWith(suffix)) return null;
+  const label = normalized.slice(0, -suffix.length);
+  if (!label || label.includes(".") || label.length > 63 || !LABEL_PATTERN.test(label)) return null;
+  if (RESERVED_APPS_SUBDOMAINS.has(label)) return { kind: "reserved", label };
+  const preview = parsePreviewSubdomain(label);
+  if (preview) return { kind: "preview", ...preview };
+  return { kind: "published", slug: label };
+}
+
+export function directPreviewUrl(projectId: string, env: DomainEnv = process.env): string | null {
+  const base = appsDomain(env);
+  const slug = previewSlugForProjectId(projectId);
+  if (!base || !slug) return null;
+  return `https://${slug}.${base}`;
+}
+
+export function directPublishedUrl(slug: string, env: DomainEnv = process.env): string | null {
+  const base = appsDomain(env);
+  const cleanSlug = slug.trim().toLowerCase();
+  if (!base || !cleanSlug || cleanSlug.length > 63 || !LABEL_PATTERN.test(cleanSlug)) return null;
+  if (isReservedPublishSlug(cleanSlug)) return null;
+  return `https://${cleanSlug}.${base}`;
+}
+
+/** True when the request should be served by the builder instead of a published app or preview. */
 export function isAppHostname(hostname: string, env: DomainEnv = process.env) {
   if (!hostname) return true;
   if (isLocalHostname(hostname)) return true;
   if (hostname.endsWith(".vercel.app")) return true;
+  if (parseAppsHostname(hostname, env)) return false;
   return appHostnames(env).some((appHost) => hostname === appHost || hostname.endsWith(`.${appHost}`));
 }
 
@@ -185,7 +347,7 @@ export function normalizeCustomHostname(input: string, env: DomainEnv = process.
   if (labels[0] === VERIFICATION_PREFIX) {
     throw new DomainRequestError("Add the domain itself, not its verification record.");
   }
-  if (isAppHostname(hostname, env)) {
+  if (isAppHostname(hostname, env) || Boolean(parseAppsHostname(hostname, env))) {
     throw new DomainRequestError("That hostname already belongs to Cognix. Use a domain you control.");
   }
 

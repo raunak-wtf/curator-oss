@@ -1,0 +1,65 @@
+{
+	# Listen behind Traefik (coolify-proxy) via TCP SNI passthrough (:8443) and HTTP (:8088),
+	# binding loopback + Docker host-gateway bridge so 8088/8443 are not exposed publicly.
+	# On a standalone VM without Traefik, set CADDY_HTTP_PORT=80, CADDY_HTTPS_PORT=443, CADDY_BIND=0.0.0.0.
+	http_port {$CADDY_HTTP_PORT:8088}
+	https_port {$CADDY_HTTPS_PORT:8443}
+	default_bind {$CADDY_BIND:127.0.0.1 10.0.0.1}
+
+	servers {
+		protocols h1 h2
+	}
+
+	on_demand_tls {
+		ask {$COGNIX_INTERNAL_URL:http://127.0.0.1:3005}/api/edge/allow-domain?secret={$COGNIX_EDGE_SECRET}
+	}
+}
+
+# Explicit port-443 HTTPS redirect (Caddy's built-in ACME HTTP-01 solver still runs first on /.well-known/acme-challenge/*)
+http:// {
+	redir https://{host}{uri} 308
+}
+
+# Redirect www.curator.codes -> https://curator.codes
+www.{$COGNIX_BUILDER_DOMAIN} {
+	tls {
+		on_demand
+	}
+	redir https://{$COGNIX_BUILDER_DOMAIN}{uri} 308
+}
+
+# Main Curator builder application (https://curator.codes)
+{$COGNIX_BUILDER_DOMAIN} {
+	tls {
+		on_demand
+	}
+	encode zstd gzip
+	reverse_proxy {$COGNIX_INTERNAL_URL:http://127.0.0.1:3005}
+}
+
+# Root curatorsite.in redirects directly to https://curator.codes
+{$COGNIX_APPS_DOMAIN} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+	redir https://{$COGNIX_BUILDER_DOMAIN} 308
+}
+
+# Wildcard *.curatorsite.in for random-slug live previews (<adj>-<noun>-<id>.curatorsite.in),
+# published apps (<name>.curatorsite.in), and edge.curatorsite.in CNAME target.
+*.{$COGNIX_APPS_DOMAIN} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+	@www host www.{$COGNIX_APPS_DOMAIN}
+	redir @www https://{$COGNIX_BUILDER_DOMAIN} 308
+	reverse_proxy {$COGNIX_EDGE_PROXY_URL:http://127.0.0.1:3006}
+}
+
+# Unlimited customer custom domains (On-Demand TLS via Let's Encrypt HTTP-01)
+https:// {
+	tls {
+		on_demand
+	}
+	reverse_proxy {$COGNIX_EDGE_PROXY_URL:http://127.0.0.1:3006}
+}

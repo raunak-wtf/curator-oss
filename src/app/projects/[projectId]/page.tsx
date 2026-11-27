@@ -1,12 +1,13 @@
 import { notFound, redirect } from "next/navigation";
 import { WorkspaceClient } from "@/components/workspace-client";
 import { getViewer } from "@/lib/auth0";
-import { ensurePreviewUrl } from "@/lib/daytona";
-import { ensureUser, getProject, listMessages, listProjectFiles } from "@/lib/store";
+import { ensurePreviewUrl, publishedAutoStopMinutes } from "@/lib/daytona";
+import { appsDomain } from "@/lib/domains";
+import { ensureUser, getPendingAgentApproval, getProject, getProjectCloud, listMessages, listProjectFiles, listProjects } from "@/lib/store";
 
 type Props = {
   params: Promise<{ projectId: string }>;
-  searchParams: Promise<{ prompt?: string; attachments?: string }>;
+  searchParams: Promise<{ prompt?: string; attachments?: string; tab?: string; github?: string; github_error?: string; approvalMode?: string }>;
 };
 
 export default async function ProjectPage({ params, searchParams }: Props) {
@@ -17,7 +18,7 @@ export default async function ProjectPage({ params, searchParams }: Props) {
   let project = await getProject(projectId, viewer.id);
   if (!project) notFound();
 
-  if (project.sandboxId) {
+  if (project.sandboxId && project.mode !== "security") {
     const latestPreviewUrl = await ensurePreviewUrl(project).catch(() => null);
     if (latestPreviewUrl) {
       project = {
@@ -28,10 +29,13 @@ export default async function ProjectPage({ params, searchParams }: Props) {
     }
   }
 
-  const [messages, files, query] = await Promise.all([
+  const [messages, files, projects, cloud, query, pendingApproval] = await Promise.all([
     listMessages(project.id),
     listProjectFiles(project.id),
+    listProjects(viewer.id),
+    getProjectCloud(project.id).catch(() => null),
     searchParams,
+    project.mode === "security" ? getPendingAgentApproval(project.id, viewer.id).catch(() => null) : Promise.resolve(null),
   ]);
 
   return (
@@ -43,6 +47,14 @@ export default async function ProjectPage({ params, searchParams }: Props) {
       initialNow={new Date().toISOString()}
       initialPrompt={query.prompt}
       initialAttachmentIds={query.attachments?.split(",").filter(Boolean)}
+      projects={projects}
+      initialCloudEnabled={cloud?.status === "ready"}
+      initialTab={query.tab === "git" ? "git" : undefined}
+      initialApproval={pendingApproval}
+      initialApprovalMode={project.mode === "security" && (query.approvalMode === "review" || query.approvalMode === "auto") ? query.approvalMode : undefined}
+      githubResult={query.github ?? query.github_error}
+      appsDomain={appsDomain()}
+      publishedAutoStopMinutes={publishedAutoStopMinutes()}
     />
   );
 }

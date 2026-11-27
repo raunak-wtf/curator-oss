@@ -1,5 +1,5 @@
 import { requireViewer } from "@/lib/auth0";
-import { provisionDomainDns, verifyProjectDomain } from "@/lib/dns";
+import { provisionDomainDns, registerEdgeHostname, verifyProjectDomain } from "@/lib/dns";
 import { domainView } from "@/lib/domains";
 import { errorResponse, notFound } from "@/lib/http";
 import { getProject, getProjectDomain, updateProjectDomain } from "@/lib/store";
@@ -20,6 +20,8 @@ export async function POST(_request: Request, context: Context) {
 
     // Re-create provider records first: an operator-managed zone should self-heal on every check.
     if (domain.managedByProvider) await provisionDomainDns(domain).catch(() => false);
+    // Domains attached before the edge was configured get registered on their next check.
+    await registerEdgeHostname(domain.hostname).catch(() => false);
 
     domain = await verifyProjectDomain(domain);
     if (domain.status === "active" && !project.publishedAt) {

@@ -10,6 +10,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import type { AgentApprovalDecision, AgentApprovalItem, GitSyncStatus, ProjectMode, RepositoryCommit, SecuritySource } from "../types";
 
 export const users = pgTable("users", {
   id: text("id").primaryKey(),
@@ -35,6 +36,14 @@ export const projects = pgTable(
     previewUrl: text("preview_url"),
     publishSlug: text("publish_slug"),
     publishedAt: timestamp("published_at", { withTimezone: true }),
+    /** Shows the small "Edit with Curator" badge on the published app. */
+    showBadge: boolean("show_badge").default(true).notNull(),
+    /** Lets anyone with the remix link copy this project's code into their own project. */
+    publicRemix: boolean("public_remix").default(false).notNull(),
+    /** "build" for app projects; "security" for read-only security reviews of a GitHub repository. */
+    mode: text("mode").$type<ProjectMode>().default("build").notNull(),
+    /** Security mode: the repository being reviewed. Cognix only ever reads it. */
+    securitySource: jsonb("security_source").$type<SecuritySource>(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
@@ -156,4 +165,96 @@ export const projectCloud = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   }
+);
+
+export const skills = pgTable(
+  "skills",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    body: text("body").notNull(),
+    source: text("source").default("manual").notNull(),
+    sourceUrl: text("source_url"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [unique("skills_owner_name_unique").on(table.ownerId, table.name)],
+);
+
+/** One GitHub account per Cognix user. The OAuth token is AES-256-GCM encrypted and never leaves the server. */
+export const githubConnections = pgTable("github_connections", {
+  ownerId: text("owner_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  githubUserId: text("github_user_id").notNull(),
+  login: text("login").notNull(),
+  avatarUrl: text("avatar_url"),
+  scopes: text("scopes").default("").notNull(),
+  tokenCiphertext: text("token_ciphertext").notNull(),
+  tokenIv: text("token_iv").notNull(),
+  tokenAuthTag: text("token_auth_tag").notNull(),
+  /** GitHub Apps issue expiring tokens with a single-use refresh token. OAuth Apps leave these empty. */
+  tokenExpiresAt: timestamp("token_expires_at", { withTimezone: true }),
+  refreshCiphertext: text("refresh_ciphertext"),
+  refreshIv: text("refresh_iv"),
+  refreshAuthTag: text("refresh_auth_tag"),
+  refreshExpiresAt: timestamp("refresh_expires_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+/** The GitHub repository a project commits to. */
+export const projectRepositories = pgTable("project_repositories", {
+  projectId: uuid("project_id")
+    .primaryKey()
+    .references(() => projects.id, { onDelete: "cascade" }),
+  ownerId: text("owner_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  repoId: text("repo_id").notNull(),
+  fullName: text("full_name").notNull(),
+  htmlUrl: text("html_url").notNull(),
+  defaultBranch: text("default_branch").notNull(),
+  private: boolean("private").default(true).notNull(),
+  autoCommit: boolean("auto_commit").default(true).notNull(),
+  /** The remote head Cognix last synced with. A different head means someone pushed outside Cognix. */
+  syncBaseSha: text("sync_base_sha"),
+  /** Paths Cognix committed last time, so files deleted in the sandbox are deleted on GitHub too. */
+  syncedPaths: jsonb("synced_paths").$type<string[]>().default([]).notNull(),
+  lastCommitSha: text("last_commit_sha"),
+  lastCommitUrl: text("last_commit_url"),
+  lastPushedAt: timestamp("last_pushed_at", { withTimezone: true }),
+  lastError: text("last_error"),
+  /** Last sync status and commit list fetched from GitHub, shown instantly when Git Control opens. */
+  cachedSync: jsonb("cached_sync").$type<GitSyncStatus>(),
+  cachedCommits: jsonb("cached_commits").$type<RepositoryCommit[]>(),
+  /** Null when the cached commits are out of date (after a push or pull). */
+  commitsFetchedAt: timestamp("commits_fetched_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+/** Request review mode: actions a running agent is waiting on. The run polls this row for the user's decision. */
+export const agentApprovals = pgTable(
+  "agent_approvals",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    items: jsonb("items").$type<AgentApprovalItem[]>().notNull(),
+    decisions: jsonb("decisions").$type<AgentApprovalDecision[]>(),
+    /** pending → resolved (user answered) or expired (no answer in time). */
+    status: text("status").$type<"pending" | "resolved" | "expired">().default("pending").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  },
+  (table) => [index("agent_approvals_project_status_idx").on(table.projectId, table.status)],
 );

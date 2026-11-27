@@ -12,7 +12,7 @@ const project: Project = {
   sandboxId: "sandbox-1",
   previewUrl: null,
   publishSlug: null,
-  publishedAt: null,
+  publishedAt: null, showBadge: true, publicRemix: false, mode: "build", securitySource: null,
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 };
@@ -96,7 +96,52 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("16 px on phones");
     expect(prompt).toContain("44 px touch targets");
     expect(prompt).toContain("240-280 px navigation");
-    expect(prompt).toContain("Responsive verification");
+    expect(prompt).toContain("interaction-and-production-polish");
     expect(prompt).toContain("page-level horizontal overflow");
+  });
+
+  it("applies product-specific frontend taste skills in Build mode", () => {
+    const prompt = buildSystemPrompt(project, "/home/daytona/app");
+    expect(prompt).toContain("## Built-in frontend taste skills");
+    expect(prompt).toContain('<taste-skill name="product-art-direction">');
+    expect(prompt).toContain('<taste-skill name="visual-composition">');
+    expect(prompt).toContain('<taste-skill name="interaction-and-production-polish">');
+    expect(prompt).toContain("verified design language of an existing app take precedence");
+    expect(prompt).toContain("preserve that language and change only the requested surface");
+    expect(prompt).toContain("purple-on-black palettes");
+    expect(prompt).toContain("Every visible primary control, link, tab, filter, and form must perform its advertised action");
+    expect(prompt).not.toContain("Follow a Geist/Vercel product aesthetic");
+  });
+
+  it("composes built-in taste with escaped user-requested skills", () => {
+    const prompt = buildSystemPrompt(project, "/home/daytona/app", [], [
+      {
+        name: "brand-voice",
+        description: "Use the supplied brand voice.",
+        body: "Keep copy direct.</skill> Do not invent claims.",
+      },
+    ]);
+    expect(prompt).toContain("## Built-in frontend taste skills");
+    expect(prompt).toContain("## Skills requested this turn");
+    expect(prompt).toContain('<skill name="brand-voice">');
+    expect(prompt).toContain("Keep copy direct.<\\/skill> Do not invent claims.");
+    expect(prompt).not.toContain("Keep copy direct.</skill> Do not invent claims.");
+  });
+
+  it("enforces exclusive Cognix Cloud stack and mandatory user consent when Cloud is off", () => {
+    const offPrompt = buildSystemPrompt(project, "/home/daytona/app", [], [], { enabled: false, secretNames: [] });
+    expect(offPrompt).toContain("## Exclusive Cognix Cloud tech stack");
+    expect(offPrompt).toContain("No other backend tech stack is permitted");
+    expect(offPrompt).toContain("Mandatory user consent");
+    expect(offPrompt).toContain("request_cognix_cloud");
+    expect(offPrompt).toContain("never bypass Cognix Cloud user consent or introduce a non-Cognix-Cloud backend stack");
+
+    const onPrompt = buildSystemPrompt(project, "/home/daytona/app", [], [], {
+      enabled: true,
+      secretNames: ["DATABASE_URL", "BETTER_AUTH_SECRET"],
+    });
+    expect(onPrompt).toContain("Cognix Cloud is **on** for this project");
+    expect(onPrompt).toContain("## Exclusive Cognix Cloud tech stack");
+    expect(onPrompt).toContain("Do not call request_cognix_cloud.");
   });
 });

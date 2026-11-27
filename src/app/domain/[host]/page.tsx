@@ -5,6 +5,7 @@ import { PublishedAppFrame } from "@/components/published-app-frame";
 import { getPublishedAppRuntimeUrl } from "@/lib/daytona";
 import { DOMAIN_HOST_HEADER, DOMAIN_PATH_HEADER, customDomainUrl, hostnameFromHeader } from "@/lib/domains";
 import { publishedFrameUrl, safeAppPath } from "@/lib/publish-url";
+import { badgeHrefFor } from "@/lib/remix";
 import { getPublishedProjectByHostname } from "@/lib/store";
 
 type Props = { params: Promise<{ host: string }> };
@@ -56,6 +57,11 @@ export default async function CustomDomainPage({ params }: Props) {
     );
   }
   return (
-    <PublishedAppFrame title={published.project.title} runtimeUrl={publishedFrameUrl(runtimeUrl, resolved.path)} />
+    <PublishedAppFrame
+      title={published.project.title}
+      runtimeUrl={publishedFrameUrl(runtimeUrl, resolved.path)}
+      showBadge={published.project.showBadge}
+      badgeHref={badgeHrefFor(published.project)}
+    />
   );
 }

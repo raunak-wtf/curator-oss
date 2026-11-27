@@ -1,5 +1,5 @@
 import { requireViewer } from "@/lib/auth0";
-import { removeDomainDns } from "@/lib/dns";
+import { removeDomainDns, removeEdgeHostname } from "@/lib/dns";
 import { domainView } from "@/lib/domains";
 import { errorResponse, notFound } from "@/lib/http";
 import { deleteProjectDomain, getProject, getProjectDomain } from "@/lib/store";
@@ -21,6 +21,7 @@ export async function DELETE(_request: Request, context: Context) {
       // Detaching must succeed even when the provider call fails, so the failure is not fatal.
       await removeDomainDns(domain).catch(() => false);
     }
+    await removeEdgeHostname(domain.hostname).catch(() => false);
     const removed = await deleteProjectDomain(domain.id, project.id);
     if (!removed) return notFound("That domain is not attached to this project.");
 

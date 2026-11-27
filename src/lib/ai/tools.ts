@@ -6,6 +6,7 @@ import { z } from "zod";
 import { getPreviewHealth, getPreviewUrl, getProjectFsRoot, getProjectRoot } from "../daytona";
 import { deleteProjectFile, upsertProjectFile, updateProject } from "../store";
 import type { FileChangeSnapshot, Project } from "../types";
+import { assertBuildModeCommandAllowed, assertBuildModeFileChangeAllowed } from "./cloud-stack-policy";
 
 export const agentTools = [
   {
@@ -392,7 +393,7 @@ function htmlToText(value: string) {
   ).replace(/\s+/g, " ").trim();
 }
 
-async function fetchPublicText(value: string, redirects = 0): Promise<{
+export async function fetchPublicText(value: string, redirects = 0): Promise<{
   url: string;
   status: number;
   contentType: string;
@@ -449,9 +450,12 @@ export async function executeAgentTool(
   sandbox: Sandbox,
   name: string,
   rawInput: unknown,
+  options?: { cloudEnabled?: boolean },
 ): Promise<ToolExecution> {
   const root = await getProjectRoot(sandbox);
   const fsRoot = getProjectFsRoot();
+  const enforceBuildStack = project.mode !== "security";
+  const cloudEnabled = options?.cloudEnabled === true;
 
   if (name === "list_files") {
     const input = z
@@ -521,6 +525,9 @@ export async function executeAgentTool(
     const directory = path.posix.dirname(target);
     const existing = await sandbox.process.executeCommand(`test -f ${shellQuote(target)}`, root, undefined, 10);
     const before = existing.exitCode === 0 ? (await sandbox.fs.downloadFile(fsTarget)).toString("utf8") : null;
+    if (enforceBuildStack) {
+      assertBuildModeFileChangeAllowed({ path: relative, before, after: input.content, cloudEnabled });
+    }
     await sandbox.process.executeCommand(`mkdir -p ${shellQuote(directory)}`, root, undefined, 30);
     await sandbox.fs.uploadFile(Buffer.from(input.content), fsTarget);
     await upsertProjectFile(project.id, relative, input.content);
@@ -545,14 +552,18 @@ export async function executeAgentTool(
     const fsTarget = remotePath(fsRoot, relative);
     const buffer = await sandbox.fs.downloadFile(fsTarget);
     if (buffer.length > 1_000_000) throw new Error("This file is too large for a targeted text edit.");
-    const edited = applyExactEdit(buffer.toString("utf8"), input.oldText, input.newText, input.replaceAll);
+    const before = buffer.toString("utf8");
+    const edited = applyExactEdit(before, input.oldText, input.newText, input.replaceAll);
+    if (enforceBuildStack) {
+      assertBuildModeFileChangeAllowed({ path: relative, before, after: edited.content, cloudEnabled });
+    }
     await sandbox.fs.uploadFile(Buffer.from(edited.content), fsTarget);
     await upsertProjectFile(project.id, relative, edited.content);
     return {
       output: `Replaced ${edited.matches} exact ${edited.matches === 1 ? "match" : "matches"} in ${relative}`,
       summary: `Edited ${relative}`,
       changedPaths: [relative],
-      fileChanges: [fileChangeSnapshot(relative, buffer.toString("utf8"), edited.content)],
+      fileChanges: [fileChangeSnapshot(relative, before, edited.content)],
     };
   }
 
@@ -591,6 +602,9 @@ export async function executeAgentTool(
     const sourcePath = remotePath(fsRoot, source);
     const destinationPath = remotePath(fsRoot, destination);
     const content = textFileContent(await sandbox.fs.downloadFile(sourcePath), source);
+    if (enforceBuildStack) {
+      assertBuildModeFileChangeAllowed({ path: destination, before: content, after: content, cloudEnabled });
+    }
     const destinationCheck = await sandbox.process.executeCommand(
       `test -e ${shellQuote(remotePath(root, destination))}`,
       root,
@@ -648,6 +662,9 @@ export async function executeAgentTool(
         background: z.boolean().optional().default(false),
       })
       .parse(rawInput);
+    if (enforceBuildStack) {
+      assertBuildModeCommandAllowed(input.command, cloudEnabled);
+    }
     const directory = projectRelativePath(root, input.directory);
     if (input.background) {
       const sessionId = `cognix-${project.id.slice(0, 12)}`;

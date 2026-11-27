@@ -21,6 +21,7 @@ async function publishedProject() {
 describe("serving a published project on a custom hostname", () => {
   beforeEach(() => {
     globalThis.__cognixMemoryStore = {
+      repositoryCache: new Map(),
       projects: [],
       messages: [],
       files: [],
@@ -28,6 +29,9 @@ describe("serving a published project on a custom hostname", () => {
       domains: [],
       secrets: [],
       clouds: [],
+      skills: [],
+      githubConnections: [],
+      repositories: [],
     };
   });
 

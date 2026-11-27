@@ -1,10 +1,14 @@
 "use client";
 
-import { FileCode2, FileMinus2, FilePlus2, TriangleAlert } from "lucide-react";
-import { useMemo } from "react";
-import { buildDiffRows } from "@/lib/file-diff";
+import { type FileContents, parseDiffFromFile } from "@pierre/diffs";
+import { File, FileDiff, type FileDiffOptions, type FileOptions } from "@pierre/diffs/react";
+import { FileCode2, TriangleAlert } from "lucide-react";
+import { useMemo, useState } from "react";
 import type { FileChangeSnapshot, ProjectFile } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { diffsTheme, gitStatusFromChanges } from "./code/pierre";
+import { ProjectFileTree } from "./code/project-file-tree";
+import { ResizableSidebar } from "./code/resizable-sidebar";
 
 type ChangeDetailsProps = {
   changedPaths: string[];
@@ -15,9 +19,21 @@ type ChangeDetailsProps = {
   onOpenFile: (path: string) => void;
 };
 
-function fileName(path: string) {
-  return path.split("/").at(-1) ?? path;
-}
+type DiffStyle = "unified" | "split";
+
+const baseOptions = {
+  theme: diffsTheme,
+  themeType: "dark",
+  disableFileHeader: true,
+  overflow: "scroll",
+} as const;
+
+const diffOptions: Record<DiffStyle, FileDiffOptions<undefined, undefined>> = {
+  unified: { ...baseOptions, diffStyle: "unified", diffIndicators: "bars", lineDiffType: "word-alt", hunkSeparators: "line-info" },
+  split: { ...baseOptions, diffStyle: "split", diffIndicators: "bars", lineDiffType: "word-alt", hunkSeparators: "line-info" },
+};
+
+const fileOptions: FileOptions<undefined, undefined> = baseOptions;
 
 export function ChangeDetails({
   changedPaths,
@@ -27,76 +43,101 @@ export function ChangeDetails({
   onSelectPath,
   onOpenFile,
 }: ChangeDetailsProps) {
+  const [diffStyle, setDiffStyle] = useState<DiffStyle>("unified");
   const snapshot = fileChanges.find((change) => change.path === selectedPath) ?? null;
   const currentFile = files.find((file) => file.path === selectedPath) ?? null;
-  const before = snapshot?.before ?? "";
-  const after = snapshot ? (snapshot.after ?? "") : (currentFile?.content ?? "");
-  const rows = useMemo(() => buildDiffRows(before, after), [after, before]);
-  const additions = rows.filter((row) => row.kind === "added").length;
-  const removals = rows.filter((row) => row.kind === "removed").length;
+  const signature = changedPaths.join("\n");
+  const gitStatus = useMemo(() => {
+    const known = new Map(gitStatusFromChanges(fileChanges).map((entry) => [entry.path, entry]));
+    return signature.split("\n").filter(Boolean).map((path) => known.get(path) ?? { path, status: "modified" as const });
+  }, [fileChanges, signature]);
+
+  const fileDiff = useMemo(() => {
+    if (!snapshot) return null;
+    const oldFile: FileContents | null = snapshot.before === null ? null : { name: snapshot.path, contents: snapshot.before };
+    const newFile: FileContents | null = snapshot.after === null ? null : { name: snapshot.path, contents: snapshot.after };
+    if (!oldFile && !newFile) return null;
+    return parseDiffFromFile(oldFile, newFile);
+  }, [snapshot]);
+
+  const currentPath = currentFile?.path ?? "";
+  const currentText = currentFile?.content ?? null;
+  const currentContents = useMemo<FileContents | null>(
+    () => (currentText !== null ? { name: currentPath, contents: currentText } : null),
+    [currentPath, currentText],
+  );
+
+  const additions = fileDiff?.hunks.reduce((sum, hunk) => sum + hunk.additionLines, 0) ?? 0;
+  const removals = fileDiff?.hunks.reduce((sum, hunk) => sum + hunk.deletionLines, 0) ?? 0;
 
   return (
     <div className="change-details">
-      <aside className="change-file-list" aria-label="Edited files">
+      <ResizableSidebar storageKey="cognix:changed-files-width" className="change-file-list" aria-label="Edited files" handleLabel="Resize changed files list">
         <div className="change-file-list-heading">
           <strong>Changed files</strong>
-          <span>{changedPaths.length}</span>
+          <span className="tabular-nums">{changedPaths.length}</span>
         </div>
-        <div className="change-file-list-scroll">
-          {changedPaths.map((path) => {
-            const isNew = fileChanges.find((change) => change.path === path)?.before === null;
-            const isDeleted = fileChanges.find((change) => change.path === path)?.after === null;
-            return (
-              <button
-                key={path}
-                type="button"
-                className={cn("change-file-row", selectedPath === path && "is-active")}
-                onClick={() => onSelectPath(path)}
-                title={path}
-              >
-                {isDeleted
-                  ? <FileMinus2 className="size-3.5 text-rose-400" />
-                  : isNew
-                    ? <FilePlus2 className="size-3.5 text-emerald-400" />
-                    : <FileCode2 className="size-3.5 text-sky-400/80" />}
-                <span><strong>{fileName(path)}</strong><small>{path}</small></span>
-              </button>
-            );
-          })}
+        <div className="change-file-tree" style={{ position: "relative", flex: "1 1 0%", minHeight: 0 }}>
+          <ProjectFileTree
+            paths={changedPaths}
+            expandAll
+            selectedPath={selectedPath}
+            onSelectPath={onSelectPath}
+            gitStatus={gitStatus}
+            label="Changed files"
+          />
         </div>
-      </aside>
+      </ResizableSidebar>
 
-      <section className="diff-panel" aria-label={`Changes in ${selectedPath}`}>
+      <section className="diff-panel" aria-label={selectedPath ? `Changes in ${selectedPath}` : "File changes"}>
         <header className="diff-header">
           <div className="min-w-0">
             <strong title={selectedPath}>{selectedPath || "No changed file selected"}</strong>
-            {snapshot?.truncated ? <span className="diff-truncated"><TriangleAlert className="size-3" /> Large file diff was shortened</span> : null}
+            {snapshot?.truncated ? <span className="diff-truncated"><TriangleAlert className="size-3" aria-hidden="true" /> Large file diff was shortened</span> : null}
           </div>
           <div className="diff-header-actions">
-            {snapshot ? <span className="diff-stats"><b>+{additions}</b><i>-{removals}</i></span> : null}
-            {selectedPath && snapshot?.after !== null
+            {fileDiff ? <span className="diff-stats tabular-nums"><b>+{additions}</b><i>-{removals}</i></span> : null}
+            {fileDiff ? (
+              <div className="diff-style-toggle" role="group" aria-label="Diff layout">
+                {(["unified", "split"] as const).map((style) => (
+                  <button
+                    key={style}
+                    type="button"
+                    aria-pressed={diffStyle === style}
+                    className={cn(diffStyle === style && "is-active")}
+                    onClick={() => setDiffStyle(style)}
+                  >
+                    {style === "unified" ? "Unified" : "Split"}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {selectedPath && snapshot?.after !== null && currentFile
               ? <button type="button" onClick={() => onOpenFile(selectedPath)}>Open file</button>
               : null}
           </div>
         </header>
 
-        {!snapshot ? (
+        {!snapshot && selectedPath ? (
           <div className="diff-unavailable">
-            <FileCode2 className="size-5" />
+            <FileCode2 className="size-5" aria-hidden="true" />
             <strong>Original version unavailable</strong>
-            <p>This build predates file-change snapshots. The current file is shown below without a comparison.</p>
+            <p>This build predates file-change snapshots. The current file is shown without a comparison.</p>
           </div>
         ) : null}
 
-        <div className="diff-scroll" role="table" aria-label="File diff">
-          {rows.length ? rows.map((row, index) => (
-            <div key={`${row.kind}-${index}`} className={cn("diff-line", `is-${row.kind}`)} role="row">
-              <span className="diff-line-number" role="cell">{row.oldLine ?? ""}</span>
-              <span className="diff-line-number" role="cell">{row.newLine ?? ""}</span>
-              <span className="diff-sign" aria-hidden="true">{row.kind === "added" ? "+" : row.kind === "removed" ? "-" : " "}</span>
-              <code role="cell">{row.content || " "}</code>
+        <div className="diff-scroll" role="region" aria-label="File diff">
+          {fileDiff ? (
+            fileDiff.hunks.length
+              ? <FileDiff fileDiff={fileDiff} options={diffOptions[diffStyle]} />
+              : <div className="diff-empty">No textual changes in this file.</div>
+          ) : currentContents ? (
+            <File file={currentContents} options={fileOptions} />
+          ) : (
+            <div className="diff-empty">
+              {selectedPath ? "This file is not available in the current version." : "Select a changed file to see its diff."}
             </div>
-          )) : <div className="diff-empty">No textual changes to display.</div>}
+          )}
         </div>
       </section>
     </div>

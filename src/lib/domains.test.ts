@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   DomainRequestError,
   appHostnames,
+  appsDomain,
   createVerificationToken,
+  directPreviewUrl,
+  directPublishedUrl,
   dnsRecordsFor,
   domainSetup,
   domainTargets,
@@ -13,9 +16,14 @@ import {
   isCustomDomainRoutingEnabled,
   isPublicHostname,
   isPublicIpv4,
+  isReservedPublishSlug,
+  isTrustedEdgeQueryOrHeader,
   matchesRoutingRecord,
   matchesVerificationTxt,
   normalizeCustomHostname,
+  parseAppsHostname,
+  previewSlugForProjectId,
+  trustedEdgeHostname,
   verificationRecordName,
 } from "./domains";
 import type { DomainEnv } from "./domains";
@@ -25,6 +33,81 @@ const env = {
   COGNIX_DOMAIN_CNAME_TARGET: "apps.cognix.example.com",
   COGNIX_DOMAIN_IPV4: "203.0.113.10",
 } as DomainEnv;
+
+describe("edge worker host forwarding", () => {
+  const edgeEnv = { COGNIX_EDGE_SECRET: "s3cret-value" } as DomainEnv;
+  const headersWith = (values: Record<string, string>) => new Headers(values);
+
+  it("trusts the forwarded hostname only with the matching secret", () => {
+    expect(
+      trustedEdgeHostname(headersWith({ "x-cognix-edge-host": "IG.Raunak.co", "x-cognix-edge-secret": "s3cret-value" }), edgeEnv),
+    ).toBe("ig.raunak.co");
+    expect(
+      trustedEdgeHostname(headersWith({ "x-cognix-edge-host": "ig.raunak.co", "x-cognix-edge-secret": "wrong-value!" }), edgeEnv),
+    ).toBe("");
+    expect(trustedEdgeHostname(headersWith({ "x-cognix-edge-host": "ig.raunak.co" }), edgeEnv)).toBe("");
+  });
+
+  it("ignores the header entirely when no secret is configured", () => {
+    expect(
+      trustedEdgeHostname(headersWith({ "x-cognix-edge-host": "ig.raunak.co", "x-cognix-edge-secret": "" }), {} as DomainEnv),
+    ).toBe("");
+  });
+
+  it("validates Caddy ask requests via either header or secret query parameter", () => {
+    expect(
+      isTrustedEdgeQueryOrHeader(new Request("http://127.0.0.1:3005/api/edge/allow-domain?secret=s3cret-value&domain=a.co"), edgeEnv),
+    ).toBe(true);
+    expect(
+      isTrustedEdgeQueryOrHeader(new Request("http://127.0.0.1:3005/api/edge/allow-domain?secret=wrong&domain=a.co"), edgeEnv),
+    ).toBe(false);
+  });
+});
+
+describe("wildcard apps domain routing", () => {
+  const appsEnv = {
+    APP_BASE_URL: "https://curator.codes",
+    COGNIX_APPS_DOMAIN: "curatorsite.in",
+    COGNIX_DOMAIN_CNAME_TARGET: "edge.curatorsite.in",
+  } as DomainEnv;
+
+  it("generates Lovable-style random preview slugs for UUIDs and routes published <name>.curatorsite.in", () => {
+    const uuid = "d4ebb9ff-212e-307b-07e5-492181c82ba6";
+    const previewSlug = previewSlugForProjectId(uuid)!;
+    expect(previewSlug).toMatch(/^[a-z]+-[a-z]+-d4ebb9ff$/);
+
+    expect(appsDomain(appsEnv)).toBe("curatorsite.in");
+    expect(parseAppsHostname(`${previewSlug}.curatorsite.in`, appsEnv)).toEqual({
+      kind: "preview",
+      slug: previewSlug,
+      hex8: "d4ebb9ff",
+    });
+    expect(parseAppsHostname("notes-app.curatorsite.in", appsEnv)).toEqual({
+      kind: "published",
+      slug: "notes-app",
+    });
+    expect(parseAppsHostname("curatorsite.in", appsEnv)).toEqual({ kind: "root" });
+    expect(parseAppsHostname("www.curatorsite.in", appsEnv)).toEqual({ kind: "root" });
+    expect(parseAppsHostname("edge.curatorsite.in", appsEnv)).toEqual({ kind: "reserved", label: "edge" });
+    expect(parseAppsHostname("nested.sub.curatorsite.in", appsEnv)).toBeNull();
+
+    expect(isReservedPublishSlug("www")).toBe(true);
+    expect(isReservedPublishSlug("edge")).toBe(true);
+    expect(isReservedPublishSlug(previewSlug)).toBe(true);
+    expect(isReservedPublishSlug("notes-app")).toBe(false);
+
+    expect(isAppHostname("curator.codes", appsEnv)).toBe(true);
+    expect(isAppHostname("www.curator.codes", appsEnv)).toBe(true);
+    expect(isAppHostname("curatorsite.in", appsEnv)).toBe(false);
+    expect(isAppHostname("notes-app.curatorsite.in", appsEnv)).toBe(false);
+    expect(isAppHostname(`${previewSlug}.curatorsite.in`, appsEnv)).toBe(false);
+    expect(() => normalizeCustomHostname("notes-app.curatorsite.in", appsEnv)).toThrow(DomainRequestError);
+    expect(() => normalizeCustomHostname("curator.codes", appsEnv)).toThrow(DomainRequestError);
+    expect(directPreviewUrl(uuid, appsEnv)).toBe(`https://${previewSlug}.curatorsite.in`);
+    expect(directPublishedUrl("notes-app", appsEnv)).toBe("https://notes-app.curatorsite.in");
+    expect(directPublishedUrl("www", appsEnv)).toBeNull();
+  });
+});
 
 describe("hostname parsing", () => {
   it("reads the first forwarded host and drops the port", () => {

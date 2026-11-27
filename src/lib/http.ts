@@ -12,7 +12,7 @@ export function errorResponse(error: unknown) {
   // Errors that carry their own client status describe a request problem, not a server fault.
   if (error instanceof Error && "status" in error) {
     const status = Number((error as Error & { status: unknown }).status);
-    if (Number.isInteger(status) && status >= 400 && status < 500) {
+    if (Number.isInteger(status) && status >= 400 && status < 600) {
       return Response.json({ error: message }, { status });
     }
   }

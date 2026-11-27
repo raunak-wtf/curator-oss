@@ -1,0 +1,19 @@
+[Unit]
+Description=Cognix Next.js Builder Application
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cognix/app
+EnvironmentFile=/opt/cognix/app/.env.production
+Environment=NODE_ENV=production
+Environment=HOSTNAME=127.0.0.1
+Environment=PORT=3005
+ExecStart=/usr/bin/npm run start -- --hostname 127.0.0.1 --port 3005
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

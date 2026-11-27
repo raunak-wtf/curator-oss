@@ -2,7 +2,8 @@ import { z } from "zod";
 import { requireViewer } from "@/lib/auth0";
 import { runAgent } from "@/lib/ai/runner";
 import { errorResponse, notFound } from "@/lib/http";
-import { createMessage, getAttachment, getProject, listMessages, updateProject } from "@/lib/store";
+import { SKILLS_PER_PROMPT, skillReferences } from "@/lib/skills";
+import { createMessage, getAttachment, getProject, getSkillsByNames, listMessages, updateProject } from "@/lib/store";
 import type { AgentEvent, Attachment } from "@/lib/types";
 import { visualSelectionsSchema } from "@/lib/visual-edit";
 
@@ -41,10 +42,13 @@ export async function POST(request: Request, context: Context) {
           .optional()
           .default([]),
         visualSelections: visualSelectionsSchema.optional().default([]),
+        /** Security mode: "review" makes file changes and commands wait for the user's approval. */
+        approvalMode: z.enum(["auto", "review"]).optional().default("auto"),
       })
       .parse(await request.json());
 
     const history = await listMessages(project.id);
+    const skills = await getSkillsByNames(viewer.id, skillReferences(body.prompt).slice(0, SKILLS_PER_PROMPT));
     const requestedAttachmentIds = [...new Set(body.attachmentIds)];
     const resolvedAttachments = (
       await Promise.all(requestedAttachmentIds.map((id) => getAttachment(id, viewer.id)))
@@ -90,6 +94,8 @@ export async function POST(request: Request, context: Context) {
           history,
           attachments: resolvedAttachments,
           visualSelections: body.visualSelections,
+          skills,
+          approvalMode: body.approvalMode,
           emit,
         })
           .catch(async (error) => {

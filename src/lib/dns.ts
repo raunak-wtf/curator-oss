@@ -136,7 +136,8 @@ export async function verifyProjectDomains(projectId: string) {
 
 export const isDnsProviderConfigured = Boolean(process.env.CLOUDFLARE_API_TOKEN);
 
-const PROBE_TIMEOUT_MS = 8_000;
+const PROBE_TIMEOUT_MS = 20_000;
+const PROBE_RETRY_DELAYS_MS = [400, 1_200];
 
 export type ServingProbe = {
   ok: boolean;
@@ -157,27 +158,43 @@ async function fetchProbe(url: string) {
 }
 
 /**
- * Requests the Cognix probe path through the customer hostname. A different answer means DNS points at
- * the right edge, but the reverse proxy there (Traefik, Caddy, Vercel, …) has no route for this hostname.
+ * Requests the Cognix probe path through the customer hostname.
+ * Retries transient TLS handshake / timeout errors so On-Demand TLS (Caddy ACME HTTP-01) has time
+ * to finish issuing a brand-new Let's Encrypt certificate on the very first check.
  */
 export async function probeDomainServing(hostname: string, routingTarget: string | null): Promise<ServingProbe> {
   const expected = domainProbeBody(hostname);
   const target = routingTarget ?? "the Cognix server";
   const fixHosting = `Add ${hostname} as a domain of the Cognix app on your hosting platform (for example the app's domain list in Dokploy, Coolify, or Vercel, or a catch-all Host rule in Traefik/Caddy) and make sure it issues TLS for it, then check again.`;
 
-  try {
-    const https = await fetchProbe(`https://${hostname}${DOMAIN_PROBE_PATH}`);
-    if (https.status === 200 && https.body === expected) return { ok: true, transient: false, message: null };
-    const detail = https.body === "no available server"
+  let lastResponse: { status: number; body: string } | null = null;
+
+  for (let attempt = 0; attempt <= PROBE_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      const https = await fetchProbe(`https://${hostname}${DOMAIN_PROBE_PATH}`);
+      if (https.status === 200 && https.body === expected) {
+        return { ok: true, transient: false, message: null };
+      }
+      lastResponse = https;
+      // Retry 502/503/504 once or twice in case the edge proxy is reloading; non-5xx wrong origin fails fast.
+      if (https.status < 500) break;
+    } catch {
+      // First connection triggers On-Demand TLS certificate issuance (~6-12s); retry before falling back.
+    }
+    if (attempt < PROBE_RETRY_DELAYS_MS.length) {
+      await new Promise((resolve) => setTimeout(resolve, PROBE_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+
+  if (lastResponse) {
+    const detail = lastResponse.body === "no available server"
       ? "the reverse proxy answered “no available server” (HTTP 503)"
-      : `it answered HTTP ${https.status} from something other than Cognix`;
+      : `it answered HTTP ${lastResponse.status} from something other than Cognix`;
     return {
       ok: false,
       transient: false,
       message: `DNS is correct, but ${hostname} does not reach Cognix yet: ${detail}. ${fixHosting}`,
     };
-  } catch {
-    // HTTPS failed outright. Plain HTTP tells a missing certificate apart from an unreachable host.
   }
 
   try {
@@ -286,5 +303,44 @@ export async function removeDomainDns(domain: Pick<ProjectDomain, "hostname" | "
     if (!existing) continue;
     await cloudflareRequest(`/zones/${zone.id}/dns_records/${existing.id}`, { method: "DELETE" }).catch(() => null);
   }
+  return true;
+}
+
+/**
+ * Cloudflare for SaaS: the Cognix zone (COGNIX_CF_SAAS_ZONE_ID) accepts customer hostnames that CNAME to it,
+ * issues their TLS certificates, and runs the edge worker for them. Registering the hostname is the only
+ * per-domain step, and Cognix does it automatically when a domain is attached.
+ */
+export const isEdgeSaasConfigured = Boolean(process.env.CLOUDFLARE_API_TOKEN && process.env.COGNIX_CF_SAAS_ZONE_ID);
+
+type CustomHostname = { id: string; hostname: string; status: string; ssl?: { status?: string } };
+
+async function findCustomHostname(zoneId: string, hostname: string) {
+  const existing = await cloudflareRequest<CustomHostname[]>(
+    `/zones/${zoneId}/custom_hostnames?hostname=${encodeURIComponent(hostname)}`,
+  );
+  return existing?.find((item) => item.hostname === hostname) ?? null;
+}
+
+/** Creates the Cloudflare custom hostname if it does not exist yet. Returns false when SaaS is not configured. */
+export async function registerEdgeHostname(hostname: string) {
+  const zoneId = process.env.COGNIX_CF_SAAS_ZONE_ID;
+  if (!isEdgeSaasConfigured || !zoneId) return false;
+  if (await findCustomHostname(zoneId, hostname)) return true;
+  await cloudflareRequest(`/zones/${zoneId}/custom_hostnames`, {
+    method: "POST",
+    // HTTP validation completes on its own once the customer's CNAME points at the Cognix zone.
+    body: JSON.stringify({ hostname, ssl: { method: "http", type: "dv" } }),
+  });
+  return true;
+}
+
+/** Deletes the Cloudflare custom hostname. Failures are ignored so detaching always succeeds. */
+export async function removeEdgeHostname(hostname: string) {
+  const zoneId = process.env.COGNIX_CF_SAAS_ZONE_ID;
+  if (!isEdgeSaasConfigured || !zoneId) return false;
+  const existing = await findCustomHostname(zoneId, hostname).catch(() => null);
+  if (!existing) return false;
+  await cloudflareRequest(`/zones/${zoneId}/custom_hostnames/${existing.id}`, { method: "DELETE" }).catch(() => null);
   return true;
 }

@@ -27,6 +27,13 @@ describe("publishing URL construction", () => {
     });
     expect(requestOrigin(request)).toBe("https://apps.example.com");
   });
+
+  it("prefers direct wildcard subdomains when COGNIX_APPS_DOMAIN is configured", () => {
+    const request = new Request("http://localhost:3000/api/projects/project-1/publish");
+    expect(publishedAppUrl(request, "notes-app", { COGNIX_APPS_DOMAIN: "curatorsite.in" })).toBe(
+      "https://notes-app.curatorsite.in",
+    );
+  });
 });
 
 describe("published app deep links", () => {

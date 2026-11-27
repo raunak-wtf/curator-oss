@@ -1,55 +1,74 @@
 "use client";
 
 import {
-  ArrowLeft,
   ArrowUp,
+  AtSign,
   Check,
   ChevronDown,
-  Code2,
   Copy,
+  Database,
   Download,
   ExternalLink,
   FileCode2,
   FolderTree,
-  KeyRound,
   Globe2,
   History,
-  Home,
   ImagePlus,
-  LoaderCircle,
+  Mail,
   MessageSquare,
+  Mic,
   Monitor,
   MousePointer2,
-  Paperclip,
+  PanelRightClose,
+  PanelRightOpen,
   Play,
+  Plus,
   RefreshCw,
   RotateCcw,
   Rocket,
   Search,
   Share2,
-  Sparkles,
+  ShieldCheck,
   Smartphone,
   Tablet,
   TerminalSquare,
   X,
 } from "lucide-react";
-import Link from "next/link";
 import Image from "next/image";
-import { Group, Panel, Separator } from "react-resizable-panels";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import type { RefObject } from "react";
+import { useRouter } from "next/navigation";
+import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 import { hasPersistedPrompt, stripInitialBuildParams } from "@/lib/initial-build";
-import { CustomDomainsPanel } from "@/components/custom-domains-panel";
+import { HomeSidebar, SidebarMobileTrigger } from "@/components/home-sidebar";
+import { GitHubMark } from "@/components/github-mark";
+import { AgentQuestionCard, CloudRequestCard } from "@/components/agent-question-card";
+import { CLOUD_DECLINED_PROMPT, CLOUD_ENABLED_PROMPT, formatAnswers, questionRequestFor } from "@/lib/agent-questions";
+import { CLOUD_FEATURES } from "@/lib/cloud-features";
+import { LoadingState, PixelLoader } from "@/components/pixel-loader";
+import { useSkillCommands } from "@/components/skills/use-skill-commands";
+import { useVoiceInput } from "@/components/use-voice-input";
+import { CloudPanel } from "@/components/workspace/cloud-panel";
+import { GitPanel, type BuildCheckpoint } from "@/components/workspace/git-panel";
+import { TerminalPanel, type TerminalEntry } from "@/components/workspace/terminal-panel";
+import { SECURITY_TOOL_ORDER, SECURITY_TOOL_TABS, TOOL_ORDER, TOOL_TABS, ToolLauncher, type ToolTab } from "@/components/workspace/tool-launcher";
 import { SecretsPanel } from "@/components/secrets-panel";
+import { ApprovalCard } from "@/components/security/approval-card";
+import { ApprovalModeMenu } from "@/components/security/approval-mode-menu";
+import { PullRequestCard, pullRequestDecisionFor } from "@/components/security/pull-request-card";
+import { RunChips, type RunChipActivity } from "@/components/security/run-chips";
 import type {
+  AgentApprovalRequest,
   AgentEvent,
   AgentRunActivity,
+  ApprovalMode,
   Attachment,
   FileChangeSnapshot,
+  GitHubCommitInfo,
   Message,
   Project,
   ProjectFile,
+  TerminalCommand,
   Viewer,
   VisualElementSelection,
 } from "@/lib/types";
@@ -64,22 +83,22 @@ import {
   visualElementSelectionSchema,
   visualSelectionLabel,
 } from "@/lib/visual-edit";
-import { BrandMark } from "./brand-mark";
 import { ChangeDetails } from "./change-details";
 import { CodeWorkbench } from "./code-workbench";
 import { AssistantMessageContent, UserMessageContent } from "./message-content";
 import { PendingUpload } from "./pending-upload";
 import { PreviewPlaceholder } from "./preview-placeholder";
-import { UserAvatar } from "./user-avatar";
 
 type Activity = {
   id: string;
   name: string;
   label: string;
   status: "running" | "done";
+  target?: string;
 };
 
 type PreviewDevice = "phone" | "tablet" | "desktop";
+type WorkspaceTab = "preview" | ToolTab | "launcher";
 
 type WorkspaceClientProps = {
   initialProject: Project;
@@ -89,13 +108,56 @@ type WorkspaceClientProps = {
   initialNow: string;
   initialPrompt?: string;
   initialAttachmentIds?: string[];
+  projects: Project[];
+  initialCloudEnabled: boolean;
+  /** Tab to open first, for example after returning from GitHub. */
+  initialTab?: "git";
+  /** Result code from the GitHub OAuth callback. */
+  githubResult?: string;
+  /** Security mode: actions a running agent is still waiting on, so a reloaded page can answer them. */
+  initialApproval?: AgentApprovalRequest | null;
+  /** Security mode: the Auto / Request review choice made on the home page for the first run. */
+  initialApprovalMode?: ApprovalMode;
+  /** Wildcard apps domain (e.g. `apps.curatorsite.in`) when direct subdomain publishing is enabled. */
+  appsDomain?: string | null;
+  /** Idle minutes before a published sandbox scales to zero (0 = runs continuously). */
+  publishedAutoStopMinutes?: number;
+};
+
+const GITHUB_RESULT_MESSAGES: Record<string, { kind: "success" | "error" | "message"; text: string }> = {
+  connected: { kind: "success", text: "GitHub connected. Choose a repository for this project." },
+  installed: { kind: "success", text: "Cognix is installed on your GitHub account. Choose a repository for this project." },
+  cancelled: { kind: "message", text: "GitHub connection cancelled." },
+  denied: { kind: "error", text: "GitHub didn't grant repository access. Connect again and approve the requested access." },
+  error: { kind: "error", text: "GitHub couldn't be connected. Try connecting again." },
+  not_configured: { kind: "error", text: "GitHub isn't set up on this Cognix server yet." },
+  unavailable: { kind: "error", text: "Cognix couldn't reach GitHub. Try connecting again." },
 };
 
 const suggestions = ["Add a dashboard", "Create a settings page", "Improve mobile layout"];
+const securitySuggestions = ["Run a full security review", "Fix the critical findings", "Check dependencies for known vulnerabilities"];
+
+/** Tools whose result can be shown in the workspace pane, and where. */
+const FILE_TOOLS = new Set(["read_file", "write_file", "edit_file", "move_file", "delete_file"]);
+const BROWSE_TOOLS = new Set(["list_files", "find_files", "search_files"]);
+const SHELL_TOOLS = new Set(["run_command", "get_process_logs", "list_processes", "stop_process"]);
+
+/** The file, command, or query a tool call acted on. Mirrors the server's activity target. */
+function activityTarget(name: string, input: unknown): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const value = input as Record<string, unknown>;
+  const pick = (...keys: string[]) => keys.map((key) => value[key]).find((item): item is string => typeof item === "string" && item.length > 0);
+  if (name === "run_command") return pick("command")?.slice(0, 300);
+  if (name === "move_file") return pick("destination", "source");
+  if (name === "search_files" || name === "web_search") return pick("query")?.slice(0, 200);
+  if (name === "fetch_url") return pick("url")?.slice(0, 300);
+  if (name === "neon_database" || name === "resend_email") return pick("action", "name", "sql")?.slice(0, 200);
+  return pick("path", "directory")?.slice(0, 300);
+}
 const acceptedUploads = "image/*,.pdf,.md,.txt,.json";
 // react-resizable-panels wraps children in a div with `overflow: auto`. Left as-is, that wrapper scrolls the
 // whole chat panel (composer included) once messages overflow. Make it a fixed-height, non-scrolling column.
-const WORKSPACE_PANEL_STYLE = { display: "flex", flexDirection: "column", height: "100%", minHeight: 0, overflow: "hidden" } as const;
+const WORKSPACE_PANEL_STYLE = { display: "flex", flexDirection: "column", height: "100%", minHeight: 0, overflow: "clip" } as const;
 
 type MessageImage = { key: string; name: string; url: string };
 type ComposerUpload = {
@@ -107,6 +169,10 @@ type ComposerUpload = {
 
 function subscribeToSiteOrigin() {
   return () => undefined;
+}
+
+function prefersReducedMotion() {
+  return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 function imageAttachmentsFor(message: Message): MessageImage[] {
@@ -188,6 +254,66 @@ function attachmentIdsFor(message: Message) {
     : [];
 }
 
+function commandsFor(message: Message): TerminalCommand[] {
+  if (!Array.isArray(message.metadata.commands)) return [];
+  return message.metadata.commands.filter((item): item is TerminalCommand => {
+    if (!item || typeof item !== "object") return false;
+    const value = item as Partial<TerminalCommand>;
+    return typeof value.id === "string"
+      && typeof value.command === "string"
+      && typeof value.output === "string"
+      && (value.source === "agent" || value.source === "system")
+      && typeof value.durationMs === "number";
+  }).map((item) => ({
+    ...item,
+    background: item.background === true,
+    failed: item.failed === true,
+    exitCode: typeof item.exitCode === "number" ? item.exitCode : null,
+    startedAt: typeof item.startedAt === "string" ? item.startedAt : message.createdAt,
+  }));
+}
+
+function GitHubCommitNote({ info, onOpen }: { info: unknown; onOpen: () => void }) {
+  if (!info || typeof info !== "object") return null;
+  const value = info as Partial<GitHubCommitInfo>;
+  if (value.status === "committed" && typeof value.sha === "string" && typeof value.url === "string") {
+    return (
+      <p className="mt-2.5 flex items-center gap-1.5 text-[11px] text-white/50">
+        <GitHubMark className="size-3" /> Committed{" "}
+        <a href={value.url} target="_blank" rel="noreferrer" className="font-mono text-white/75 hover:text-white">
+          {value.sha.slice(0, 7)}
+        </a>{" "}
+        to GitHub
+      </p>
+    );
+  }
+  if (value.status === "diverged" && typeof value.url === "string") {
+    return (
+      <p className="mt-2.5 text-[11px] leading-5 text-amber-200/90">
+        GitHub had changes too, so Cognix pushed to{" "}
+        <a href={value.url} target="_blank" rel="noreferrer" className="font-mono text-white/80 hover:text-white">
+          {value.branch ?? "cognix-sync"}
+        </a>
+        .{" "}
+        <button type="button" onClick={onOpen} className="font-medium text-white/80 underline-offset-2 hover:underline">
+          Resolve in Git Control
+        </button>
+      </p>
+    );
+  }
+  if (value.status === "error" && typeof value.message === "string") {
+    return (
+      <p className="mt-2.5 text-[11px] leading-5 text-amber-200/90">
+        GitHub commit didn&apos;t go through: {value.message}{" "}
+        <button type="button" onClick={onOpen} className="font-medium text-white/80 underline-offset-2 hover:underline">
+          Open Git Control
+        </button>
+      </p>
+    );
+  }
+  return null;
+}
+
 function runActivityFor(message: Message): AgentRunActivity[] {
   if (!Array.isArray(message.metadata.activity)) return [];
   return message.metadata.activity.filter((item): item is AgentRunActivity => {
@@ -208,12 +334,14 @@ function formatDuration(durationMs: number) {
 }
 
 function ActivityIcon({ name, running }: { name: string; running: boolean }) {
-  if (running) return <LoaderCircle className="size-3.5 animate-spin" />;
+  if (running) return <PixelLoader />;
   if (name === "read_attachment") return <ImagePlus className="size-3.5" />;
   if (name === "run_command") return <TerminalSquare className="size-3.5" />;
   if (name === "list_files" || name === "find_files") return <FolderTree className="size-3.5" />;
   if (name === "search_files") return <Search className="size-3.5" />;
   if (name === "web_search" || name === "fetch_url") return <Globe2 className="size-3.5" />;
+  if (name === "neon_database") return <Database className="size-3.5" />;
+  if (name === "resend_email") return <Mail className="size-3.5" />;
   if (name === "get_preview_url" || name === "inspect_preview") return <Play className="size-3.5" />;
   return <FileCode2 className="size-3.5" />;
 }
@@ -250,172 +378,6 @@ function PreviewDeviceIcon({ device }: { device: PreviewDevice }) {
   return <Monitor className="size-3.5" />;
 }
 
-type PublishDialogProps = {
-  open: boolean;
-  anchorRef: RefObject<HTMLButtonElement | null>;
-  project: Project;
-  slug: string;
-  publishedUrl: string;
-  publishBaseLabel: string;
-  canPublish: boolean;
-  publishing: boolean;
-  domainRefreshKey: number;
-  onSlugChange: (slug: string) => void;
-  onClose: () => void;
-  onPublish: () => void;
-  onUnpublish: () => void;
-};
-
-function PublishDialog({
-  open,
-  anchorRef,
-  project,
-  slug,
-  publishedUrl,
-  publishBaseLabel,
-  canPublish,
-  publishing,
-  domainRefreshKey,
-  onSlugChange,
-  onClose,
-  onPublish,
-  onUnpublish,
-}: PublishDialogProps) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
-  useLayoutEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    if (open && !dialog.open) dialog.showModal();
-    if (!open && dialog.open) dialog.close();
-    if (!open) return;
-
-    const placeBelowPublishButton = () => {
-      const anchor = anchorRef.current;
-      if (!anchor || !dialog.open) return;
-      const anchorRect = anchor.getBoundingClientRect();
-      const viewportWidth = window.innerWidth;
-      const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
-      const gutter = 10;
-      const gap = 8;
-      const dialogWidth = dialog.offsetWidth;
-      const left = Math.min(
-        Math.max(gutter, anchorRect.right - dialogWidth),
-        Math.max(gutter, viewportWidth - dialogWidth - gutter),
-      );
-      const top = anchorRect.bottom + gap;
-      dialog.style.left = `${left}px`;
-      dialog.style.top = `${top}px`;
-      dialog.style.maxHeight = `${Math.max(180, viewportHeight - top - gutter)}px`;
-    };
-
-    placeBelowPublishButton();
-    window.addEventListener("resize", placeBelowPublishButton);
-    window.visualViewport?.addEventListener("resize", placeBelowPublishButton);
-    return () => {
-      window.removeEventListener("resize", placeBelowPublishButton);
-      window.visualViewport?.removeEventListener("resize", placeBelowPublishButton);
-    };
-  }, [anchorRef, open]);
-
-  return (
-    <dialog
-      ref={dialogRef}
-      className="publish-dialog"
-      onCancel={(event) => {
-        if (publishing) event.preventDefault();
-        else onClose();
-      }}
-      onClose={onClose}
-    >
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          onPublish();
-        }}
-      >
-        <header>
-          <div>
-            <span className="publish-dialog-icon"><Rocket className="size-4" /></span>
-            <div><strong>{project.publishedAt ? "Manage publication" : "Publish this app"}</strong><p>Create a stable public address for the latest production build.</p></div>
-          </div>
-          <button type="button" aria-label="Close publishing dialog" onClick={onClose} disabled={publishing}><X className="size-4" /></button>
-        </header>
-
-        <label className="publish-slug-field">
-          <span>Public address</span>
-          <div>
-            <small title={publishBaseLabel}>{publishBaseLabel}</small>
-            <input
-              autoFocus
-              value={slug}
-              onChange={(event) => onSlugChange(
-                event.target.value
-                  .toLowerCase()
-                  .replace(/[^a-z0-9-]/g, "")
-                  .replace(/-+/g, "-")
-                  .replace(/^-+/g, ""),
-              )}
-              minLength={3}
-              maxLength={48}
-              pattern={"[a-z0-9][a-z0-9\\-]*[a-z0-9]"}
-              placeholder="my-app"
-              disabled={publishing}
-              required
-            />
-          </div>
-          <small>3–48 lowercase letters, numbers, or hyphens.</small>
-        </label>
-
-        <div className="publish-runtime-note">
-          <History className="size-4" />
-          <div>
-            <strong>Runs continuously</strong>
-            <p>Publishing creates an isolated production build and disables Daytona auto-stop. This can consume sandbox runtime until you unpublish.</p>
-          </div>
-        </div>
-
-        {open ? (
-          <CustomDomainsPanel
-            projectId={project.id}
-            published={Boolean(project.publishedAt)}
-            disabled={publishing}
-            refreshKey={domainRefreshKey}
-          />
-        ) : null}
-
-        {publishedUrl && project.publishedAt ? (
-          <div className="published-url-row">
-            <span title={publishedUrl}>{publishedUrl}</span>
-            <button
-              type="button"
-              onClick={() => {
-                void navigator.clipboard.writeText(publishedUrl);
-                toast.success("Published URL copied.");
-              }}
-            >
-              <Copy className="size-3.5" /> Copy
-            </button>
-            <a href={publishedUrl} target="_blank" rel="noreferrer"><ExternalLink className="size-3.5" /> Open</a>
-          </div>
-        ) : null}
-
-        <footer>
-          {project.publishedAt ? (
-            <button type="button" className="unpublish-button" onClick={onUnpublish} disabled={publishing}>Unpublish</button>
-          ) : <span />}
-          <div>
-            <button type="button" onClick={onClose} disabled={publishing}>Cancel</button>
-            <button type="submit" className="publish-confirm-button" disabled={publishing || !canPublish}>
-              {publishing ? <LoaderCircle className="size-3.5 animate-spin" /> : <Rocket className="size-3.5" />}
-              {publishing ? "Building production…" : project.publishedAt ? "Update publication" : "Publish"}
-            </button>
-          </div>
-        </footer>
-      </form>
-    </dialog>
-  );
-}
-
 function assistantContent(message: Message) {
   if (message.metadata.error !== true) return message.content;
   if (/controller is already closed/i.test(message.content)) {
@@ -441,18 +403,42 @@ export function WorkspaceClient({
   initialNow,
   initialPrompt,
   initialAttachmentIds = [],
+  projects,
+  initialCloudEnabled,
+  initialTab,
+  githubResult,
+  initialApproval = null,
+  initialApprovalMode,
+  appsDomain = null,
+  publishedAutoStopMinutes = 0,
 }: WorkspaceClientProps) {
+  const router = useRouter();
+  // Security mode: no preview or publishing, Cloud is only Secrets, and the tool pane starts collapsed.
+  const security = initialProject.mode === "security";
+  // Security mode opens with only the chat; the pane starts collapsed unless a tab was asked for.
+  const startCollapsed = security && !initialTab;
+  const workbenchPanelRef = usePanelRef();
+  const [paneOpen, setPaneOpen] = useState(!security || Boolean(initialTab));
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>(initialApprovalMode ?? "auto");
+  const [pendingApproval, setPendingApproval] = useState<AgentApprovalRequest | null>(initialApproval);
+  const [pullRequestDecisions, setPullRequestDecisions] = useState<Record<string, ReturnType<typeof pullRequestDecisionFor>>>({});
+  const [cloudEnabled, setCloudEnabled] = useState(initialCloudEnabled);
+  const [cloudBusy, setCloudBusy] = useState(false);
+  const [cloudRequestError, setCloudRequestError] = useState<string | null>(null);
   const [project, setProject] = useState(initialProject);
   const [messages, setMessages] = useState(initialMessages);
   const [files, setFiles] = useState(initialFiles);
-  const [mode, setMode] = useState<"preview" | "code" | "details" | "secrets">("preview");
+  const [openTabs, setOpenTabs] = useState<ToolTab[]>(() => (initialTab ? [initialTab] : []));
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>(initialTab ?? (security ? "launcher" : "preview"));
+  const [lastTab, setLastTab] = useState<"preview" | ToolTab>(initialTab ?? "preview");
   const [selectedCodePath, setSelectedCodePath] = useState(initialFiles[0]?.path ?? "");
   const [detailsMessage, setDetailsMessage] = useState<Message | null>(null);
   const [detailsPath, setDetailsPath] = useState("");
-  const [detailsReturnMode, setDetailsReturnMode] = useState<"preview" | "code">("preview");
+  const [liveCommands, setLiveCommands] = useState<TerminalEntry[]>([]);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [previewDevice, setPreviewDevice] = useState<PreviewDevice>("desktop");
   const [previewRevision, setPreviewRevision] = useState(0);
-  const [isPreviewReconnecting, setIsPreviewReconnecting] = useState(Boolean(initialProject.sandboxId));
+  const [isPreviewReconnecting, setIsPreviewReconnecting] = useState(Boolean(initialProject.sandboxId) && !security);
   const [visualEditEnabled, setVisualEditEnabled] = useState(false);
   const [visualEditConnecting, setVisualEditConnecting] = useState(false);
   const [visualBridgeReady, setVisualBridgeReady] = useState(false);
@@ -461,13 +447,22 @@ export function WorkspaceClient({
   const [uploads, setUploads] = useState<ComposerUpload[]>([]);
   const [isDraggingUpload, setIsDraggingUpload] = useState(false);
   const [isBuilding, setIsBuilding] = useState(false);
+  // Mirror of isBuilding readable inside async callbacks without stale closures.
+  const isBuildingRef = useRef(isBuilding);
+  // Timer that reloads the conversation after an approval when the live stream has already ended.
+  const continueWatchRef = useRef<number | null>(null);
   const [restoringMessageId, setRestoringMessageId] = useState<string | null>(null);
-  const [publishDialogOpen, setPublishDialogOpen] = useState(false);
+  const [cloudFocusRequest, setCloudFocusRequest] = useState(0);
+  const [githubRefreshKey, setGithubRefreshKey] = useState(0);
   const [publishSlug, setPublishSlug] = useState(
     initialProject.publishSlug ?? publishSlugFromTitle(initialProject.title),
   );
   const [publishedUrl, setPublishedUrl] = useState(
-    initialProject.publishSlug ? `/publish/${initialProject.publishSlug}` : "",
+    initialProject.publishSlug
+      ? appsDomain
+        ? `https://${initialProject.publishSlug}.${appsDomain}`
+        : `/publish/${initialProject.publishSlug}`
+      : "",
   );
   const siteOrigin = useSyncExternalStore(
     subscribeToSiteOrigin,
@@ -481,9 +476,71 @@ export function WorkspaceClient({
   const [relativeNow, setRelativeNow] = useState(() => new Date(initialNow).getTime());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const previewFrameRef = useRef<HTMLIFrameElement>(null);
-  const publishButtonRef = useRef<HTMLButtonElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  const chatPinnedRef = useRef(true);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const startedInitialPrompt = useRef(false);
+  const skillCommands = useSkillCommands({ prompt, setPrompt, textareaRef: composerRef, signedIn: true });
+  const voice = useVoiceInput((transcript) => setPrompt((current) => (current ? `${current} ${transcript}` : transcript)));
+  const tabRefs = useRef(new Map<string, HTMLButtonElement>());
+
+  function showTab(tab: WorkspaceTab) {
+    setActiveTab(tab);
+    if (tab !== "launcher") setLastTab(tab);
+  }
+
+  /** Security mode: opens the collapsed tool pane at a comfortable width. */
+  function expandPane() {
+    if (!security) return;
+    const panel = workbenchPanelRef.current;
+    if (panel?.isCollapsed()) panel.resize(isCompact ? "50%" : "55%");
+    setPaneOpen(true);
+  }
+
+  function collapsePane() {
+    workbenchPanelRef.current?.collapse();
+    setPaneOpen(false);
+  }
+
+  function openTab(tab: ToolTab) {
+    setOpenTabs((current) => (current.includes(tab) ? current : [...current, tab]));
+    showTab(tab);
+    expandPane();
+  }
+
+  function closeTab(tab: ToolTab) {
+    const index = openTabs.indexOf(tab);
+    const remaining = openTabs.filter((item) => item !== tab);
+    setOpenTabs(remaining);
+    if (tab === "git") setDetailsMessage(null);
+    if (activeTab === tab || lastTab === tab) {
+      const fallback: "preview" | "launcher" = security ? "launcher" : "preview";
+      const next: WorkspaceTab = remaining[index - 1] ?? remaining[index] ?? fallback;
+      if (activeTab === tab) showTab(next);
+      else setLastTab(remaining[index - 1] ?? remaining[index] ?? "preview");
+      requestAnimationFrame(() => tabRefs.current.get(next)?.focus());
+    }
+  }
+
+  function onTabKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, tab: "preview" | ToolTab) {
+    const order: ("preview" | ToolTab)[] = security ? [...openTabs] : ["preview", ...openTabs];
+    const index = order.indexOf(tab);
+    let next: "preview" | ToolTab | undefined;
+    if (event.key === "ArrowRight") next = order[(index + 1) % order.length];
+    else if (event.key === "ArrowLeft") next = order[(index - 1 + order.length) % order.length];
+    else if (event.key === "Home") next = order[0];
+    else if (event.key === "End") next = order.at(-1);
+    else if ((event.key === "Delete" || event.key === "Backspace") && tab !== "preview") {
+      event.preventDefault();
+      closeTab(tab);
+      return;
+    }
+    if (!next) return;
+    event.preventDefault();
+    showTab(next);
+    tabRefs.current.get(next)?.focus();
+  }
 
   function addUploads(incoming: File[]) {
     const valid: File[] = [];
@@ -535,12 +592,42 @@ export function WorkspaceClient({
     return () => window.clearInterval(interval);
   }, []);
 
+  // Stop following a run's server-side continuation when the workspace unmounts.
+  useEffect(() => () => {
+    if (continueWatchRef.current) window.clearTimeout(continueWatchRef.current);
+  }, []);
+
+  // Keep the isBuilding ref in step for async callbacks (the approval watcher) that read it later.
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: isBuilding ? "smooth" : "auto" });
+    isBuildingRef.current = isBuilding;
+  }, [isBuilding]);
+
+  // Security mode: restore this project's Auto / Request review choice, unless the home page just chose one.
+  useEffect(() => {
+    if (!security) return;
+    try {
+      if (initialApprovalMode) {
+        window.localStorage.setItem(`cognix:approval-mode:${initialProject.id}`, initialApprovalMode);
+        return;
+      }
+      const saved = window.localStorage.getItem(`cognix:approval-mode:${initialProject.id}`);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- reads a browser-only preference after hydration
+      if (saved === "review" || saved === "auto") setApprovalMode(saved);
+    } catch {
+      // Blocked storage: keep the default.
+    }
+  }, [initialApprovalMode, initialProject.id, security]);
+
+  // Follow new messages only while the reader is at the bottom. Scrolls the chat list itself:
+  // scrollIntoView would also scroll every ancestor and shift the whole workspace off screen.
+  useEffect(() => {
+    const scroller = chatScrollRef.current;
+    if (!scroller || !chatPinnedRef.current) return;
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior: isBuilding && !prefersReducedMotion() ? "smooth" : "auto" });
   }, [messages, activities, isBuilding]);
 
   useEffect(() => {
-    if (!initialProject.sandboxId) return;
+    if (!initialProject.sandboxId || security) return;
     let cancelled = false;
 
     const wait = (delayMs: number) => new Promise((resolve) => window.setTimeout(resolve, delayMs));
@@ -572,16 +659,19 @@ export function WorkspaceClient({
     return () => {
       cancelled = true;
     };
-  }, [initialProject.id, initialProject.sandboxId]);
+  }, [initialProject.id, initialProject.sandboxId, security]);
 
   const currentPreviewUrl = project.previewUrl;
   const canPublish = Boolean(project.sandboxId || currentPreviewUrl);
   const resolvedPublishedUrl = publishedUrl && siteOrigin
     ? new URL(publishedUrl, siteOrigin).toString()
     : publishedUrl;
-  const publishBaseLabel = siteOrigin
-    ? `${new URL(siteOrigin).host}/publish/`
-    : "/publish/";
+  const publishBaseLabel = appsDomain
+    ? "https://"
+    : siteOrigin
+      ? `${new URL(siteOrigin).host}/publish/`
+      : "/publish/";
+  const publishDomainSuffix = appsDomain ? `.${appsDomain}` : undefined;
   const projectHost = useMemo(() => {
     if (!currentPreviewUrl) return "Preview will appear here";
     try { return new URL(currentPreviewUrl).host; } catch { return currentPreviewUrl; }
@@ -659,7 +749,8 @@ export function WorkspaceClient({
     if (!currentPreviewUrl || visualEditConnecting) return;
 
     setVisualEditConnecting(true);
-    setMode("preview");
+    setActiveTab("preview");
+    setLastTab("preview");
     try {
       const response = await fetch(`/api/projects/${project.id}/visual-edit`, { method: "POST" });
       const payload = await response.json();
@@ -684,13 +775,13 @@ export function WorkspaceClient({
       if (event.key.toLowerCase() !== "s" || event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target;
       if (target instanceof HTMLElement && target.matches("input, textarea, select, [contenteditable='true']")) return;
-      if (mode !== "preview" || !currentPreviewUrl) return;
+      if (activeTab !== "preview" || !currentPreviewUrl || security) return;
       event.preventDefault();
       void toggleVisualEdit();
     }
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [currentPreviewUrl, mode, toggleVisualEdit]);
+  }, [activeTab, currentPreviewUrl, security, toggleVisualEdit]);
 
   useEffect(() => {
     if (!visualEditEnabled || visualEditConnecting || visualBridgeReady) return;
@@ -724,6 +815,13 @@ export function WorkspaceClient({
       setIsBuilding(true);
       setProject((current) => ({ ...current, status: "building" }));
       setPrompt("");
+      // A new run starts: drop any approval left over from a previous (possibly disconnected) run, and stop
+      // following an earlier run's server-side continuation.
+      setPendingApproval(null);
+      if (continueWatchRef.current) {
+        window.clearTimeout(continueWatchRef.current);
+        continueWatchRef.current = null;
+      }
       setActivities([{ id: "status", name: "status", label: "Preparing your build", status: "running" }]);
 
       const userMessage: Message = {
@@ -760,7 +858,12 @@ export function WorkspaceClient({
         const response = await fetch(`/api/projects/${project.id}/agent`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt: cleanPrompt, attachmentIds, visualSelections: selectedElements }),
+          body: JSON.stringify({
+            prompt: cleanPrompt,
+            attachmentIds,
+            visualSelections: selectedElements,
+            ...(security ? { approvalMode } : {}),
+          }),
         });
         if (!response.ok || !response.body) {
           const payload = await response.json();
@@ -792,13 +895,37 @@ export function WorkspaceClient({
           if (event.type === "tool_start") {
             setActivities((current) => [
               ...current.map((item) => ({ ...item, status: "done" as const })),
-              { id: event.id, name: event.name, label: event.name.replaceAll("_", " "), status: "running" },
+              { id: event.id, name: event.name, label: event.name.replaceAll("_", " "), status: "running", target: activityTarget(event.name, event.input) },
             ]);
           }
+          if (event.type === "approval_request") setPendingApproval(event.approval);
+          if (event.type === "approval_resolved") setPendingApproval((current) => (current?.id === event.id ? null : current));
           if (event.type === "tool_result") {
             setActivities((current) =>
               current.map((item) => item.id === event.id ? { ...item, label: event.summary, status: "done" } : item),
             );
+          }
+          if (event.type === "command_start") {
+            setLiveCommands((current) => [
+              ...current,
+              {
+                id: event.id,
+                command: event.command,
+                source: event.source,
+                background: event.background,
+                exitCode: null,
+                output: "",
+                failed: false,
+                startedAt: new Date().toISOString(),
+                durationMs: 0,
+                running: true,
+              },
+            ]);
+          }
+          if (event.type === "command_end") {
+            setLiveCommands((current) => current.map((item) => item.id === event.id
+              ? { ...item, exitCode: event.exitCode, output: event.output, failed: event.failed, durationMs: event.durationMs, running: false }
+              : item));
           }
           if (event.type === "attachment_start") {
             setActivities((current) => [
@@ -819,7 +946,8 @@ export function WorkspaceClient({
               sandboxId: event.sandboxId ?? current.sandboxId,
               status: "ready",
             }));
-            setMode("preview");
+            setActiveTab("preview");
+            setLastTab("preview");
           }
           if (event.type === "files_changed") {
             setMessages((current) =>
@@ -839,6 +967,9 @@ export function WorkspaceClient({
               .then((payload) => payload.files && setFiles(payload.files));
           }
           if (event.type === "done") {
+            // The finished build saves its commands on the message, which the terminal reads from now on.
+            if (event.commands) setLiveCommands([]);
+            if (event.github) setGithubRefreshKey((current) => current + 1);
             setProject((current) => ({ ...current, status: current.status === "published" ? "published" : "ready" }));
             setMessages((current) =>
               current.map((message) =>
@@ -852,6 +983,9 @@ export function WorkspaceClient({
                         ...(event.changedPaths ? { changedPaths: event.changedPaths } : {}),
                         ...(event.fileChanges ? { fileChanges: event.fileChanges } : {}),
                         ...(event.activity ? { activity: event.activity } : {}),
+                        ...(event.commands ? { commands: event.commands } : {}),
+                        ...(event.questions ? { questions: event.questions } : {}),
+                        ...(event.github ? { github: event.github } : {}),
                         ...(typeof event.runDurationMs === "number" ? { runDurationMs: event.runDurationMs } : {}),
                       },
                     }
@@ -888,9 +1022,13 @@ export function WorkspaceClient({
         );
       } finally {
         setIsBuilding(false);
+        // Don't clear a pending approval here: if the stream merely dropped, the agent is still waiting
+        // server-side (it polls the database), so the card must stay answerable. It is cleared by the
+        // approval_resolved event, and reset when the next prompt starts.
+        setLiveCommands((current) => current.map((item) => (item.running ? { ...item, running: false } : item)));
       }
     },
-    [isBuilding, postVisualState, project.id, uploads, visualSelections],
+    [approvalMode, isBuilding, postVisualState, project.id, security, uploads, visualSelections],
   );
 
   async function restoreCheckpoint(message: Message) {
@@ -919,7 +1057,13 @@ export function WorkspaceClient({
         setPreviewRevision((current) => current + 1);
       }
       setDetailsMessage(null);
-      setMode("preview");
+      setGithubRefreshKey((current) => current + 1);
+      if (security) {
+        toast.success("Checkpoint restored.");
+        return;
+      }
+      setActiveTab("preview");
+      setLastTab("preview");
       toast.success("Checkpoint restored. The preview is updating.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "This checkpoint could not be restored.");
@@ -927,6 +1071,15 @@ export function WorkspaceClient({
       setRestoringMessageId(null);
     }
   }
+
+  useEffect(() => {
+    if (!initialTab && !githubResult) return;
+    const url = new URL(window.location.href);
+    for (const key of ["tab", "github", "github_error"]) url.searchParams.delete(key);
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    const result = githubResult ? GITHUB_RESULT_MESSAGES[githubResult] ?? GITHUB_RESULT_MESSAGES.error : null;
+    if (result) toast[result.kind](result.text);
+  }, [githubResult, initialTab]);
 
   useEffect(() => {
     if (!initialPrompt) return;
@@ -1020,7 +1173,6 @@ export function WorkspaceClient({
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error ?? "Could not unpublish this app.");
       setProject(payload.project);
-      setPublishDialogOpen(false);
       toast.success("App unpublished. Sandbox auto-stop is enabled again.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not unpublish this app.");
@@ -1048,7 +1200,87 @@ export function WorkspaceClient({
 
   function openFile(path: string) {
     setSelectedCodePath(path);
-    setMode("code");
+    openTab("code");
+  }
+
+  /** Opens an agent action in the workspace pane: files in Files, commands in Shell, PR proposals in Git Control. */
+  function canOpenActivity(item: RunChipActivity) {
+    return (
+      FILE_TOOLS.has(item.name) ||
+      BROWSE_TOOLS.has(item.name) ||
+      SHELL_TOOLS.has(item.name) ||
+      item.name === "neon_database" ||
+      item.name === "resend_email" ||
+      item.name === "propose_pull_request"
+    );
+  }
+
+  function openActivity(item: RunChipActivity) {
+    if (FILE_TOOLS.has(item.name) && item.target && files.some((file) => file.path === item.target)) openFile(item.target);
+    else if (FILE_TOOLS.has(item.name) || BROWSE_TOOLS.has(item.name)) openTab("code");
+    else if (SHELL_TOOLS.has(item.name)) openTab("terminal");
+    else if (item.name === "neon_database" || item.name === "resend_email") openTab("cloud");
+    else if (item.name === "propose_pull_request") openTab("git");
+  }
+
+  /** After a push from Security mode: the chat gains a note and the project's branch and commit change. */
+  async function reloadProjectState() {
+    try {
+      const response = await fetch(`/api/projects/${project.id}`, { cache: "no-store" });
+      const payload = await response.json();
+      if (Array.isArray(payload.messages)) setMessages(payload.messages as Message[]);
+      if (payload.project) setProject((current) => ({ ...(payload.project as Project), previewUrl: current.previewUrl }));
+    } catch {
+      toast.error("The push worked, but the page couldn't refresh. Reload the page to see the latest state.");
+    }
+  }
+
+  /**
+   * After the user answers an approval whose live stream has already ended (the request timed out while the
+   * agent waited), the agent keeps running on the server with no socket to push to. Poll the conversation so
+   * the earlier messages stay put and the continuation appears, until the run is no longer building.
+   */
+  function watchContinuingRun() {
+    if (continueWatchRef.current) return;
+    let attempts = 0;
+    const stop = () => {
+      if (continueWatchRef.current) {
+        window.clearTimeout(continueWatchRef.current);
+        continueWatchRef.current = null;
+      }
+    };
+    const tick = async () => {
+      attempts += 1;
+      try {
+        const response = await fetch(`/api/projects/${project.id}`, { cache: "no-store" });
+        const payload = await response.json();
+        const nextProject = payload.project as Project | undefined;
+        // Never clobber a live stream: only adopt the server's messages when nothing is streaming here.
+        if (!isBuildingRef.current && Array.isArray(payload.messages)) setMessages(payload.messages as Message[]);
+        if (nextProject) {
+          setProject((current) => ({ ...nextProject, previewUrl: current.previewUrl }));
+          if (nextProject.status !== "building") {
+            stop();
+            return;
+          }
+        }
+      } catch {
+        // Keep trying; a transient failure shouldn't end the watch.
+      }
+      if (attempts >= 120) {
+        stop();
+        return;
+      }
+      continueWatchRef.current = window.setTimeout(() => void tick(), 3_000);
+    };
+    continueWatchRef.current = window.setTimeout(() => void tick(), 1_200);
+  }
+
+  /** The user allowed or denied a Request review action. Keep the chat visible and follow the agent's continuation. */
+  function handleApprovalSent() {
+    setPendingApproval(null);
+    // If the live stream is still delivering, it will show the continuation itself. Otherwise, poll for it.
+    if (!isBuildingRef.current) watchContinuingRun();
   }
 
   function openDetails(message: Message) {
@@ -1056,386 +1288,850 @@ export function WorkspaceClient({
     if (!paths.length) return;
     setDetailsMessage(message);
     setDetailsPath(paths[0]);
-    setDetailsReturnMode(mode === "code" ? "code" : "preview");
-    setMode("details");
+    openTab("git");
+  }
+
+  /** Turns Cognix Cloud on or off for the project. Returns whether the change was saved. */
+  async function changeCloudEnabled(enabled: boolean) {
+    if (cloudBusy) return false;
+    setCloudBusy(true);
+    try {
+      const response = await fetch(`/api/projects/${project.id}/cloud`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error ?? "Could not update Cognix Cloud. Try again.");
+      setCloudEnabled(payload.enabled === true);
+      if (typeof payload.warning === "string") toast.message(payload.warning);
+      else toast.success(enabled ? "Cognix Cloud is on." : "Cognix Cloud is off.");
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not update Cognix Cloud. Try again.";
+      toast.error(message);
+      setCloudRequestError(message);
+      return false;
+    } finally {
+      setCloudBusy(false);
+    }
+  }
+
+  async function answerCloudRequest(enable: boolean) {
+    setCloudRequestError(null);
+    if (enable && !cloudEnabled && !(await changeCloudEnabled(true))) return;
+    void submitPrompt(enable ? CLOUD_ENABLED_PROMPT : CLOUD_DECLINED_PROMPT);
+  }
+
+  function askAgent(text: string) {
+    setPrompt(text);
+    requestAnimationFrame(() => {
+      const composer = composerRef.current;
+      if (!composer) return;
+      composer.focus();
+      composer.setSelectionRange(text.length, text.length);
+    });
+  }
+
+  /** After GitHub changes land in the project: reload files and the chat (it gains a checkpoint), then the preview. */
+  async function reloadAfterGitHubSync() {
+    try {
+      const [projectResponse, filesResponse] = await Promise.all([
+        fetch(`/api/projects/${project.id}`, { cache: "no-store" }),
+        fetch(`/api/projects/${project.id}/files`, { cache: "no-store" }),
+      ]);
+      const projectPayload = await projectResponse.json();
+      const filesPayload = await filesResponse.json();
+      if (Array.isArray(projectPayload.messages)) setMessages(projectPayload.messages as Message[]);
+      if (Array.isArray(filesPayload.files)) setFiles(filesPayload.files as ProjectFile[]);
+    } catch {
+      toast.error("GitHub changes were synced, but the page couldn't refresh. Reload the page to see them.");
+    }
+    setPreviewRevision((current) => current + 1);
+  }
+
+  /** Opens the Cloud tab and moves focus to the public address, where publishing and domains are managed. */
+  function openPublishSettings() {
+    if (!isPublishing && !publishSlug) setPublishSlug(project.publishSlug ?? publishSlugFromTitle(project.title));
+    openTab("cloud");
+    setCloudFocusRequest((current) => current + 1);
+  }
+
+  const terminalEntries: TerminalEntry[] = [
+    ...messages.flatMap((message) => commandsFor(message).map((command) => ({ ...command, running: false }))),
+    ...liveCommands,
+  ];
+  const terminalRunning = liveCommands.some((item) => item.running);
+  const builds: BuildCheckpoint[] = messages.flatMap((message) => {
+    if (message.role !== "assistant") return [];
+    const paths = changedPathsFor(message);
+    if (!paths.length || message.metadata.streaming === true) return [];
+    return [{
+      message,
+      summary: typeof message.metadata.summary === "string"
+        ? message.metadata.summary
+        : `Updated ${paths.length} ${paths.length === 1 ? "file" : "files"}`,
+      fileCount: paths.length,
+      canRestore: checkpointCanRestore(message).canRestore,
+      restored: typeof message.metadata.restoredAt === "string",
+    }];
+  });
+  const latestBuild = builds.reduce<BuildCheckpoint | null>(
+    (latest, build) => (!latest || build.message.createdAt > latest.message.createdAt ? build : latest),
+    null,
+  );
+  const tabs: ("preview" | ToolTab)[] = security ? [...openTabs] : ["preview", ...openTabs];
+  // Like Lovable: the preview is always live; the published site only changes when the user publishes again.
+  const lastChangeAt = messages.reduce<string | null>((latest, message) => {
+    const changed = changedPathsFor(message).length > 0 || message.metadata.checkpointRestore === true;
+    return changed && message.metadata.streaming !== true && (!latest || message.createdAt > latest) ? message.createdAt : latest;
+  }, null);
+  const hasUnpublishedChanges = Boolean(project.publishedAt && (isBuilding || (lastChangeAt && lastChangeAt > project.publishedAt)));
+  const toolButton =
+    "flex size-8 items-center justify-center rounded-lg text-white/50 transition-colors hover:bg-white/[0.07] hover:text-white [@media(pointer:coarse)]:size-11";
+  const tabMeta = security ? SECURITY_TOOL_TABS : TOOL_TABS;
+  const activeSuggestions = security ? securitySuggestions : suggestions;
+
+  function chooseApprovalMode(next: ApprovalMode) {
+    setApprovalMode(next);
+    try {
+      window.localStorage.setItem(`cognix:approval-mode:${project.id}`, next);
+      window.localStorage.setItem("cognix:approval-mode:last", next);
+    } catch {
+      // Blocked storage: the choice still applies until the page reloads.
+    }
   }
 
   return (
     <div className="workspace-frame">
-      <PublishDialog
-        open={publishDialogOpen}
-        anchorRef={publishButtonRef}
-        project={project}
-        slug={publishSlug}
-        publishedUrl={resolvedPublishedUrl}
-        publishBaseLabel={publishBaseLabel}
-        canPublish={canPublish}
-        publishing={isPublishing}
-        domainRefreshKey={domainRefreshKey}
-        onSlugChange={setPublishSlug}
-        onClose={() => {
-          if (!isPublishing) setPublishDialogOpen(false);
-        }}
-        onPublish={() => void publishProject()}
-        onUnpublish={() => void unpublishProject()}
+      {skillCommands.dialogs}
+      <HomeSidebar
+        viewer={viewer}
+        projects={projects}
+        mobileOpen={sidebarOpen}
+        onMobileOpenChange={setSidebarOpen}
+        onNewChat={() => router.push("/")}
+        defaultOpen={false}
+        activeProjectId={project.id}
       />
-      <aside className="workspace-rail" aria-label="Workspace navigation">
-        <Link href="/" className="grid size-9 place-items-center rounded-lg" aria-label="Cognix dashboard"><BrandMark className="size-5" /></Link>
-        <div className="mt-6 flex flex-col gap-2">
-          <Link href="/" className="workspace-rail-button" aria-label="Dashboard"><Home className="size-4" /></Link>
-          <button type="button" className="workspace-rail-button is-active" aria-label="Project chat"><MessageSquare className="size-4" /></button>
-        </div>
-        <Link href="/" className="mt-auto rounded-full" aria-label={`${viewer.name} account and dashboard`}><UserAvatar viewer={viewer} className="size-8" /></Link>
-      </aside>
 
       <Group orientation={isCompact ? "vertical" : "horizontal"} className="min-w-0 flex-1" id="cognix-workspace">
-        <Panel id="chat" style={WORKSPACE_PANEL_STYLE} defaultSize={isCompact ? "52%" : "34%"} minSize={isCompact ? "240px" : "340px"} maxSize={isCompact ? "72%" : "48%"}>
-          <section className="chat-panel">
-            <header className="chat-header">
-              <div className="min-w-0">
-                <h1 className="truncate text-[13px] font-semibold">{project.title}</h1>
-                <p className="mt-0.5 text-[10px] text-white/38">{project.status === "building" ? "Building now" : project.status === "publishing" ? "Publishing production" : project.status === "error" ? "Build needs attention" : project.publishedAt && project.status !== "published" ? "Changes ready to publish" : project.publishedAt ? "Published" : "All changes saved"}</p>
-              </div>
-              <span className="inline-flex items-center gap-1.5 text-[10px] text-white/35"><History className="size-3.5" /> Saved automatically</span>
-            </header>
-
-            <div className="chat-scroll" aria-live="polite">
-              {messages.map((message, messageIndex) => {
-                const summary = typeof message.metadata.summary === "string" ? message.metadata.summary : null;
-                const changedPaths = changedPathsFor(message);
-                const messageFileChanges = fileChangesFor(message);
-                const changeSummary = summary ?? (changedPaths.length
-                  ? `Updated ${changedPaths.length} ${changedPaths.length === 1 ? "file" : "files"}`
-                  : null);
-                const isStreamingMessage = message.metadata.streaming === true;
-                const messageImages = message.role === "user" ? imageAttachmentsFor(message) : [];
-                const messageSelections = message.role === "user" ? visualSelectionsFor(message) : [];
-                const checkpoint = checkpointCanRestore(message);
-                const wasRestored = typeof message.metadata.restoredAt === "string";
-                const previousUserMessage = message.metadata.error === true
-                  ? [...messages.slice(0, messageIndex)].reverse().find((item) => item.role === "user")
-                  : undefined;
-                const isToolLimitError = message.metadata.error === true
-                  && /reached its tool limit|execution budget/i.test(message.content);
-                return (
-                  <article key={message.id} className={cn("chat-message", message.role === "user" ? "is-user" : "is-assistant")}>
-                    {message.role === "user" ? (
-                      <div className="user-message-bubble"><MessageImages images={messageImages} /><VisualSelectionReferences selections={messageSelections} /><UserMessageContent content={message.content} /></div>
-                    ) : (
-                      <div className="assistant-message-body">
-                        {message.content ? <AssistantMessageContent content={assistantContent(message)} /> : isStreamingMessage ? <span className="inline-flex items-center gap-2 text-white/45"><span className="spinner" /> Thinking…</span> : null}
-                        {changeSummary ? (
-                          <div className="change-summary-card">
-                            <div className="flex items-center gap-2">
-                              <span className="grid size-6 place-items-center rounded-md bg-emerald-400/12 text-emerald-300"><Check className="size-3.5" /></span>
-                              <strong>{changeSummary}</strong>
-                              {wasRestored ? <span className="checkpoint-restored">Restored</span> : null}
-                            </div>
-                            {changedPaths.length ? (
-                              <ul className="changed-path-list">
-                                {changedPaths.slice(0, 5).map((filePath) => {
-                                  const wasDeleted = messageFileChanges.find((change) => change.path === filePath)?.after === null;
-                                  return (
-                                    <li key={filePath}>
-                                      <button type="button" disabled={wasDeleted} onClick={() => openFile(filePath)}>
-                                        <code>{filePath}</code>{wasDeleted ? <span>deleted</span> : null}
-                                      </button>
-                                    </li>
-                                  );
-                                })}
-                                {changedPaths.length > 5 ? <li>+{changedPaths.length - 5} more</li> : null}
-                              </ul>
-                            ) : null}
-                            <div className={cn("mt-3 grid gap-2", checkpoint.canRestore ? "grid-cols-3" : "grid-cols-2")}>
-                              <button type="button" onClick={() => openDetails(message)} disabled={!changedPaths.length} title={changedPaths.length ? "Review edited files" : "No files changed in this build"}>Details</button>
-                              <button type="button" onClick={() => setMode("preview")}>Preview</button>
-                              {checkpoint.canRestore ? (
-                                <button
-                                  type="button"
-                                  className="checkpoint-restore-button"
-                                  onClick={() => void restoreCheckpoint(message)}
-                                  disabled={Boolean(restoringMessageId) || isBuilding}
-                                  title="Revert the files changed by this build"
-                                >
-                                  {restoringMessageId === message.id ? <LoaderCircle className="size-3 animate-spin" /> : <RotateCcw className="size-3" />}
-                                  {restoringMessageId === message.id ? "Restoring" : "Restore"}
-                                </button>
-                              ) : null}
-                            </div>
-                          </div>
-                        ) : null}
-                        <RunDetails message={message} />
-                        {message.metadata.error === true && previousUserMessage ? (
-                          <button
-                            type="button"
-                            className="retry-build-button"
-                            disabled={isBuilding}
-                            onClick={() => void submitPrompt(
-                              isToolLimitError
-                                ? "Continue and complete the previous request from the existing project files. Inspect what is already implemented, finish the missing requirements, run checks, and repair the live preview."
-                                : previousUserMessage.content,
-                              attachmentIdsFor(previousUserMessage),
-                              visualSelectionsFor(previousUserMessage),
-                            )}
-                          >
-                            <RotateCcw className="size-3.5" /> {isToolLimitError ? "Continue build" : "Retry this build"}
-                          </button>
-                        ) : null}
-                      </div>
-                    )}
-                    <time>{formatRelativeDate(message.createdAt, relativeNow)}</time>
-                  </article>
-                );
-              })}
-
-              {isBuilding && activities.length ? (
-                <details className="agent-activity-card">
-                  <summary title="Show build activity">
-                    <span className="sr-only">Show build activity, {activities.length} steps</span>
-                    <span className="activity-icon-strip" aria-hidden="true">
-                      {visibleActivities.map((activity) => (
-                        <span
-                          key={activity.id}
-                          className={cn("activity-icon", activity.status === "done" && "is-done")}
-                          title={activity.label}
-                        >
-                          <ActivityIcon name={activity.name} running={activity.status === "running"} />
-                        </span>
-                      ))}
-                    </span>
-                    <ChevronDown className="activity-disclosure-icon size-3.5" aria-hidden="true" />
-                  </summary>
-                  <div className="agent-activity-list">
-                    <p>Build activity</p>
-                    {activities.map((activity) => (
-                      <div key={activity.id} className="activity-row">
-                        <span className={cn("activity-icon", activity.status === "done" && "is-done")}><ActivityIcon name={activity.name} running={activity.status === "running"} /></span>
-                        <span className="truncate">{activity.label}</span>
-                        {activity.status === "done" ? <Check className="ml-auto size-3.5 text-emerald-400" /> : null}
-                      </div>
-                    ))}
-                  </div>
-                </details>
-              ) : null}
-              <div ref={chatEndRef} />
-            </div>
-
-            <div className="chat-composer-area">
-              <div className="mb-2 flex gap-2 overflow-x-auto pb-1">
-                {suggestions.map((suggestion) => <button key={suggestion} type="button" className="suggestion-chip" onClick={() => setPrompt(suggestion)}>{suggestion}</button>)}
-              </div>
-              <div
-                className={cn("chat-composer", isDraggingUpload && "is-dragging")}
-                onDragEnter={(event) => { event.preventDefault(); setIsDraggingUpload(true); }}
-                onDragOver={(event) => event.preventDefault()}
-                onDragLeave={(event) => {
-                  if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setIsDraggingUpload(false);
-                }}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  setIsDraggingUpload(false);
-                  addUploads(Array.from(event.dataTransfer.files));
-                }}
-              >
-                {visualSelections.length ? (
-                  <div className="visual-composer-context">
-                    <div className="visual-composer-heading">
-                      <span><MousePointer2 className="size-3" /> {visualSelections.length} selected {visualSelections.length === 1 ? "element" : "elements"}</span>
-                      <button type="button" onClick={() => { setVisualSelections([]); postVisualState(visualEditEnabled, []); }}>Clear</button>
-                    </div>
-                    <VisualSelectionReferences
-                      selections={visualSelections}
-                      onRemove={(id) => setVisualSelections((current) => current.filter((selection) => selection.id !== id))}
-                    />
-                  </div>
-                ) : null}
-                {uploads.length ? (
-                  <div className="pending-upload-list" aria-label="Files ready to send">
-                    {uploads.map((item) => (
-                      <PendingUpload
-                        key={item.localId}
-                        file={item.file}
-                        status={item.status}
-                        uploadedUrl={item.attachment ? `/api/uploads/${item.attachment.id}` : undefined}
-                        onRemove={() => setUploads((current) => current.filter((upload) => upload.localId !== item.localId))}
-                        onRetry={() => void uploadComposerAttachment(item.localId, item.file)}
-                      />
-                    ))}
-                  </div>
-                ) : null}
-                <textarea
-                  value={prompt}
-                  rows={2}
-                  placeholder="Ask Cognix…"
-                  aria-label="Continue building this app"
-                  onChange={(event) => setPrompt(event.target.value)}
-                  onPaste={(event) => {
-                    const images = Array.from(event.clipboardData.items)
-                      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
-                      .map((item) => item.getAsFile())
-                      .filter((file): file is File => Boolean(file))
-                      .map((file, index) => file.name
-                        ? file
-                        : new File([file], `pasted-image-${Date.now()}-${index + 1}.png`, { type: file.type || "image/png" }));
-                    if (images.length) {
-                      event.preventDefault();
-                      addUploads(images);
-                    }
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submitPrompt(prompt); }
-                  }}
-                />
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1">
-                    <input ref={fileInputRef} className="sr-only" type="file" multiple accept={acceptedUploads} onChange={(event) => { addUploads(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} />
-                    <button type="button" className="icon-button size-8" aria-label="Attach files" onClick={() => fileInputRef.current?.click()}><Paperclip className="size-4" /></button>
-                    <span className="composer-mode-label"><Sparkles className="size-3.5" /> Build mode</span>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      className="send-button"
-                      onClick={() => void submitPrompt(prompt)}
-                      disabled={!prompt.trim() || isBuilding || uploads.some((item) => item.status !== "uploaded")}
-                      aria-label="Send prompt"
-                      title={uploads.some((item) => item.status === "uploading") ? "Waiting for uploads" : uploads.some((item) => item.status === "error") ? "Retry or remove failed uploads" : "Send prompt"}
-                    >
-                      {isBuilding || uploads.some((item) => item.status === "uploading") ? <LoaderCircle className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
-                    </button>
+        <Panel
+          id="chat"
+          style={WORKSPACE_PANEL_STYLE}
+          defaultSize={startCollapsed ? "100%" : isCompact ? "52%" : "38%"}
+          minSize={isCompact ? "240px" : "340px"}
+          maxSize={security ? "100%" : isCompact ? "72%" : "60%"}
+        >
+          <section className={cn("flex h-full min-h-0 flex-col", isCompact ? "p-2 pb-1" : "py-3 pl-3 pr-1", security && !paneOpen && "workspace-chat-wide")} aria-label="Chat">
+            <div className="flex min-h-0 flex-1 flex-col overflow-clip rounded-2xl border border-white/[0.08] bg-[#1c1c1c]">
+              <header className="chat-header">
+                <div className="flex min-w-0 items-center gap-1">
+                  <SidebarMobileTrigger onOpen={() => setSidebarOpen(true)} />
+                  <div className="min-w-0">
+                    <h1 className="truncate text-[13px] font-semibold">{project.title}</h1>
+                    <p className="mt-0.5 text-[11px] text-white/40">{security ? (project.status === "building" ? "Working now" : project.securitySource ? `${project.securitySource.fullName} · ${project.securitySource.branch}` : "No repository attached") : project.status === "building" ? "Building now" : project.status === "publishing" ? "Publishing production" : project.status === "error" ? "Build needs attention" : hasUnpublishedChanges ? "Changes not published yet" : project.publishedAt ? "Published · up to date" : "All changes saved"}</p>
                   </div>
                 </div>
-                {isDraggingUpload ? <div className="chat-drop-overlay"><ImagePlus className="size-5" /> Drop images or files here</div> : null}
+                <div className="flex shrink-0 items-center gap-1">
+                  {security ? (
+                    <span className="hidden items-center gap-1.5 text-[11px] text-white/35 sm:inline-flex">
+                      <ShieldCheck className="size-3.5" aria-hidden="true" /> Security
+                    </span>
+                  ) : (
+                    <span className="inline-flex shrink-0 items-center gap-1.5 text-[11px] text-white/35"><History className="size-3.5" /> Saved automatically</span>
+                  )}
+                  {security ? (
+                    <button
+                      type="button"
+                      className={toolButton}
+                      aria-expanded={paneOpen}
+                      aria-controls="workspace-pane"
+                      aria-label={paneOpen ? "Close the workspace pane" : "Open the workspace pane"}
+                      title={paneOpen ? "Close the workspace pane" : "Open files, shell, secrets, and Git Control"}
+                      onClick={() => {
+                        if (paneOpen) {
+                          collapsePane();
+                          return;
+                        }
+                        if (!openTabs.length) setActiveTab("launcher");
+                        expandPane();
+                      }}
+                    >
+                      {paneOpen ? <PanelRightClose className="size-4" /> : <PanelRightOpen className="size-4" />}
+                    </button>
+                  ) : null}
+                </div>
+              </header>
+
+              <div
+                ref={chatScrollRef}
+                className="chat-scroll"
+                aria-live="polite"
+                onScroll={(event) => {
+                  const target = event.currentTarget;
+                  chatPinnedRef.current = target.scrollHeight - target.scrollTop - target.clientHeight < 80;
+                }}
+              >
+                {messages.length === 0 && !isBuilding ? (
+                  <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
+                    <MessageSquare className="size-5 text-white/30" aria-hidden="true" />
+                    <p className="text-[13px] font-medium text-white/75">No messages yet</p>
+                    <p className="max-w-xs text-[12px] leading-5 text-white/45">{security ? "Prompt the security agent to review, explain, or fix this repository." : "Describe what to build below. Cognix will write the code and show it in the preview."}</p>
+                  </div>
+                ) : null}
+                {messages.map((message, messageIndex) => {
+                  const summary = typeof message.metadata.summary === "string" ? message.metadata.summary : null;
+                  const changedPaths = changedPathsFor(message);
+                  const messageFileChanges = fileChangesFor(message);
+                  const changeSummary = summary ?? (changedPaths.length
+                    ? `Updated ${changedPaths.length} ${changedPaths.length === 1 ? "file" : "files"}`
+                    : null);
+                  const isStreamingMessage = message.metadata.streaming === true;
+                  const messageImages = message.role === "user" ? imageAttachmentsFor(message) : [];
+                  const messageSelections = message.role === "user" ? visualSelectionsFor(message) : [];
+                  const checkpoint = checkpointCanRestore(message);
+                  const wasRestored = typeof message.metadata.restoredAt === "string";
+                  const previousUserMessage = message.metadata.error === true
+                    ? [...messages.slice(0, messageIndex)].reverse().find((item) => item.role === "user")
+                    : undefined;
+                  const isToolLimitError = message.metadata.error === true
+                    && /reached its tool limit|execution budget/i.test(message.content);
+                  const questionRequest = message.role === "assistant" ? questionRequestFor(message) : null;
+                  const isLatestMessage = messageIndex === messages.length - 1;
+                  return (
+                    <article key={message.id} className={cn("chat-message", message.role === "user" ? "is-user" : "is-assistant")}>
+                      {message.role === "user" ? (
+                        <div className="user-message-bubble"><MessageImages images={messageImages} /><VisualSelectionReferences selections={messageSelections} /><UserMessageContent content={message.content} /></div>
+                      ) : (
+                        <div className="assistant-message-body">
+                          {message.content ? <AssistantMessageContent content={assistantContent(message)} /> : isStreamingMessage ? <LoadingState label="Thinking" /> : null}
+                          {changeSummary ? (
+                            <div className="change-summary-card">
+                              <div className="flex items-center gap-2">
+                                <span className="grid size-6 place-items-center rounded-md bg-emerald-400/12 text-emerald-300"><Check className="size-3.5" /></span>
+                                <strong>{changeSummary}</strong>
+                                {wasRestored ? <span className="checkpoint-restored">Restored</span> : null}
+                              </div>
+                              {changedPaths.length ? (
+                                <ul className="changed-path-list">
+                                  {changedPaths.slice(0, 5).map((filePath) => {
+                                    const wasDeleted = messageFileChanges.find((change) => change.path === filePath)?.after === null;
+                                    return (
+                                      <li key={filePath}>
+                                        <button type="button" disabled={wasDeleted} onClick={() => openFile(filePath)}>
+                                          <code>{filePath}</code>{wasDeleted ? <span>deleted</span> : null}
+                                        </button>
+                                      </li>
+                                    );
+                                  })}
+                                  {changedPaths.length > 5 ? <li>+{changedPaths.length - 5} more</li> : null}
+                                </ul>
+                              ) : null}
+                              <div className={cn("mt-3 grid gap-2", (security ? 1 : 2) + (checkpoint.canRestore ? 1 : 0) === 3 ? "grid-cols-3" : (security ? 1 : 2) + (checkpoint.canRestore ? 1 : 0) === 2 ? "grid-cols-2" : "grid-cols-1")}>
+                                <button type="button" onClick={() => openDetails(message)} disabled={!changedPaths.length} title={changedPaths.length ? "Review edited files" : "No files changed in this build"}>Details</button>
+                                {security ? null : <button type="button" onClick={() => showTab("preview")}>Preview</button>}
+                                {checkpoint.canRestore ? (
+                                  <button
+                                    type="button"
+                                    className="checkpoint-restore-button"
+                                    onClick={() => void restoreCheckpoint(message)}
+                                    disabled={Boolean(restoringMessageId) || isBuilding}
+                                    title="Revert the files changed by this build"
+                                  >
+                                    {restoringMessageId === message.id ? <PixelLoader size="sm" /> : <RotateCcw className="size-3" />}
+                                    {restoringMessageId === message.id ? "Restoring" : "Restore"}
+                                  </button>
+                                ) : null}
+                              </div>
+                              <GitHubCommitNote info={message.metadata.github} onOpen={() => openTab("git")} />
+                            </div>
+                          ) : null}
+                          {security ? (
+                            <RunChips
+                              activities={runActivityFor(message)}
+                              fileChanges={messageFileChanges}
+                              canOpen={canOpenActivity}
+                              onOpenActivity={openActivity}
+                              onOpenFile={(filePath) => (files.some((file) => file.path === filePath) ? openFile(filePath) : openDetails(message))}
+                            />
+                          ) : (
+                            <RunDetails message={message} />
+                          )}
+                          {questionRequest?.kind === "pull_request" ? (
+                            <PullRequestCard
+                              key={message.id}
+                              projectId={project.id}
+                              messageId={message.id}
+                              proposal={questionRequest.proposal}
+                              repository={project.securitySource?.fullName ?? null}
+                              baseBranch={project.securitySource?.baseBranch ?? project.securitySource?.branch ?? null}
+                              decision={pullRequestDecisions[message.id] ?? pullRequestDecisionFor(message.metadata)}
+                              canAct={!isBuilding && !message.id.startsWith("local-")}
+                              onDone={(decision) => {
+                                setPullRequestDecisions((current) => ({ ...current, [message.id]: decision }));
+                                if (decision?.status === "opened") {
+                                  setGithubRefreshKey((current) => current + 1);
+                                  void reloadProjectState();
+                                }
+                              }}
+                            />
+                          ) : null}
+                          {questionRequest && questionRequest.kind !== "pull_request" && isLatestMessage && !isBuilding ? (
+                            questionRequest.kind === "enable_cloud" ? (
+                              cloudEnabled && !cloudBusy && !cloudRequestError ? (
+                                <button
+                                  type="button"
+                                  onClick={() => void submitPrompt(CLOUD_ENABLED_PROMPT)}
+                                  className="mt-3 inline-flex h-8 items-center rounded-lg border border-white/10 bg-white/[0.04] px-3 text-[12.5px] font-medium text-white/80 hover:bg-white/[0.08] hover:text-white [@media(pointer:coarse)]:h-11"
+                                >
+                                  Cognix Cloud is on. Continue the build
+                                </button>
+                              ) : (
+                                <CloudRequestCard
+                                  reason={questionRequest.reason}
+                                  featureLabels={questionRequest.features.map((feature) => CLOUD_FEATURES[feature].label)}
+                                  busy={cloudBusy}
+                                  error={cloudRequestError}
+                                  onEnable={() => void answerCloudRequest(true)}
+                                  onDecline={() => void answerCloudRequest(false)}
+                                />
+                              )
+                            ) : (
+                              <AgentQuestionCard
+                                key={message.id}
+                                questions={questionRequest.questions}
+                                onSubmit={(answers) => void submitPrompt(formatAnswers(questionRequest, answers))}
+                              />
+                            )
+                          ) : null}
+                          {message.metadata.error === true && previousUserMessage ? (
+                            <button
+                              type="button"
+                              className="retry-build-button"
+                              disabled={isBuilding}
+                              onClick={() => void submitPrompt(
+                                isToolLimitError
+                                  ? "Continue and complete the previous request from the existing project files. Inspect what is already implemented, finish the missing requirements, run checks, and repair the live preview."
+                                  : previousUserMessage.content,
+                                attachmentIdsFor(previousUserMessage),
+                                visualSelectionsFor(previousUserMessage),
+                              )}
+                            >
+                              <RotateCcw className="size-3.5" /> {isToolLimitError ? "Continue build" : "Retry this build"}
+                            </button>
+                          ) : null}
+                        </div>
+                      )}
+                      <time>{formatRelativeDate(message.createdAt, relativeNow)}</time>
+                    </article>
+                  );
+                })}
+
+                {isBuilding && activities.length && security ? (
+                  <RunChips
+                    live
+                    activities={activities.map((activity) => ({ ...activity }))}
+                    canOpen={canOpenActivity}
+                    onOpenActivity={openActivity}
+                    onOpenFile={openFile}
+                  />
+                ) : null}
+                {security && pendingApproval ? (
+                  <ApprovalCard key={pendingApproval.id} projectId={project.id} approval={pendingApproval} onSent={handleApprovalSent} />
+                ) : null}
+                {isBuilding && activities.length && !security ? (
+                  <details className="agent-activity-card">
+                    <summary title="Show build activity">
+                      <span className="sr-only">Show build activity, {activities.length} steps</span>
+                      <span className="activity-icon-strip" aria-hidden="true">
+                        {visibleActivities.map((activity) => (
+                          <span
+                            key={activity.id}
+                            className={cn("activity-icon", activity.status === "done" && "is-done")}
+                            title={activity.label}
+                          >
+                            <ActivityIcon name={activity.name} running={activity.status === "running"} />
+                          </span>
+                        ))}
+                      </span>
+                      <ChevronDown className="activity-disclosure-icon size-3.5" aria-hidden="true" />
+                    </summary>
+                    <div className="agent-activity-list">
+                      <p>Build activity</p>
+                      {activities.map((activity) => (
+                        <div key={activity.id} className="activity-row">
+                          <span className={cn("activity-icon", activity.status === "done" && "is-done")}><ActivityIcon name={activity.name} running={activity.status === "running"} /></span>
+                          <span className="truncate">{activity.label}</span>
+                          {activity.status === "done" ? <Check className="ml-auto size-3.5 text-emerald-400" /> : null}
+                        </div>
+                      ))}
+                      {terminalRunning ? (
+                        <button type="button" className="mt-1 text-[11px] font-medium text-white/60 hover:text-white" onClick={() => openTab("terminal")}>
+                          Watch in Terminal
+                        </button>
+                      ) : null}
+                    </div>
+                  </details>
+                ) : null}
+                <div ref={chatEndRef} />
+              </div>
+            </div>
+
+            <div className="chat-composer-wrap shrink-0 pt-2">
+              <div className="mb-2 flex gap-2 overflow-x-auto px-1 pb-0.5">
+                {activeSuggestions.map((suggestion) => <button key={suggestion} type="button" className="suggestion-chip" onClick={() => setPrompt(suggestion)}>{suggestion}</button>)}
+              </div>
+              <div className="rounded-2xl bg-white/[0.035]">
+                <div
+                  className={cn(
+                    "relative rounded-xl border border-white/[0.12] bg-[#212121] px-3 pb-2 pt-3 transition-colors duration-200 focus-within:border-white/25",
+                    isDraggingUpload && "border-white/30 bg-[#262626]",
+                  )}
+                  onDragEnter={(event) => { event.preventDefault(); setIsDraggingUpload(true); }}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDragLeave={(event) => {
+                    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setIsDraggingUpload(false);
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    setIsDraggingUpload(false);
+                    addUploads(Array.from(event.dataTransfer.files));
+                  }}
+                >
+                  {visualSelections.length ? (
+                    <div className="visual-composer-context">
+                      <div className="visual-composer-heading">
+                        <span><MousePointer2 className="size-3" /> {visualSelections.length} selected {visualSelections.length === 1 ? "element" : "elements"}</span>
+                        <button type="button" onClick={() => { setVisualSelections([]); postVisualState(visualEditEnabled, []); }}>Clear</button>
+                      </div>
+                      <VisualSelectionReferences
+                        selections={visualSelections}
+                        onRemove={(id) => setVisualSelections((current) => current.filter((selection) => selection.id !== id))}
+                      />
+                    </div>
+                  ) : null}
+                  {uploads.length ? (
+                    <div className="pending-upload-list" aria-label="Files ready to send">
+                      {uploads.map((item) => (
+                        <PendingUpload
+                          key={item.localId}
+                          file={item.file}
+                          status={item.status}
+                          uploadedUrl={item.attachment ? `/api/uploads/${item.attachment.id}` : undefined}
+                          onRemove={() => setUploads((current) => current.filter((upload) => upload.localId !== item.localId))}
+                          onRetry={() => void uploadComposerAttachment(item.localId, item.file)}
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                  {skillCommands.menu}
+                  <textarea
+                    ref={composerRef}
+                    value={prompt}
+                    rows={2}
+                    placeholder={security ? "Ask about this repository, or type / for skills…" : "Ask anything, or type / for skills…"}
+                    aria-label={security ? "Message the security agent" : "Continue building this app"}
+                    {...skillCommands.textareaProps}
+                    onChange={(event) => {
+                      setPrompt(event.target.value);
+                      skillCommands.syncCaret(event);
+                    }}
+                    onPaste={(event) => {
+                      const images = Array.from(event.clipboardData.items)
+                        .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+                        .map((item) => item.getAsFile())
+                        .filter((file): file is File => Boolean(file))
+                        .map((file, index) => file.name
+                          ? file
+                          : new File([file], `pasted-image-${Date.now()}-${index + 1}.png`, { type: file.type || "image/png" }));
+                      if (images.length) {
+                        event.preventDefault();
+                        addUploads(images);
+                      }
+                    }}
+                    onKeyDown={(event) => {
+                      if (skillCommands.onKeyDown(event)) return;
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        if (!skillCommands.runCommand(prompt)) void submitPrompt(prompt);
+                      }
+                    }}
+                    className="block max-h-[200px] min-h-[48px] w-full resize-none bg-transparent px-1.5 text-[14px] leading-6 text-white outline-none placeholder:text-white/40 [&:focus-visible]:outline-none"
+                  />
+                  <div className="mt-1 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-0.5">
+                      <input ref={fileInputRef} className="sr-only" type="file" multiple accept={acceptedUploads} onChange={(event) => { addUploads(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} />
+                      <button type="button" className={toolButton} aria-label="Attach files" title="Attach files" onClick={() => fileInputRef.current?.click()}><Plus className="size-4" /></button>
+                      <button
+                        type="button"
+                        className={toolButton}
+                        aria-label="Mention"
+                        title="Mention"
+                        onClick={() => {
+                          setPrompt((current) => (current && !/\s$/.test(current) ? `${current} @` : `${current}@`));
+                          composerRef.current?.focus();
+                        }}
+                      >
+                        <AtSign className="size-3.5" />
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      {security ? <ApprovalModeMenu value={approvalMode} onChange={chooseApprovalMode} disabled={isBuilding} /> : null}
+                      <button
+                        type="button"
+                        onClick={voice.start}
+                        className={cn(toolButton, voice.listening && "bg-red-500/15 text-red-400 hover:bg-red-500/20 hover:text-red-300")}
+                        title="Voice dictation"
+                        aria-label={voice.listening ? "Listening for dictation" : "Voice dictation"}
+                        aria-pressed={voice.listening}
+                      >
+                        <Mic className="size-4" />
+                      </button>
+                      <button
+                        type="button"
+                        className={cn(
+                          "flex size-8 items-center justify-center rounded-full transition-colors duration-150 [@media(pointer:coarse)]:size-11",
+                          prompt.trim() && !isBuilding && uploads.every((item) => item.status === "uploaded")
+                            ? "bg-white text-black hover:bg-white/85"
+                            : "cursor-not-allowed bg-white/[0.12] text-white/45",
+                        )}
+                        onClick={() => {
+                          if (!skillCommands.runCommand(prompt)) void submitPrompt(prompt);
+                        }}
+                        disabled={!prompt.trim() || isBuilding || uploads.some((item) => item.status !== "uploaded")}
+                        aria-label="Send prompt"
+                        title={uploads.some((item) => item.status === "uploading") ? "Waiting for uploads" : uploads.some((item) => item.status === "error") ? "Retry or remove failed uploads" : "Send prompt"}
+                      >
+                        {isBuilding || uploads.some((item) => item.status === "uploading") ? <PixelLoader /> : <ArrowUp className="size-4 stroke-[2.25]" />}
+                      </button>
+                    </div>
+                  </div>
+                  {isDraggingUpload ? <div className="chat-drop-overlay"><ImagePlus className="size-5" /> Drop images or files here</div> : null}
+                </div>
+                {/* Security mode drops this footer row once the chat has started; the composer stands on its own. */}
+                {security ? null : (
+                <div className="flex items-center justify-between gap-3 px-4 py-2 text-[12px] text-white/45">
+                  <span className="truncate">Cognix can make mistakes. Check important info.</span>
+                  <div className="hidden shrink-0 items-center gap-3 sm:flex">
+                    <button type="button" onClick={skillCommands.openMenu} className="rounded px-0.5 transition-colors hover:text-white/75" aria-label="Show skills and slash commands">
+                      <kbd className="font-sans font-semibold text-white/70">/</kbd> skills
+                    </button>
+                    <span>
+                      <kbd className="font-sans font-semibold text-white/70">@</kbd> mention
+                    </span>
+                  </div>
+                </div>
+                )}
               </div>
             </div>
           </section>
         </Panel>
 
-        <Separator className="workspace-resizer" />
+        <Separator className={cn("workspace-resizer", security && !paneOpen && "is-collapsed")} />
 
-        <Panel id="workbench" style={WORKSPACE_PANEL_STYLE} minSize={isCompact ? "180px" : "480px"}>
-          <section className="workbench-panel">
-            <header className="workbench-toolbar">
-              {mode === "details" ? (
-                <button type="button" className="details-back-button" onClick={() => setMode(detailsReturnMode)}><ArrowLeft className="size-3.5" /> Back</button>
-              ) : (
-                <div className="mode-tabs" role="tablist" aria-label="Workspace view">
-                  <button type="button" role="tab" aria-label="Preview" aria-selected={mode === "preview"} className={cn("toolbar-expandable", mode === "preview" && "is-active")} onClick={() => setMode("preview")}><Monitor className="size-3.5" /><span className="toolbar-control-label">Preview</span></button>
-                  <button type="button" role="tab" aria-label="Code" aria-selected={mode === "code"} className={cn("toolbar-expandable", mode === "code" && "is-active")} onClick={() => setMode("code")}><Code2 className="size-3.5" /><span className="toolbar-control-label">Code</span></button>
-                  <button type="button" role="tab" aria-label="Secrets" aria-selected={mode === "secrets"} className={cn("toolbar-expandable", mode === "secrets" && "is-active")} onClick={() => setMode("secrets")}><KeyRound className="size-3.5" /><span className="toolbar-control-label">Secrets</span></button>
-                </div>
-              )}
-
-              {mode === "preview" ? (
-                <>
-                  <label className="preview-device-select toolbar-expandable" title="Preview viewport">
-                    <PreviewDeviceIcon device={previewDevice} />
-                    <span className="toolbar-control-label">{previewDevice === "phone" ? "Phone" : previewDevice === "tablet" ? "Tablet" : "Desktop"}</span>
-                    <select value={previewDevice} onChange={(event) => setPreviewDevice(event.target.value as PreviewDevice)} aria-label="Preview device">
-                      <option value="phone">Phone</option>
-                      <option value="tablet">Tablet</option>
-                      <option value="desktop">Desktop</option>
-                    </select>
-                    <ChevronDown className="size-3" aria-hidden="true" />
-                  </label>
-                  <button
-                    type="button"
-                    className={cn("visual-edit-button toolbar-expandable", visualEditEnabled && "is-active")}
-                    onClick={() => void toggleVisualEdit()}
-                    disabled={!currentPreviewUrl || visualEditConnecting}
-                    aria-pressed={visualEditEnabled}
-                    aria-label={visualEditEnabled ? "Exit element selection" : "Select preview elements"}
-                    title={visualEditEnabled ? "Exit element selection" : "Select elements in the preview"}
-                  >
-                    {visualEditConnecting ? <LoaderCircle className="size-3.5 animate-spin" /> : <MousePointer2 className="size-3.5" />}
-                    <span className="toolbar-control-label">{visualEditEnabled ? "Done" : "Select"}</span>
-                  </button>
-                  <div className="preview-address">
-                    <button type="button" aria-label="Refresh preview" onClick={() => void refreshPreview()} disabled={isPreviewReconnecting}><RefreshCw className={cn("size-3.5", isPreviewReconnecting && "animate-spin")} /></button>
-                    <span>{projectHost}</span>
-                    {currentPreviewUrl ? <a href={currentPreviewUrl} target="_blank" rel="noreferrer" aria-label="Open preview in a new tab"><ExternalLink className="size-3.5" /></a> : null}
-                  </div>
-                </>
-              ) : <strong className="text-[12px]">{mode === "details" ? "Changes" : "Code"}</strong>}
-
-              <div className="ml-auto flex items-center gap-1.5">
-                {project.sandboxId ? (
-                  <a
-                    className="toolbar-button toolbar-expandable"
-                    href={`/api/projects/${project.id}/export`}
-                    download
-                    aria-label="Download project"
-                    title="Download the project source without dependencies or secrets"
-                  >
-                    <Download className="size-3.5" /><span className="toolbar-control-label">Download</span>
-                  </a>
-                ) : (
-                  <button type="button" className="toolbar-button toolbar-expandable" disabled aria-label="Download project" title="Build the app before downloading it">
-                    <Download className="size-3.5" /><span className="toolbar-control-label">Download</span>
-                  </button>
-                )}
-                <button type="button" className="toolbar-button toolbar-expandable" onClick={() => void shareProject()} disabled={!currentPreviewUrl} aria-label="Share preview" title={currentPreviewUrl ? "Copy preview link" : "Build the app to enable sharing"}><Share2 className="size-3.5" /><span className="toolbar-control-label">Share</span></button>
-                <button
-                  ref={publishButtonRef}
-                  type="button"
-                  className="publish-button toolbar-expandable"
-                  onClick={() => {
-                    setPublishSlug(project.publishSlug ?? publishSlugFromTitle(project.title));
-                    setPublishDialogOpen(true);
-                  }}
-                  disabled={!canPublish || isBuilding || isPublishing}
-                  aria-label={project.status === "publishing" ? "Publishing app" : project.publishedAt ? "Manage publication" : "Publish app"}
-                  title={project.status === "publishing" ? "Reconnect to the production deployment" : canPublish ? "Build and manage a permanent publication" : "Build the app before publishing"}
-                >
-                  {project.status === "publishing" || isPublishing ? <LoaderCircle className="size-3.5 animate-spin" /> : <Rocket className="size-3.5" />}
-                  <span className="toolbar-control-label">{project.status === "publishing" || isPublishing ? "Publishing" : project.publishedAt ? "Published" : "Publish"}</span>
-                </button>
-              </div>
-            </header>
-
-            <div className="min-h-0 flex-1">
-              {mode === "preview" ? (
-                currentPreviewUrl && !isPreviewReconnecting ? (
-                  <div className={cn("preview-frame-wrap", `is-${previewDevice}`)}>
-                    <div className="preview-device-stage">
-                      <iframe
-                        key={`${currentPreviewUrl}:${previewRevision}`}
-                        ref={previewFrameRef}
-                        title={`${project.title} ${previewDevice} preview`}
-                        src={currentPreviewUrl}
-                        sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
-                        onLoad={() => postVisualState(visualEditEnabled, visualSelections)}
-                      />
-                    </div>
-                    {visualEditEnabled ? (
-                      <div className={cn("visual-edit-hint", !visualBridgeReady && "is-connecting")}>
-                        {visualBridgeReady ? <MousePointer2 className="size-3.5" /> : <LoaderCircle className="size-3.5 animate-spin" />}
-                        <span>{visualBridgeReady ? "Click an element · Ctrl/Cmd-click to add · Esc to exit" : "Connecting element selector…"}</span>
+        <Panel
+          id="workbench"
+          style={WORKSPACE_PANEL_STYLE}
+          minSize={isCompact ? "180px" : "420px"}
+          {...(security
+            ? {
+                collapsible: true,
+                collapsedSize: "0%",
+                panelRef: workbenchPanelRef,
+                ...(startCollapsed ? { defaultSize: "0%" } : {}),
+                onResize: (size: { asPercentage: number }) => setPaneOpen(size.asPercentage > 0.5),
+              }
+            : {})}
+        >
+          <section
+            id="workspace-pane"
+            className={cn("flex h-full min-h-0 flex-col", isCompact ? "p-2 pt-1" : "py-3 pl-1 pr-3")}
+            aria-label="Workspace"
+            hidden={security && !paneOpen}
+          >
+            <div className="flex min-h-0 flex-1 flex-col overflow-clip rounded-2xl border border-white/[0.1] bg-[#141414]">
+              <header className="flex h-12 shrink-0 items-center gap-1.5 border-b border-white/[0.06] px-2">
+                <div role="tablist" aria-label="Workspace tabs" className="flex min-w-0 items-center gap-1 overflow-x-auto">
+                  {tabs.map((tab) => {
+                    const meta = tab === "preview" ? { label: "Preview", icon: Globe2 } : tabMeta[tab];
+                    const selected = activeTab === tab;
+                    return (
+                      <div
+                        key={tab}
+                        className={cn(
+                          "flex h-8 shrink-0 items-center rounded-lg transition-colors [@media(pointer:coarse)]:h-11",
+                          selected ? "bg-white/[0.1] text-white" : "text-white/55 hover:bg-white/[0.05] hover:text-white",
+                        )}
+                      >
+                        <button
+                          ref={(node) => {
+                            if (node) tabRefs.current.set(tab, node);
+                            else tabRefs.current.delete(tab);
+                          }}
+                          type="button"
+                          role="tab"
+                          id={`workspace-tab-${tab}`}
+                          aria-selected={selected}
+                          aria-controls={`workspace-panel-${tab}`}
+                          tabIndex={selected || (activeTab === "launcher" && lastTab === tab) ? 0 : -1}
+                          onClick={() => showTab(tab)}
+                          onKeyDown={(event) => onTabKeyDown(event, tab)}
+                          className={cn("flex h-full items-center gap-2 rounded-lg text-[12.5px] font-medium", tab === "preview" ? "px-3" : "pl-3 pr-1")}
+                        >
+                          <meta.icon className="size-3.5" aria-hidden="true" />
+                          {meta.label}
+                          {tab === "terminal" && terminalRunning ? (
+                            <span className="size-1.5 rounded-full bg-sky-400 animate-pulse motion-reduce:animate-none" aria-label="Running a command" />
+                          ) : null}
+                        </button>
+                        {tab !== "preview" ? (
+                          <button
+                            type="button"
+                            tabIndex={-1}
+                            onClick={() => closeTab(tab)}
+                            aria-label={`Close ${meta.label}`}
+                            title={`Close ${meta.label}`}
+                            className="mr-0.5 grid size-8 place-items-center rounded-md text-white/45 hover:bg-white/[0.08] hover:text-white [@media(pointer:coarse)]:size-11"
+                          >
+                            <X className="size-3.5" />
+                          </button>
+                        ) : null}
                       </div>
-                    ) : null}
-                    <div className="preview-floating-tools"><button type="button" aria-label="Copy preview URL" title="Copy preview URL" onClick={() => { void navigator.clipboard.writeText(currentPreviewUrl); toast.success("Preview link copied."); }}><Copy className="size-4" /></button></div>
+                    );
+                  })}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (activeTab !== "launcher") {
+                      setActiveTab("launcher");
+                      return;
+                    }
+                    if (security) {
+                      const back = openTabs.find((tab) => tab === lastTab) ?? openTabs[0];
+                      if (back) showTab(back);
+                      else collapsePane();
+                      return;
+                    }
+                    showTab(lastTab);
+                  }}
+                  aria-label="Open a tool"
+                  aria-pressed={activeTab === "launcher"}
+                  title={security ? "Open Shell, Files, Secrets, or Git Control" : "Open Terminal, Files/Code, Cloud, or Git Control"}
+                  className={cn(
+                    "grid size-8 shrink-0 place-items-center rounded-lg transition-colors [@media(pointer:coarse)]:size-11",
+                    activeTab === "launcher" ? "bg-white/[0.1] text-white" : "text-white/55 hover:bg-white/[0.05] hover:text-white",
+                  )}
+                >
+                  <Plus className="size-4" />
+                </button>
+
+                <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                  {project.sandboxId ? (
+                    <a
+                      className="toolbar-button toolbar-expandable"
+                      href={`/api/projects/${project.id}/export`}
+                      download
+                      aria-label="Download project"
+                      title="Download the project source without dependencies or secrets"
+                    >
+                      <Download className="size-3.5" /><span className="toolbar-control-label">Download</span>
+                    </a>
+                  ) : (
+                    <button type="button" className="toolbar-button toolbar-expandable" disabled aria-label="Download project" title="Build the app before downloading it">
+                      <Download className="size-3.5" /><span className="toolbar-control-label">Download</span>
+                    </button>
+                  )}
+                  {security ? (
+                    <button type="button" className={toolButton} onClick={collapsePane} aria-label="Close the workspace pane" title="Close the workspace pane">
+                      <PanelRightClose className="size-4" />
+                    </button>
+                  ) : null}
+                  {security ? null : <button type="button" className="toolbar-button toolbar-expandable" onClick={() => void shareProject()} disabled={!currentPreviewUrl} aria-label="Share preview" title={currentPreviewUrl ? "Copy preview link" : "Build the app to enable sharing"}><Share2 className="size-3.5" /><span className="toolbar-control-label">Share</span></button>}
+                  {security ? null : <button
+                    type="button"
+                    className="publish-button toolbar-expandable relative"
+                    onClick={openPublishSettings}
+                    aria-label={project.status === "publishing" || isPublishing ? "Publishing app, open publish settings" : hasUnpublishedChanges ? "Update the published app with the latest changes" : project.publishedAt ? "Manage publication and domains" : "Publish app"}
+                    title="Publishing and custom domains"
+                  >
+                    {project.status === "publishing" || isPublishing ? <PixelLoader /> : <Rocket className="size-3.5" />}
+                    <span className="toolbar-control-label">{project.status === "publishing" || isPublishing ? "Publishing" : hasUnpublishedChanges ? "Update" : project.publishedAt ? "Published" : "Publish"}</span>
+                    {hasUnpublishedChanges && !isPublishing ? <span className="absolute right-1 top-1 size-1.5 rounded-full bg-amber-300" aria-hidden="true" /> : null}
+                  </button>}
+                </div>
+              </header>
+
+              <div className="relative min-h-0 flex-1">
+                {/* Preview stays mounted behind other tabs so the running app does not reload. Security mode has no preview. */}
+                {security ? null : (
+                <div
+                  role="tabpanel"
+                  id="workspace-panel-preview"
+                  aria-labelledby="workspace-tab-preview"
+                  hidden={activeTab !== "preview"}
+                  className="h-full min-h-0 flex-col data-[shown=true]:flex"
+                  data-shown={activeTab === "preview"}
+                >
+                  <div className="flex h-11 shrink-0 items-center gap-2 border-b border-white/[0.06] px-2">
+                    <label className="preview-device-select toolbar-expandable" title="Preview viewport">
+                      <PreviewDeviceIcon device={previewDevice} />
+                      <span className="toolbar-control-label">{previewDevice === "phone" ? "Phone" : previewDevice === "tablet" ? "Tablet" : "Desktop"}</span>
+                      <select value={previewDevice} onChange={(event) => setPreviewDevice(event.target.value as PreviewDevice)} aria-label="Preview device">
+                        <option value="phone">Phone</option>
+                        <option value="tablet">Tablet</option>
+                        <option value="desktop">Desktop</option>
+                      </select>
+                      <ChevronDown className="size-3" aria-hidden="true" />
+                    </label>
+                    <button
+                      type="button"
+                      className={cn("visual-edit-button toolbar-expandable", visualEditEnabled && "is-active")}
+                      onClick={() => void toggleVisualEdit()}
+                      disabled={!currentPreviewUrl || visualEditConnecting}
+                      aria-pressed={visualEditEnabled}
+                      aria-label={visualEditEnabled ? "Exit element selection" : "Select preview elements"}
+                      title={visualEditEnabled ? "Exit element selection" : "Select elements in the preview (S)"}
+                    >
+                      {visualEditConnecting ? <PixelLoader /> : <MousePointer2 className="size-3.5" />}
+                      <span className="toolbar-control-label">{visualEditEnabled ? "Done" : "Select"}</span>
+                    </button>
+                    <div className="preview-address">
+                      <button type="button" aria-label="Refresh preview" onClick={() => void refreshPreview()} disabled={isPreviewReconnecting}>{isPreviewReconnecting ? <PixelLoader /> : <RefreshCw className="size-3.5" />}</button>
+                      <span>{projectHost}</span>
+                      {currentPreviewUrl ? <a href={currentPreviewUrl} target="_blank" rel="noreferrer" aria-label="Open preview in a new tab"><ExternalLink className="size-3.5" /></a> : null}
+                    </div>
                   </div>
-                ) : <PreviewPlaceholder reconnecting={isPreviewReconnecting} />
-              ) : mode === "code" ? (
-                <CodeWorkbench
-                  projectId={project.id}
-                  files={files}
-                  selectedPath={selectedCodePath}
-                  onSelectPath={openFile}
-                  onFilesChange={setFiles}
-                />
-              ) : mode === "secrets" ? (
-                <SecretsPanel projectId={project.id} />
-              ) : detailsMessage ? (
-                <ChangeDetails
-                  changedPaths={changedPathsFor(detailsMessage)}
-                  fileChanges={fileChangesFor(detailsMessage)}
-                  files={files}
-                  selectedPath={detailsPath}
-                  onSelectPath={setDetailsPath}
-                  onOpenFile={openFile}
-                />
-              ) : null}
+                  <div className="min-h-0 flex-1">
+                    {currentPreviewUrl && !isPreviewReconnecting ? (
+                      <div className={cn("preview-frame-wrap", `is-${previewDevice}`)}>
+                        <div className="preview-device-stage">
+                          <iframe
+                            key={`${currentPreviewUrl}:${previewRevision}`}
+                            ref={previewFrameRef}
+                            title={`${project.title} ${previewDevice} preview`}
+                            src={currentPreviewUrl}
+                            sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
+                            onLoad={() => postVisualState(visualEditEnabled, visualSelections)}
+                          />
+                        </div>
+                        {visualEditEnabled ? (
+                          <div className={cn("visual-edit-hint", !visualBridgeReady && "is-connecting")}>
+                            {visualBridgeReady ? <MousePointer2 className="size-3.5" /> : <PixelLoader />}
+                            <span>{visualBridgeReady ? "Click an element · Ctrl/Cmd-click to add · Esc to exit" : "Connecting element selector…"}</span>
+                          </div>
+                        ) : null}
+                        <div className="preview-floating-tools"><button type="button" aria-label="Copy preview URL" title="Copy preview URL" onClick={() => { void navigator.clipboard.writeText(currentPreviewUrl); toast.success("Preview link copied."); }}><Copy className="size-4" /></button></div>
+                      </div>
+                    ) : <PreviewPlaceholder reconnecting={isPreviewReconnecting} />}
+                  </div>
+                </div>
+                )}
+
+                {/* Open tool tabs stay mounted so unsaved code edits and terminal scroll survive tab switches. */}
+                {openTabs.includes("terminal") ? (
+                  <div role="tabpanel" id="workspace-panel-terminal" aria-labelledby="workspace-tab-terminal" hidden={activeTab !== "terminal"} className="h-full">
+                    <TerminalPanel entries={terminalEntries} isBuilding={isBuilding} />
+                  </div>
+                ) : null}
+                {openTabs.includes("code") ? (
+                  <div role="tabpanel" id="workspace-panel-code" aria-labelledby="workspace-tab-code" hidden={activeTab !== "code"} className="h-full">
+                    <CodeWorkbench
+                      projectId={project.id}
+                      files={files}
+                      latestChanges={latestBuild ? fileChangesFor(latestBuild.message) : undefined}
+                      selectedPath={selectedCodePath}
+                      onSelectPath={openFile}
+                      onFilesChange={setFiles}
+                    />
+                  </div>
+                ) : null}
+                {openTabs.includes("cloud") ? (
+                  <div role="tabpanel" id="workspace-panel-cloud" aria-labelledby="workspace-tab-cloud" hidden={activeTab !== "cloud"} className="h-full">
+                    {security ? (
+                      <div className="h-full overflow-y-auto bg-[#0a0a0a]">
+                        <SecretsPanel projectId={project.id} />
+                      </div>
+                    ) : (
+                    <CloudPanel
+                      project={project}
+                      slug={publishSlug}
+                      publishBaseLabel={publishBaseLabel}
+                      publishDomainSuffix={publishDomainSuffix}
+                      publishedAutoStopMinutes={publishedAutoStopMinutes}
+                      publishedUrl={resolvedPublishedUrl}
+                      canPublish={canPublish}
+                      isPublishing={isPublishing}
+                      isBuilding={isBuilding}
+                      hasUnpublishedChanges={hasUnpublishedChanges}
+                      domainRefreshKey={domainRefreshKey}
+                      focusRequest={cloudFocusRequest}
+                      cloudEnabled={cloudEnabled}
+                      cloudBusy={cloudBusy}
+                      onSetCloudEnabled={(enabled) => void changeCloudEnabled(enabled)}
+                      onAskAgent={askAgent}
+                      onProjectChange={(next) => setProject((current) => ({ ...next, previewUrl: current.previewUrl }))}
+                      onSlugChange={setPublishSlug}
+                      onPublish={() => void publishProject()}
+                      onUnpublish={() => void unpublishProject()}
+                    />
+                    )}
+                  </div>
+                ) : null}
+                {openTabs.includes("git") ? (
+                  <div role="tabpanel" id="workspace-panel-git" aria-labelledby="workspace-tab-git" hidden={activeTab !== "git"} className="h-full">
+                    <GitPanel
+                      builds={builds}
+                      selectedId={detailsMessage?.id ?? null}
+                      details={detailsMessage ? (
+                        <ChangeDetails
+                          changedPaths={changedPathsFor(detailsMessage)}
+                          fileChanges={fileChangesFor(detailsMessage)}
+                          files={files}
+                          selectedPath={detailsPath}
+                          onSelectPath={setDetailsPath}
+                          onOpenFile={openFile}
+                        />
+                      ) : null}
+                      projectId={project.id}
+                      projectTitle={project.title}
+                      githubRefreshKey={githubRefreshKey}
+                      canCommit={Boolean(project.sandboxId) && !isBuilding}
+                      onFilesChanged={() => void reloadAfterGitHubSync()}
+                      restoringMessageId={restoringMessageId}
+                      isBuilding={isBuilding}
+                      relativeNow={relativeNow}
+                      onSelect={openDetails}
+                      onBack={() => setDetailsMessage(null)}
+                      onRestore={(message) => void restoreCheckpoint(message)}
+                      security={security ? {
+                        source: project.securitySource,
+                        onPushed: () => {
+                          void reloadProjectState();
+                        },
+                      } : undefined}
+                    />
+                  </div>
+                ) : null}
+                {activeTab === "launcher" ? (
+                  <ToolLauncher
+                    openTabs={openTabs}
+                    onOpen={openTab}
+                    tools={tabMeta}
+                    order={security ? SECURITY_TOOL_ORDER : TOOL_ORDER}
+                    onCancel={() => {
+                      if (!security) {
+                        showTab(lastTab);
+                        return;
+                      }
+                      const back = openTabs.find((tab) => tab === lastTab) ?? openTabs[0];
+                      if (back) showTab(back);
+                      else collapsePane();
+                    }}
+                  />
+                ) : null}
+              </div>
             </div>
           </section>
         </Panel>

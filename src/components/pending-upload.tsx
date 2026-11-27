@@ -1,6 +1,7 @@
 "use client";
 
-import { Check, ImagePlus, LoaderCircle, TriangleAlert, X } from "lucide-react";
+import { Check, ImagePlus, TriangleAlert, X } from "lucide-react";
+import { PixelLoader } from "@/components/pixel-loader";
 import Image from "next/image";
 import { useEffect, useState } from "react";
 
@@ -43,7 +44,7 @@ export function PendingUpload({
       <button type="button" aria-label={`Remove ${file.name}`} onClick={onRemove}><X className="size-3" /></button>
       {status ? (
         <span className="pending-upload-status" aria-label={status === "uploading" ? "Uploading image" : status === "uploaded" ? "Image uploaded" : "Image upload failed"}>
-          {status === "uploading" ? <LoaderCircle className="size-3 animate-spin" /> : status === "uploaded" ? <Check className="size-3" /> : <TriangleAlert className="size-3" />}
+          {status === "uploading" ? <PixelLoader size="sm" /> : status === "uploaded" ? <Check className="size-3" /> : <TriangleAlert className="size-3" />}
         </span>
       ) : null}
       {status === "error" && onRetry ? <button type="button" className="pending-upload-retry" onClick={onRetry}>Retry</button> : null}

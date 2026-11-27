@@ -1,8 +1,11 @@
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
+import { headers } from "next/headers";
+import { notFound, redirect } from "next/navigation";
 import { PublishedAppFrame } from "@/components/published-app-frame";
 import { getPublishedAppRuntimeUrl } from "@/lib/daytona";
+import { directPublishedUrl, hostnameFromHeader, isAppHostname, trustedEdgeHostname } from "@/lib/domains";
 import { publishedFrameUrl, safeAppPath } from "@/lib/publish-url";
+import { badgeHrefFor } from "@/lib/remix";
 import { getPublishedProject } from "@/lib/store";
 
 type Props = {
@@ -41,6 +44,17 @@ export default async function PublishedAppPage({ params, searchParams }: Props) 
   const project = await getPublishedProject(slug);
   if (!project) notFound();
   const appPath = await requestedAppPath(params, searchParams);
+  const directOrigin = directPublishedUrl(slug);
+  if (directOrigin) {
+    const headerList = await headers();
+    const requestHost =
+      trustedEdgeHostname(headerList) ||
+      hostnameFromHeader(headerList.get("x-forwarded-host")) ||
+      hostnameFromHeader(headerList.get("host"));
+    if (isAppHostname(requestHost)) {
+      redirect(new URL(appPath, directOrigin).toString());
+    }
+  }
   const runtimeUrl = await getPublishedAppRuntimeUrl(project).catch(() => null);
   if (!runtimeUrl) {
     return (
@@ -54,5 +68,12 @@ export default async function PublishedAppPage({ params, searchParams }: Props) 
       </main>
     );
   }
-  return <PublishedAppFrame title={project.title} runtimeUrl={publishedFrameUrl(runtimeUrl, appPath)} />;
+  return (
+    <PublishedAppFrame
+      title={project.title}
+      runtimeUrl={publishedFrameUrl(runtimeUrl, appPath)}
+      showBadge={project.showBadge}
+      badgeHref={badgeHrefFor(project)}
+    />
+  );
 }

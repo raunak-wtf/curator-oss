@@ -2,15 +2,20 @@ import path from "node:path";
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { ensureSandbox, getPreviewHealth, getPreviewUrl, getProjectFsRoot, getProjectRoot } from "../daytona";
-import { createMessage, updateAttachmentSandboxPath, updateProject } from "../store";
+import { createAgentApproval, createMessage, expireAgentApproval, getAgentApprovalDecisions, getDecryptedSecrets, getProjectCloud, getProjectRepository, listSecretNames, updateAttachmentSandboxPath, updateProject } from "../store";
 import { createSignedObjectReadUrl, downloadObject } from "../storage";
 import type {
+  AgentApprovalDecision,
   AgentEvent,
+  AgentQuestionRequest,
   AgentRunActivity,
+  ApprovalMode,
   Attachment,
   FileChangeSnapshot,
+  GitHubCommitInfo,
   Message,
   Project,
+  Skill,
   VisualElementSelection,
 } from "../types";
 import { safeFileName } from "../utils";
@@ -18,9 +23,21 @@ import { ensureVisualEditBridge } from "../visual-edit-bridge";
 import { isProductionBuildCommand, resolveAgentMaxTurns, shouldRefreshAgentContext } from "./agent-policy";
 import { buildSystemPrompt } from "./system-prompt";
 import { buildMultimodalUserContent, hasNativeFileParts } from "./multimodal";
+import { createTerminalLog, parseRunCommandOutput } from "./terminal-log";
+import { interactiveTools, isInteractiveTool, runInteractiveTool } from "./interactive-tools";
+import { cloudProviderTools, executeCloudProviderTool, isCloudProviderTool } from "./cloud-tools";
+import { GITHUB_TOOL_NAME, githubTool, runGitHubCommit } from "./github-tool";
+import { changesFromSnapshots, writeCommitMessage } from "./commit-message";
+import { pullBeforeBuild } from "../github/sync";
+import { importSecuritySource } from "../github/security-source";
+import { SECURITY_EXCLUDED_TOOLS, buildSecurityPrompt } from "./security-prompt";
+import { APPROVAL_TOOLS, PULL_REQUEST_TOOL_NAME, describeApproval, pullRequestTool, runPullRequestProposal } from "./security-tools";
 import { agentTools, executeAgentTool } from "./tools";
 
 export const isAgentConfigured = Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_MODEL);
+
+/** How long a Request review approval waits before the action is treated as denied. */
+const APPROVAL_TIMEOUT_MS = 10 * 60_000;
 
 type Emit = (event: AgentEvent) => void | Promise<void>;
 
@@ -31,6 +48,19 @@ function parseToolInput(value: string) {
   } catch {
     return { raw: value };
   }
+}
+
+/** The file, command, or query a tool call acted on, so the chat can open it in the right tab. */
+function activityTarget(name: string, input: unknown): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const value = input as Record<string, unknown>;
+  const pick = (...keys: string[]) => keys.map((key) => value[key]).find((item): item is string => typeof item === "string" && item.length > 0);
+  if (name === "run_command") return pick("command")?.slice(0, 300);
+  if (name === "move_file") return pick("destination", "source");
+  if (name === "search_files" || name === "web_search") return pick("query")?.slice(0, 200);
+  if (name === "fetch_url") return pick("url")?.slice(0, 300);
+  if (name === "neon_database" || name === "resend_email") return pick("action", "name", "sql")?.slice(0, 200);
+  return pick("path", "directory")?.slice(0, 300);
 }
 
 function isNativeFileCompatibilityError(error: unknown) {
@@ -46,9 +76,13 @@ export async function runAgent(input: {
   history: Message[];
   attachments: Attachment[];
   visualSelections: VisualElementSelection[];
+  skills?: Skill[];
+  /** Security mode only: whether file changes and commands wait for the user's approval. */
+  approvalMode?: ApprovalMode;
   emit: Emit;
 }) {
   const { emit, prompt } = input;
+  const approvalMode: ApprovalMode = input.approvalMode ?? "auto";
 
   if (!isAgentConfigured) {
     await emit({ type: "status", label: "Waiting for a model connection" });
@@ -63,14 +97,55 @@ export async function runAgent(input: {
   }
 
   await emit({ type: "status", label: "Starting a secure workspace" });
-  const { sandbox, project } = await ensureSandbox(input.project);
+  const { sandbox, project: sandboxProject } = await ensureSandbox(input.project);
+  let project = sandboxProject;
+  const security = project.mode === "security";
   const projectRoot = await getProjectRoot(sandbox);
   const projectFsRoot = getProjectFsRoot();
   await sandbox.process.executeCommand("mkdir -p app", path.posix.dirname(projectRoot), undefined, 30);
-  await ensureVisualEditBridge(sandbox, projectRoot, projectFsRoot).catch(() => null);
-  await emit({ type: "status", label: "Inspecting the project" });
+  if (security && project.securitySource) {
+    // Security mode: bring in the latest commit of the repository. Unpushed changes in the sandbox are kept.
+    await emit({ type: "status", label: `Checking ${project.securitySource.fullName} for new commits` });
+    const imported = await importSecuritySource(project, sandbox, projectRoot);
+    if (imported?.changed) {
+      project = { ...project, securitySource: imported.source };
+      await emit({ type: "status", label: `Imported ${imported.fileCount} files at ${imported.sha.slice(0, 7)}` });
+      await emit({ type: "files_changed", paths: [] });
+    } else if (imported?.kept) {
+      await emit({ type: "status", label: "Keeping your unpushed changes" });
+    }
+  }
+  if (!security) await ensureVisualEditBridge(sandbox, projectRoot, projectFsRoot).catch(() => null);
+  await emit({ type: "status", label: security ? "Working on the repository" : "Inspecting the project" });
+  if (input.skills?.length) {
+    await emit({ type: "status", label: `Applying ${input.skills.map((skill) => `/${skill.name}`).join(", ")}` });
+  }
   const runStartedAt = Date.now();
   const runActivity: AgentRunActivity[] = [];
+  const secretValues = Object.values(await getDecryptedSecrets(project.id).catch(() => ({} as Record<string, string>)));
+  const terminal = createTerminalLog(emit, secretValues);
+  const [cloud, secretNames, linkedRepository] = await Promise.all([
+    getProjectCloud(project.id).catch(() => null),
+    listSecretNames(project.id).then((items) => items.map((item) => item.name)).catch(() => [] as string[]),
+    getProjectRepository(project.id, project.ownerId).catch(() => null),
+  ]);
+  // Security reviews never sync or push, even if a repository is linked in Git Control.
+  const repository = security ? null : linkedRepository;
+  const cloudState = { enabled: cloud?.status === "ready", secretNames };
+  let githubInfo: GitHubCommitInfo | undefined;
+
+  // Two-way sync: commits pushed to the linked branch on GitHub come into the project before the agent starts.
+  let githubSyncNote = "";
+  if (repository && project.sandboxId) {
+    await emit({ type: "status", label: `Checking ${repository.fullName} for changes` });
+    const sync = await pullBeforeBuild(project, project.ownerId).catch(() => null);
+    if (sync?.pulled) {
+      await emit({ type: "status", label: `Synced ${sync.filesChanged} ${sync.filesChanged === 1 ? "file" : "files"} from GitHub` });
+      await emit({ type: "files_changed", paths: [] });
+    } else if (sync?.status.state === "diverged") {
+      githubSyncNote = `GitHub and Cognix have both changed ${repository.defaultBranch}. Keep building in the project's current files; when you finish, Cognix pushes its version to the cognix-sync branch and the user resolves it in Git Control.`;
+    }
+  }
 
   const stagedAttachments = await Promise.all(
     input.attachments.map(async (attachment) => {
@@ -119,7 +194,17 @@ export async function runAgent(input: {
     );
 
   let messages: ChatCompletionMessageParam[] = [
-    { role: "system", content: buildSystemPrompt(project, projectRoot, stagedAttachments.map((item) => item.attachment)) },
+    {
+      role: "system",
+      content: security
+        ? buildSecurityPrompt(project, projectRoot, {
+            attachments: stagedAttachments.map((item) => item.attachment),
+            skills: input.skills,
+            approvalMode,
+            secretNames,
+          })
+        : `${buildSystemPrompt(project, projectRoot, stagedAttachments.map((item) => item.attachment), input.skills, cloudState, repository)}${githubSyncNote ? `\n\n${githubSyncNote}` : ""}`,
+    },
     ...history,
     {
       role: "user",
@@ -136,10 +221,76 @@ export async function runAgent(input: {
   const changedPaths = new Set<string>();
   const fileChanges = new Map<string, FileChangeSnapshot>();
   let finalContent = "";
+  let pendingRequest: AgentQuestionRequest | null = null;
+
+  /** Saves the turn and stops before the preview steps, because the agent is waiting for the user. */
+  async function finishWithQuestions(request: AgentQuestionRequest) {
+    const content = finalContent.trim()
+      || (request.kind === "enable_cloud" ? "This needs Cognix Cloud. Turn it on to continue." : "Before I continue, I need a quick answer.");
+    await emit({ type: "token", value: content });
+    const changedPathList = [...changedPaths];
+    const fileChangeList = [...fileChanges.values()];
+    const completedAt = new Date();
+    const message = await createMessage(project.id, "assistant", content, {
+      tools: usedTools,
+      activity: runActivity.slice(-100),
+      commands: terminal.commands,
+      questions: request,
+      runStartedAt: new Date(runStartedAt).toISOString(),
+      runCompletedAt: completedAt.toISOString(),
+      runDurationMs: completedAt.getTime() - runStartedAt,
+      changedPaths: changedPathList,
+      fileChanges: fileChangeList,
+      ...(changedPathList.length
+        ? { summary: `Updated ${changedPathList.length} ${changedPathList.length === 1 ? "file" : "files"}` }
+        : {}),
+    });
+    await updateProject(project.id, project.ownerId, { status: project.previewUrl ? "ready" : "draft" });
+    await emit({
+      type: "done",
+      messageId: message.id,
+      changedPaths: changedPathList,
+      fileChanges: fileChangeList,
+      activity: runActivity.slice(-100),
+      commands: terminal.commands,
+      questions: request,
+      runDurationMs: completedAt.getTime() - runStartedAt,
+    });
+    return message;
+  }
   let previewReady = false;
   let productionBuildPassed = false;
   let completionNudges = 0;
   const maxAgentTurns = resolveAgentMaxTurns();
+  // Security mode: the build tools minus the preview, plus ask_user and the pull request proposal. No commit tool.
+  const securityTools = [
+    ...agentTools.filter((tool) => tool.type === "function" && !SECURITY_EXCLUDED_TOOLS.has(tool.function.name)),
+    ...interactiveTools.filter((tool) => tool.function.name === "ask_user"),
+    pullRequestTool,
+  ];
+  const securityToolNames = new Set(securityTools.map((tool) => tool.function.name));
+  // Request review: set when the user chooses "Allow everything for this run".
+  let approveRestOfRun = false;
+
+  /** Waits for the user to allow or deny tool calls. Polls the database so it works across server instances. */
+  async function waitForApproval(items: ReturnType<typeof describeApproval>[]): Promise<AgentApprovalDecision[]> {
+    const approval = await createAgentApproval(project.id, project.ownerId, items);
+    await emit({ type: "approval_request", approval });
+    await emit({ type: "status", label: items.length === 1 ? "Waiting for your approval" : `Waiting for your approval of ${items.length} actions` });
+    const deadline = Date.now() + APPROVAL_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const decisions = await getAgentApprovalDecisions(approval.id);
+      if (decisions) {
+        await emit({ type: "approval_resolved", id: approval.id, decisions });
+        return decisions;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+    }
+    await expireAgentApproval(approval.id);
+    const expired = items.map((item) => ({ callId: item.callId, decision: "deny" as const, note: "No answer in time. Stop and ask the user to continue when they're back." }));
+    await emit({ type: "approval_resolved", id: approval.id, decisions: expired });
+    return expired;
+  }
 
   let completedNaturally = false;
   for (let turn = 0; turn < maxAgentTurns; turn += 1) {
@@ -150,24 +301,34 @@ export async function runAgent(input: {
         {
           role: "user",
           content: [
-            "Continue the current build from the files already present in the sandbox.",
+            security
+              ? "Continue the current security task from the repository files already present in the sandbox."
+              : "Continue the current build from the files already present in the sandbox.",
             `Original request: ${prompt}`,
             changedFiles.length
               ? `Files changed so far: ${changedFiles.slice(-80).join(", ")}`
               : "No file changes have been recorded yet.",
-            "Re-inspect only the files needed for the remaining work. Do not recreate or overwrite working features unnecessarily.",
-            "Finish the requested app, run its full production build and fix every build failure, then start or repair the server on 0.0.0.0:3000, inspect the preview, and call get_preview_url.",
+            security
+              ? "Continue the security review from what you have already inspected without re-reading covered files. Complete any remaining review stages, skeptical verification, and coverage checks, then finish with the evidence-gated report."
+              : "Re-inspect only the files needed for the remaining work. Do not recreate or overwrite working features unnecessarily.",
+            ...(security ? [] : ["Finish the requested app, run its full production build and fix every build failure, then start or repair the server on 0.0.0.0:3000, inspect the preview, and call get_preview_url."]),
           ].join("\n\n"),
         },
       ];
       completionNudges = 0;
-      await emit({ type: "status", label: "Continuing with a focused build context" });
+      await emit({ type: "status", label: security ? "Continuing with a focused review context" : "Continuing with a focused build context" });
     }
 
+    const buildTools = [
+      ...agentTools,
+      ...interactiveTools,
+      ...(cloudState.enabled ? cloudProviderTools : []),
+      ...(repository ? [githubTool] : []),
+    ];
     const createStream = () => client.chat.completions.create({
       model: process.env.OPENAI_MODEL!,
       messages,
-      tools: agentTools,
+      tools: security ? securityTools : buildTools,
       tool_choice: "auto",
       stream: true,
       temperature: 0.2,
@@ -222,7 +383,7 @@ export async function runAgent(input: {
     });
 
     if (!calls.length) {
-      if ((!previewReady || !productionBuildPassed) && completionNudges < 2 && turn < maxAgentTurns - 1) {
+      if (!security && (!previewReady || !productionBuildPassed) && completionNudges < 2 && turn < maxAgentTurns - 1) {
         completionNudges += 1;
         messages.push({
           role: "user",
@@ -236,6 +397,35 @@ export async function runAgent(input: {
       break;
     }
 
+    // Request review: ask once for every file change or command in this turn, before running any of them.
+    const decisions = new Map<string, AgentApprovalDecision>();
+    if (security && approvalMode === "review" && !approveRestOfRun) {
+      const pending = calls.filter((call) => APPROVAL_TOOLS.has(call.function.name));
+      if (pending.length) {
+        const answer = await waitForApproval(pending.map((call) => describeApproval(call.id, call.function.name, parseToolInput(call.function.arguments))));
+        for (const item of answer) decisions.set(item.callId, item);
+        if (decisions.get("*")?.decision === "allow") approveRestOfRun = true;
+      }
+    }
+
+    // If the model pauses to ask for user consent (request_cognix_cloud or ask_user) in Build mode,
+    // never execute file mutations or shell commands in that same turn before the user answers.
+    const turnPausesForUser = !security && calls.some(
+      (call) =>
+        (call.function.name === "request_cognix_cloud" && !cloudState.enabled) ||
+        call.function.name === "ask_user",
+    );
+    const mutatingTools = new Set([
+      "write_file",
+      "edit_file",
+      "move_file",
+      "delete_file",
+      "run_command",
+      "neon_database",
+      "resend_email",
+      GITHUB_TOOL_NAME,
+    ]);
+
     for (const call of calls) {
       const toolInput = parseToolInput(call.function.arguments);
       const activityStartedAt = Date.now();
@@ -243,9 +433,171 @@ export async function runAgent(input: {
       usedTools.push(call.function.name);
       await emit({ type: "tool_start", id: activityId, name: call.function.name, input: toolInput });
 
+      if ((turnPausesForUser || pendingRequest !== null) && mutatingTools.has(call.function.name)) {
+        const summary = "Paused: waiting for user consent first";
+        await emit({ type: "tool_result", id: activityId, name: call.function.name, summary });
+        runActivity.push({
+          id: activityId,
+          name: call.function.name,
+          label: summary,
+          status: "done",
+          durationMs: 0,
+          target: activityTarget(call.function.name, toolInput),
+        });
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: JSON.stringify({
+            skipped: true,
+            reason: "Waiting for the user's answer/consent before modifying project files or running commands.",
+          }),
+        });
+        continue;
+      }
+
+      // Security mode: only the security tool set, whatever the model asks for. There is no preview or commit tool.
+      if (security && !securityToolNames.has(call.function.name)) {
+        const summary = `Needs attention: ${call.function.name} isn't available in Security mode`;
+        await emit({ type: "tool_result", id: activityId, name: call.function.name, summary });
+        runActivity.push({ id: activityId, name: call.function.name, label: summary, status: "error", durationMs: 0 });
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: JSON.stringify({ error: "This tool isn't available in Security mode. There is no preview, and only the user commits and pushes to GitHub (propose_pull_request asks them)." }),
+        });
+        continue;
+      }
+
+      const decision = decisions.get(call.id);
+      if (security && approvalMode === "review" && APPROVAL_TOOLS.has(call.function.name) && decision && decision.decision !== "allow") {
+        const summary = `Not allowed: ${describeApproval(call.id, call.function.name, toolInput).title}`;
+        await emit({ type: "tool_result", id: activityId, name: call.function.name, summary });
+        runActivity.push({ id: activityId, name: call.function.name, label: summary, status: "error", durationMs: 0, target: activityTarget(call.function.name, toolInput) });
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: JSON.stringify({
+            error: "The user denied this action. Don't retry it.",
+            ...(decision.note ? { userNote: decision.note } : {}),
+          }),
+        });
+        continue;
+      }
+
+      if (security && call.function.name === PULL_REQUEST_TOOL_NAME) {
+        let output: string;
+        let summary: string;
+        try {
+          const result = runPullRequestProposal(toolInput, pendingRequest !== null);
+          output = result.output;
+          summary = result.summary;
+          if (result.request) pendingRequest = result.request;
+        } catch (error) {
+          output = JSON.stringify({ error: error instanceof Error ? error.message : "Invalid input" });
+          summary = "Needs attention: invalid pull request";
+        }
+        await emit({ type: "tool_result", id: activityId, name: call.function.name, summary });
+        runActivity.push({ id: activityId, name: call.function.name, label: summary, status: summary.startsWith("Needs attention") ? "error" : "done", durationMs: Date.now() - activityStartedAt });
+        messages.push({ role: "tool", tool_call_id: call.id, content: output });
+        continue;
+      }
+
+      if (isInteractiveTool(call.function.name)) {
+        let interactiveOutput: string;
+        let interactiveSummary: string;
+        try {
+          const result = runInteractiveTool(call.function.name, toolInput, {
+            cloudEnabled: cloudState.enabled,
+            alreadyAsked: pendingRequest !== null,
+          });
+          interactiveOutput = result.output;
+          interactiveSummary = result.summary;
+          if (result.request) pendingRequest = result.request;
+        } catch (error) {
+          interactiveOutput = JSON.stringify({ error: error instanceof Error ? error.message : "Invalid input" });
+          interactiveSummary = "Needs attention: invalid question";
+        }
+        await emit({ type: "tool_result", id: activityId, name: call.function.name, summary: interactiveSummary });
+        runActivity.push({
+          id: activityId,
+          name: call.function.name,
+          label: interactiveSummary,
+          status: interactiveSummary.startsWith("Needs attention") ? "error" : "done",
+          durationMs: Date.now() - activityStartedAt,
+        });
+        messages.push({ role: "tool", tool_call_id: call.id, content: interactiveOutput });
+        continue;
+      }
+
+      if (isCloudProviderTool(call.function.name)) {
+        let cloudOutput: string;
+        let cloudSummary: string;
+        try {
+          const result = await executeCloudProviderTool(project, call.function.name, toolInput, cloudState.enabled);
+          cloudOutput = result.output;
+          cloudSummary = result.summary;
+          if (result.secretsUpdated) {
+            const [freshSecrets, freshNames] = await Promise.all([
+              getDecryptedSecrets(project.id).catch(() => ({} as Record<string, string>)),
+              listSecretNames(project.id).then((items) => items.map((item) => item.name)).catch(() => cloudState.secretNames),
+            ]);
+            terminal.addSecrets(Object.values(freshSecrets));
+            cloudState.secretNames = freshNames;
+          }
+        } catch (error) {
+          cloudOutput = JSON.stringify({ error: error instanceof Error ? error.message : "Cloud tool failed" });
+          cloudSummary = `Needs attention: ${error instanceof Error ? error.message : "Cloud tool failed"}`.slice(0, 300);
+        }
+        await emit({ type: "tool_result", id: activityId, name: call.function.name, summary: cloudSummary });
+        runActivity.push({
+          id: activityId,
+          name: call.function.name,
+          label: cloudSummary,
+          status: cloudSummary.startsWith("Needs attention") ? "error" : "done",
+          durationMs: Date.now() - activityStartedAt,
+          target: activityTarget(call.function.name, toolInput),
+        });
+        messages.push({ role: "tool", tool_call_id: call.id, content: cloudOutput });
+        continue;
+      }
+
+      if (call.function.name === GITHUB_TOOL_NAME && repository) {
+        let output: string;
+        let summary: string;
+        try {
+          const result = await runGitHubCommit(project, toolInput);
+          output = result.output;
+          summary = result.summary;
+          githubInfo = result.info;
+        } catch (error) {
+          output = JSON.stringify({ error: error instanceof Error ? error.message : "Invalid input" });
+          summary = "Needs attention: invalid commit request";
+        }
+        await emit({ type: "tool_result", id: activityId, name: call.function.name, summary });
+        runActivity.push({
+          id: activityId,
+          name: call.function.name,
+          label: summary,
+          status: githubInfo?.status === "error" || summary.startsWith("Needs attention") ? "error" : "done",
+          durationMs: Date.now() - activityStartedAt,
+        });
+        messages.push({ role: "tool", tool_call_id: call.id, content: output });
+        continue;
+      }
+
+      const commandInput = call.function.name === "run_command" && typeof toolInput === "object" && toolInput !== null
+        ? (toolInput as { command?: unknown; background?: unknown })
+        : null;
+      const terminalEntry = commandInput
+        ? await terminal.start(String(commandInput.command ?? ""), "agent", commandInput.background === true)
+        : null;
+
       let toolOutput: string;
       try {
-        const result = await executeAgentTool(project, sandbox, call.function.name, toolInput);
+        const result = await executeAgentTool(project, sandbox, call.function.name, toolInput, {
+          cloudEnabled: cloudState.enabled,
+        });
+        if (terminalEntry) await terminal.end(terminalEntry, parseRunCommandOutput(result.output));
         if (["write_file", "edit_file", "move_file", "delete_file", "run_command"].includes(call.function.name)) {
           previewReady = false;
         }
@@ -288,9 +640,11 @@ export async function runAgent(input: {
           label: result.summary,
           status: "done",
           durationMs: Date.now() - activityStartedAt,
+          target: activityTarget(call.function.name, toolInput),
         });
       } catch (error) {
         const failure = error instanceof Error ? error.message : "Tool failed";
+        if (terminalEntry) await terminal.end(terminalEntry, { exitCode: null, output: failure, failed: true });
         toolOutput = JSON.stringify({ error: error instanceof Error ? error.message : "Tool failed" });
         await emit({
           type: "tool_result",
@@ -304,11 +658,58 @@ export async function runAgent(input: {
           label: `Needs attention: ${failure}`.slice(0, 500),
           status: "error",
           durationMs: Date.now() - activityStartedAt,
+          target: activityTarget(call.function.name, toolInput),
         });
       }
 
       messages.push({ role: "tool", tool_call_id: call.id, content: toolOutput });
     }
+
+    if (pendingRequest) {
+      finalContent = content.trim();
+      break;
+    }
+  }
+
+  if (pendingRequest) {
+    return finishWithQuestions(pendingRequest);
+  }
+
+  if (security) {
+    // Security mode has no preview, install, or commit step. The user commits and pushes from Git Control.
+    if (!finalContent.trim()) {
+      finalContent = completedNaturally
+        ? "## Done\n\nThe run finished without a written summary. Ask a follow-up question, such as \"Summarize the findings\", to get one."
+        : "## Checkpoint\n\nCognix used this run's execution budget before finishing. Send \"Continue\" to pick up where it stopped.";
+    }
+    await emit({ type: "token", value: finalContent });
+    const completedAt = new Date();
+    const source = project.securitySource;
+    const changedPathList = [...changedPaths];
+    const fileChangeList = [...fileChanges.values()];
+    const message = await createMessage(project.id, "assistant", finalContent, {
+      tools: usedTools,
+      activity: runActivity.slice(-100),
+      commands: terminal.commands,
+      runStartedAt: new Date(runStartedAt).toISOString(),
+      runCompletedAt: completedAt.toISOString(),
+      runDurationMs: completedAt.getTime() - runStartedAt,
+      changedPaths: changedPathList,
+      fileChanges: fileChangeList,
+      ...(changedPathList.length ? { summary: `Updated ${changedPathList.length} ${changedPathList.length === 1 ? "file" : "files"}` } : {}),
+      ...(source ? { security: { repository: source.fullName, branch: source.branch, commit: source.importedSha } } : {}),
+    });
+    await updateProject(project.id, project.ownerId, { status: "ready" });
+    await emit({
+      type: "done",
+      messageId: message.id,
+      changedPaths: changedPathList,
+      fileChanges: fileChangeList,
+      activity: runActivity.slice(-100),
+      commands: terminal.commands,
+      runDurationMs: completedAt.getTime() - runStartedAt,
+    });
+    return message;
   }
 
   if (!completedNaturally) {
@@ -330,7 +731,10 @@ export async function runAgent(input: {
   let health = await getPreviewHealth(sandbox, 3000);
   if (!health.healthy) {
     await emit({ type: "status", label: "Installing app dependencies" });
-    const install = await sandbox.process.executeCommand("npm install --include=dev --no-audit --no-fund", projectRoot, { CI: "1" }, 360);
+    const installCommand = "npm install --include=dev --no-audit --no-fund";
+    const installEntry = await terminal.start(installCommand, "system");
+    const install = await sandbox.process.executeCommand(installCommand, projectRoot, { CI: "1" }, 360);
+    await terminal.end(installEntry, { exitCode: install.exitCode, output: install.result });
     if (install.exitCode !== 0) throw new Error(`Dependency installation failed:\n${install.result.slice(-4000)}`);
     health = await getPreviewHealth(sandbox, 3000);
 
@@ -355,6 +759,7 @@ export async function runAgent(input: {
         await sandbox.process.createSession(sessionId);
       }
       await emit({ type: "status", label: "Starting the development server" });
+      const devEntry = await terminal.start("npm run dev -- --hostname 0.0.0.0 --port 3000", "system", true);
       const command = await sandbox.process.executeSessionCommand(
         sessionId,
         {
@@ -373,8 +778,10 @@ export async function runAgent(input: {
       if (healthWait.exitCode !== 0) {
         const logs = await sandbox.process.getSessionCommandLogs(sessionId, command.cmdId);
         const output = [logs.stdout, logs.stderr, logs.output].filter(Boolean).join("\n").slice(-5000);
+        await terminal.end(devEntry, { exitCode: null, output: output || "No server output was captured.", failed: true });
         throw new Error(`The development server did not start:\n${output || "No server output was captured."}`);
       }
+      await terminal.end(devEntry, { exitCode: null, output: "Development server is running on port 3000." });
       health = await getPreviewHealth(sandbox, 3000);
       if (!health.healthy) {
         throw new Error(`The development server started but its home page returns HTTP ${health.status}.`);
@@ -388,6 +795,28 @@ export async function runAgent(input: {
   await emit({ type: "preview", url: previewUrl, sandboxId: sandbox.id });
   previewReady = true;
 
+  // The task is finished and verified: save it to GitHub. No confirmation needed; a failed push never fails the build.
+  if (repository && changedPaths.size > 0) {
+    await emit({ type: "status", label: `Committing to ${repository.fullName}` });
+    const commitStartedAt = Date.now();
+    await emit({ type: "status", label: "Writing the commit message" });
+    const message = await writeCommitMessage({
+      request: prompt,
+      summary: finalContent,
+      changes: changesFromSnapshots([...changedPaths], [...fileChanges.values()]),
+    });
+    await emit({ type: "status", label: `Committing to ${repository.fullName}` });
+    const result = await runGitHubCommit(project, { message });
+    if (!(result.info.status === "unchanged" && githubInfo?.status === "committed")) githubInfo = result.info;
+    runActivity.push({
+      id: `github-${commitStartedAt}`,
+      name: GITHUB_TOOL_NAME,
+      label: result.summary,
+      status: result.info.status === "error" ? "error" : "done",
+      durationMs: Date.now() - commitStartedAt,
+    });
+  }
+
   if (!finalContent.trim()) {
     finalContent = "## What changed\n\nThe requested update is implemented in the existing app.\n\n## Checks\n\n- The development server is healthy.\n- The live preview is ready.";
   }
@@ -399,6 +828,8 @@ export async function runAgent(input: {
   const message = await createMessage(project.id, "assistant", finalContent, {
     tools: usedTools,
     activity: runActivity.slice(-100),
+    commands: terminal.commands,
+    ...(githubInfo ? { github: githubInfo } : {}),
     runStartedAt: new Date(runStartedAt).toISOString(),
     runCompletedAt: completedAt.toISOString(),
     runDurationMs: completedAt.getTime() - runStartedAt,
@@ -415,6 +846,8 @@ export async function runAgent(input: {
     changedPaths: changedPathList,
     fileChanges: fileChangeList,
     activity: runActivity.slice(-100),
+    commands: terminal.commands,
+    ...(githubInfo ? { github: githubInfo } : {}),
     runDurationMs: completedAt.getTime() - runStartedAt,
   });
   return message;

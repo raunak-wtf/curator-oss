@@ -4,6 +4,7 @@ export function stripInitialBuildParams(href: string) {
   const url = new URL(href);
   url.searchParams.delete("prompt");
   url.searchParams.delete("attachments");
+  url.searchParams.delete("approvalMode");
   return `${url.pathname}${url.search}${url.hash}`;
 }
 

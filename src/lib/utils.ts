@@ -7,6 +7,8 @@ export function cn(...inputs: ClassValue[]) {
 
 export function titleFromPrompt(prompt: string) {
   const normalized = prompt
+    // Leading `/skill` references describe how to build, not what the app is called.
+    .replace(/(^|\s)\/[a-z0-9][a-z0-9-]*(?=\s|$)/g, " ")
     .replace(/[^a-zA-Z0-9\s'-]/g, " ")
     .replace(/\s+/g, " ")
     .trim();

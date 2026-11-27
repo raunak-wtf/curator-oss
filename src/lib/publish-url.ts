@@ -1,3 +1,5 @@
+import { directPublishedUrl, type DomainEnv } from "./domains";
+
 function firstForwardedValue(value: string | null) {
   return value?.split(",")[0]?.trim() || null;
 }
@@ -19,7 +21,13 @@ export function requestOrigin(request: Pick<Request, "headers" | "url">) {
   return requestUrl.origin;
 }
 
-export function publishedAppUrl(request: Pick<Request, "headers" | "url">, slug: string) {
+export function publishedAppUrl(
+  request: Pick<Request, "headers" | "url">,
+  slug: string,
+  env: DomainEnv = process.env,
+) {
+  const direct = directPublishedUrl(slug, env);
+  if (direct) return direct;
   return new URL(`/publish/${slug}`, requestOrigin(request)).toString();
 }
 

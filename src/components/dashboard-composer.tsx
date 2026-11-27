@@ -1,6 +1,7 @@
 "use client";
 
 import { ArrowUp, Code2, Paperclip } from "lucide-react";
+import { PixelLoader } from "@/components/pixel-loader";
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
@@ -129,7 +130,7 @@ export function DashboardComposer({ autoFocus = false }: { autoFocus?: boolean }
           <div className="flex items-center gap-3">
             <span id="composer-help" className="hidden text-[10px] text-white/30 sm:inline">Enter to build · Shift+Enter for a new line</span>
             <button type="submit" className="build-button" disabled={prompt.trim().length < 3 || isCreating} aria-label="Create project and start building">
-              {isCreating ? <span className="spinner" /> : <ArrowUp className="size-4" />}
+              {isCreating ? <PixelLoader /> : <ArrowUp className="size-4" />}
             </button>
           </div>
         </div>

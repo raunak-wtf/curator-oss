@@ -115,6 +115,45 @@ add the domain to the project on Vercel, or use a reverse proxy with on-demand c
 
 Deep links are forwarded: `https://app.customer.com/pricing?plan=pro` and `/publish/<slug>/pricing?plan=pro` open that
 same page inside the published app.
+
+#### Self-hosted VM setup with Caddy + Daytona Custom Preview Proxy (zero monthly proxy cost)
+
+For complete documentation, reference configs, `systemd` units, Coolify/Traefik coexistence rules, Cloudflare DNS automation, and an autonomous AI-agent deployment playbook covering:
+- **Builder domain** (e.g. `curator.codes`)
+- **Wildcard preview & published-apps domain** (e.g. `*.curatorsite.in`, with root `308` redirect to `curator.codes`)
+- **Unlimited custom domains** via Let's Encrypt On-Demand TLS
+
+see **[Infra/README.md](Infra/README.md)** and **[Infra/AGENT_SETUP_PLAYBOOK.md](Infra/AGENT_SETUP_PLAYBOOK.md)**.
+
+#### Alternative: Serverless serving with Cloudflare for SaaS and Daytona
+
+So customers only ever add DNS, and nothing per domain is configured on your hosting platform, put Cognix's zone
+on Cloudflare for SaaS and run the edge worker in `cloudflare/`. The worker is a
+[Daytona custom preview proxy](https://www.daytona.io/docs/en/custom-preview-proxy/): it serves each live custom
+domain straight from the published app's sandbox, so visitors stay on the customer domain with no iframe, no
+Daytona hostname, and working WebSockets. One-time setup:
+
+1. On the Cognix zone (for example `curator.codes`), enable **SSL/TLS → Custom Hostnames** and set the fallback origin
+   to a proxied record such as `edge.curator.codes` pointing at your server.
+2. Set `COGNIX_DOMAIN_CNAME_TARGET=edge.curator.codes`, `COGNIX_CF_SAAS_ZONE_ID=<zone id>`, a `CLOUDFLARE_API_TOKEN`
+   with **SSL and Certificates: Edit** on that zone, and `COGNIX_EDGE_SECRET` (`openssl rand -hex 32`).
+3. Deploy the worker: `cd cloudflare && npx wrangler secret put COGNIX_EDGE_SECRET && npx wrangler deploy`.
+
+Attaching a domain then registers it as a custom hostname automatically, and Cloudflare issues its certificate.
+For each request the worker asks `GET /api/edge/resolve?host=<host>` (authenticated by `COGNIX_EDGE_SECRET`) for the
+published app's Daytona preview URL on port 3001 and the headers to send. Cognix starts the sandbox and production
+server first if needed. The worker caches the answer for 60 seconds and forwards with:
+
+- `X-Daytona-Preview-Token`: the sandbox preview token. The Daytona API key stays on the Cognix server.
+- `X-Daytona-Skip-Preview-Warning: true`: no Daytona interstitial.
+- `X-Daytona-Disable-CORS: true`: the published app's own CORS rules apply instead of Daytona's allow-all default.
+- `X-Forwarded-Host: <customer host>` with `X-Daytona-Trust-Forwarded-Host: true`, so the app sees only the customer
+  host when it builds absolute URLs.
+
+When the hostname has no live publication, the worker forwards the request to Cognix, which renders the 404 page.
+When the sandbox is not answering, the worker shows a "This app is restarting" page that reloads itself, and its
+next lookup asks Cognix to re-check and restart the production server. The domain verification probe always goes to
+Cognix. If Cognix cannot be reached for a lookup, the request falls back to the iframe page on Cognix.
 Choosing **Check DNS** resolves both over DNS-over-HTTPS, then requests `https://<host>/.well-known/cognix-domain-check`
 to confirm traffic really reaches Cognix. A domain is marked live only when both succeed, so a reverse proxy that has
 no route for the hostname (Traefik's "no available server", for example) shows as **Needs attention** with the fix. Publishing a

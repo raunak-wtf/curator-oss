@@ -3,8 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   clonePublishedDependenciesCommand,
   getPreviewHealth,
+  isDirectPreviewProxyConfigured,
   isHealthyPreviewStatus,
+  publishedAutoStopMinutes,
   publishedBuildLimitsSource,
+  publishedProxyHeaders,
 } from "./daytona";
 
 function sandboxReturning(result: string) {
@@ -63,5 +66,33 @@ describe("published dependency snapshots", () => {
   it("limits Next.js build worker discovery inside small sandboxes", () => {
     expect(publishedBuildLimitsSource).toContain("slice(0, 1)");
     expect(publishedBuildLimitsSource).toContain("availableParallelism = () => 1");
+  });
+});
+
+describe("direct custom preview proxy configuration", () => {
+  it("enables direct preview proxy only when both apps domain and edge secret exist", () => {
+    expect(isDirectPreviewProxyConfigured({})).toBe(false);
+    expect(isDirectPreviewProxyConfigured({ COGNIX_APPS_DOMAIN: "apps.curatorsite.in" })).toBe(false);
+    expect(
+      isDirectPreviewProxyConfigured({ COGNIX_APPS_DOMAIN: "apps.curatorsite.in", COGNIX_EDGE_SECRET: "secret-123" }),
+    ).toBe(true);
+  });
+
+  it("parses scale-to-zero auto-stop minutes safely", () => {
+    expect(publishedAutoStopMinutes({})).toBe(0);
+    expect(publishedAutoStopMinutes({ COGNIX_PUBLISHED_AUTOSTOP_MINUTES: "15" })).toBe(15);
+    expect(publishedAutoStopMinutes({ COGNIX_PUBLISHED_AUTOSTOP_MINUTES: "-5" })).toBe(0);
+    expect(publishedAutoStopMinutes({ COGNIX_PUBLISHED_AUTOSTOP_MINUTES: "invalid" })).toBe(0);
+  });
+
+  it("builds Daytona custom preview proxy headers with token and forwarded host trust", () => {
+    expect(publishedProxyHeaders({ token: "tok-xyz" }, "shop.example.com")).toEqual({
+      "X-Daytona-Preview-Token": "tok-xyz",
+      "X-Daytona-Skip-Preview-Warning": "true",
+      "X-Daytona-Disable-CORS": "true",
+      "X-Forwarded-Host": "shop.example.com",
+      "X-Forwarded-Proto": "https",
+      "X-Daytona-Trust-Forwarded-Host": "true",
+    });
   });
 });

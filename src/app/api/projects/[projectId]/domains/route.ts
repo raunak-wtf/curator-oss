@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { requireViewer } from "@/lib/auth0";
-import { provisionDomainDns, verifyProjectDomain } from "@/lib/dns";
+import { provisionDomainDns, registerEdgeHostname, verifyProjectDomain } from "@/lib/dns";
 import { DomainRequestError, createVerificationToken, domainSetup, domainView, normalizeCustomHostname } from "@/lib/domains";
 import { errorResponse, notFound } from "@/lib/http";
 import {
@@ -66,6 +66,9 @@ export async function POST(request: Request, context: Context) {
       hostname,
       verificationToken: createVerificationToken(),
     });
+
+    // Register the hostname with the Cognix edge so it gets routing and TLS without manual hosting changes.
+    await registerEdgeHostname(domain.hostname).catch(() => false);
 
     // When the operator connected a DNS provider, create the records instead of asking the customer to.
     const managed = await provisionDomainDns(domain).catch(() => false);

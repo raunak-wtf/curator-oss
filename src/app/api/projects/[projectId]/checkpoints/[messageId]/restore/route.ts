@@ -4,11 +4,13 @@ import { requireViewer } from "@/lib/auth0";
 import { checkpointCanRestore } from "@/lib/checkpoints";
 import { ensurePreviewUrl, getProjectFsRoot, getProjectRoot, getSandbox } from "@/lib/daytona";
 import { errorResponse, notFound } from "@/lib/http";
+import { runGitHubCommit } from "@/lib/ai/github-tool";
 import {
   createMessage,
   deleteProjectFile,
   getMessage,
   getProject,
+  getProjectRepository,
   listProjectFiles,
   updateMessageMetadata,
   updateProject,
@@ -120,7 +122,7 @@ export async function POST(_request: Request, context: Context) {
       }
     }
 
-    await ensureVisualEditBridge(sandbox, root, fsRoot).catch(() => null);
+    if (project.mode !== "security") await ensureVisualEditBridge(sandbox, root, fsRoot).catch(() => null);
     const restoredAt = new Date().toISOString();
     await updateMessageMetadata(checkpoint.id, project.id, { restoredAt });
     const restoredPaths = restore.changes.map((change) => change.path);
@@ -130,14 +132,38 @@ export async function POST(_request: Request, context: Context) {
       `## Checkpoint restored\n\nReverted ${restoredPaths.length} ${restoredPaths.length === 1 ? "file" : "files"} to the state before this build.`,
       { checkpointRestore: true, sourceMessageId: checkpoint.id, restoredPaths },
     );
+    // Security mode has no preview, and only the user pushes to GitHub, so it stops here.
+    if (project.mode === "security") {
+      const updatedProject = await updateProject(project.id, viewer.id, { status: "ready" });
+      return Response.json({
+        message: restoreMessage,
+        restoredMessageId: checkpoint.id,
+        restoredAt,
+        restoredPaths,
+        files: await listProjectFiles(project.id),
+        project: updatedProject,
+        previewUrl: null,
+      });
+    }
     const previewUrl = await ensurePreviewUrl(project);
     const updatedProject = await updateProject(project.id, viewer.id, {
       status: previewUrl ? "ready" : "error",
       previewUrl: previewUrl ?? project.previewUrl,
     });
 
+    // Like Lovable's "Reverted to commit": the restored code is pushed to the linked repository automatically.
+    let github: unknown = null;
+    if (await getProjectRepository(project.id, viewer.id)) {
+      const original = typeof checkpoint.metadata.summary === "string" ? checkpoint.metadata.summary : "an earlier build";
+      const fileList = restoredPaths.slice(0, 15).map((file) => `- ${file}`).join("\n");
+      const message = `revert: undo "${original.toLowerCase()}"\n\nRestored ${restoredPaths.length} ${restoredPaths.length === 1 ? "file" : "files"} to their state before that build:\n${fileList}${restoredPaths.length > 15 ? `\n- …and ${restoredPaths.length - 15} more` : ""}`;
+      const result = await runGitHubCommit(project, { message });
+      github = result.info;
+      await updateMessageMetadata(restoreMessage.id, project.id, { github: result.info }).catch(() => null);
+    }
+
     return Response.json({
-      message: restoreMessage,
+      message: { ...restoreMessage, metadata: { ...restoreMessage.metadata, ...(github ? { github } : {}) } },
       restoredMessageId: checkpoint.id,
       restoredAt,
       restoredPaths,

@@ -1,0 +1,68 @@
+{
+	# Coexistence mode behind Coolify / Traefik (coolify-proxy):
+	# Traefik forwards unmatched HTTP (:80) -> 10.0.0.1:8088 and TCP TLS SNI (:443) -> 10.0.0.1:8443.
+	# Binding loopback + Docker bridge keeps 8088/8443 unexposed on the public interface.
+	http_port {$CADDY_HTTP_PORT:8088}
+	https_port {$CADDY_HTTPS_PORT:8443}
+	default_bind {$CADDY_BIND:127.0.0.1 10.0.0.1}
+
+	# Disable h3 advertisement so Caddy never sends `Alt-Svc: h3=":8443"` to public browsers.
+	servers {
+		protocols h1 h2
+	}
+
+	on_demand_tls {
+		ask {$COGNIX_INTERNAL_URL:http://127.0.0.1:3005}/api/edge/allow-domain?secret={$COGNIX_EDGE_SECRET}
+	}
+}
+
+# Explicit port-443 HTTPS redirect (Caddy's built-in ACME HTTP-01 solver runs first on /.well-known/acme-challenge/*)
+http:// {
+	redir https://{host}{uri} 308
+}
+
+# Redirect www.<builder-domain> -> https://<builder-domain>
+www.{$COGNIX_BUILDER_DOMAIN} {
+	tls {
+		on_demand
+	}
+	redir https://{$COGNIX_BUILDER_DOMAIN}{uri} 308
+}
+
+# Main Cognix / Curator builder application (e.g. https://curator.codes)
+{$COGNIX_BUILDER_DOMAIN} {
+	tls {
+		on_demand
+	}
+	encode zstd gzip
+	reverse_proxy {$COGNIX_INTERNAL_URL:http://127.0.0.1:3005}
+}
+
+# Root apps domain (e.g. https://curatorsite.in) redirects 308 to https://<builder-domain>
+{$COGNIX_APPS_DOMAIN} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+	redir https://{$COGNIX_BUILDER_DOMAIN} 308
+}
+
+# Wildcard *.<apps-domain>:
+# - <adj>-<noun>-<hex8>.curatorsite.in -> Daytona port 3000 (live preview + HMR WebSockets)
+# - <slug>.curatorsite.in              -> Daytona port 3001 (published app)
+# - www.curatorsite.in                 -> 308 redirect to https://<builder-domain>
+*.{$COGNIX_APPS_DOMAIN} {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+	@www host www.{$COGNIX_APPS_DOMAIN}
+	redir @www https://{$COGNIX_BUILDER_DOMAIN} 308
+	reverse_proxy {$COGNIX_EDGE_PROXY_URL:http://127.0.0.1:3006}
+}
+
+# Unlimited customer custom domains (On-Demand TLS via Let's Encrypt HTTP-01, gated by /api/edge/allow-domain)
+https:// {
+	tls {
+		on_demand
+	}
+	reverse_proxy {$COGNIX_EDGE_PROXY_URL:http://127.0.0.1:3006}
+}
