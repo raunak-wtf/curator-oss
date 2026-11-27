@@ -12,6 +12,7 @@ import {
   FileCode2,
   FolderTree,
   Globe2,
+  Hammer,
   History,
   ImagePlus,
   Mail,
@@ -48,21 +49,25 @@ import { CLOUD_FEATURES } from "@/lib/cloud-features";
 import { LoadingState, PixelLoader } from "@/components/pixel-loader";
 import { useSkillCommands } from "@/components/skills/use-skill-commands";
 import { useVoiceInput } from "@/components/use-voice-input";
+import { BuildModeMenu } from "@/components/workspace/build-mode-menu";
 import { CloudPanel } from "@/components/workspace/cloud-panel";
 import { GitPanel, type BuildCheckpoint } from "@/components/workspace/git-panel";
 import { TerminalPanel, type TerminalEntry } from "@/components/workspace/terminal-panel";
 import { SECURITY_TOOL_ORDER, SECURITY_TOOL_TABS, TOOL_ORDER, TOOL_TABS, ToolLauncher, type ToolTab } from "@/components/workspace/tool-launcher";
+import { VisualEditInspector } from "@/components/workspace/visual-edit-inspector";
 import { SecretsPanel } from "@/components/secrets-panel";
 import { ApprovalCard } from "@/components/security/approval-card";
 import { ApprovalModeMenu } from "@/components/security/approval-mode-menu";
 import { PullRequestCard, pullRequestDecisionFor } from "@/components/security/pull-request-card";
 import { RunChips, type RunChipActivity } from "@/components/security/run-chips";
+import type { ThemeToken } from "@/lib/direct-visual-edit";
 import type {
   AgentApprovalRequest,
   AgentEvent,
   AgentRunActivity,
   ApprovalMode,
   Attachment,
+  BuildChatMode,
   FileChangeSnapshot,
   GitHubCommitInfo,
   Message,
@@ -420,6 +425,7 @@ export function WorkspaceClient({
   const workbenchPanelRef = usePanelRef();
   const [paneOpen, setPaneOpen] = useState(!security || Boolean(initialTab));
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>(initialApprovalMode ?? "auto");
+  const [chatMode, setChatMode] = useState<BuildChatMode>("build");
   const [pendingApproval, setPendingApproval] = useState<AgentApprovalRequest | null>(initialApproval);
   const [pullRequestDecisions, setPullRequestDecisions] = useState<Record<string, ReturnType<typeof pullRequestDecisionFor>>>({});
   const [cloudEnabled, setCloudEnabled] = useState(initialCloudEnabled);
@@ -702,6 +708,43 @@ export function WorkspaceClient({
     );
   }, [previewOrigin, visualChannel]);
 
+  const postVisualElementPreview = useCallback(
+    (selector: string, patch: { text?: string; className?: string }) => {
+      const frameWindow = previewFrameRef.current?.contentWindow;
+      if (!frameWindow || !previewOrigin) return;
+      frameWindow.postMessage(
+        {
+          source: VISUAL_EDIT_SOURCE,
+          version: VISUAL_EDIT_VERSION,
+          channelId: visualChannel,
+          type: "apply_live_preview",
+          selector,
+          ...patch,
+        },
+        previewOrigin,
+      );
+    },
+    [previewOrigin, visualChannel],
+  );
+
+  const postVisualThemePreview = useCallback(
+    (tokens: ThemeToken[]) => {
+      const frameWindow = previewFrameRef.current?.contentWindow;
+      if (!frameWindow || !previewOrigin) return;
+      frameWindow.postMessage(
+        {
+          source: VISUAL_EDIT_SOURCE,
+          version: VISUAL_EDIT_VERSION,
+          channelId: visualChannel,
+          type: "apply_theme_preview",
+          tokens,
+        },
+        previewOrigin,
+      );
+    },
+    [previewOrigin, visualChannel],
+  );
+
   useEffect(() => {
     function handleVisualMessage(event: MessageEvent) {
       if (!previewOrigin || event.origin !== previewOrigin || event.source !== previewFrameRef.current?.contentWindow) return;
@@ -798,8 +841,10 @@ export function WorkspaceClient({
       value: string,
       preuploadedIds: string[] = [],
       referencedSelections: VisualElementSelection[] = visualSelections,
+      overrideChatMode?: BuildChatMode,
     ) => {
       const cleanPrompt = value.trim();
+      const effectiveChatMode: BuildChatMode = security ? "build" : (overrideChatMode ?? chatMode);
       if (!cleanPrompt || isBuilding) return;
       if (uploads.some((item) => item.status === "uploading")) {
         toast.message("Wait for the image upload to finish before sending.");
@@ -822,7 +867,14 @@ export function WorkspaceClient({
         window.clearTimeout(continueWatchRef.current);
         continueWatchRef.current = null;
       }
-      setActivities([{ id: "status", name: "status", label: "Preparing your build", status: "running" }]);
+      setActivities([
+        {
+          id: "status",
+          name: "status",
+          label: effectiveChatMode === "plan" ? "Inspecting project to prepare plan" : "Preparing your build",
+          status: "running",
+        },
+      ]);
 
       const userMessage: Message = {
         id: `local-user-${Date.now()}`,
@@ -862,7 +914,7 @@ export function WorkspaceClient({
             prompt: cleanPrompt,
             attachmentIds,
             visualSelections: selectedElements,
-            ...(security ? { approvalMode } : {}),
+            ...(security ? { approvalMode } : { chatMode: effectiveChatMode }),
           }),
         });
         if (!response.ok || !response.body) {
@@ -970,7 +1022,15 @@ export function WorkspaceClient({
             // The finished build saves its commands on the message, which the terminal reads from now on.
             if (event.commands) setLiveCommands([]);
             if (event.github) setGithubRefreshKey((current) => current + 1);
-            setProject((current) => ({ ...current, status: current.status === "published" ? "published" : "ready" }));
+            setProject((current) => ({
+              ...current,
+              status:
+                current.status === "published" || current.publishedAt
+                  ? "published"
+                  : event.chatMode === "plan" && !current.previewUrl
+                    ? "draft"
+                    : "ready",
+            }));
             setMessages((current) =>
               current.map((message) =>
                 message.id === assistantId
@@ -986,6 +1046,7 @@ export function WorkspaceClient({
                         ...(event.commands ? { commands: event.commands } : {}),
                         ...(event.questions ? { questions: event.questions } : {}),
                         ...(event.github ? { github: event.github } : {}),
+                        ...(event.chatMode ? { chatMode: event.chatMode } : {}),
                         ...(typeof event.runDurationMs === "number" ? { runDurationMs: event.runDurationMs } : {}),
                       },
                     }
@@ -1028,7 +1089,7 @@ export function WorkspaceClient({
         setLiveCommands((current) => current.map((item) => (item.running ? { ...item, running: false } : item)));
       }
     },
-    [approvalMode, isBuilding, postVisualState, project.id, security, uploads, visualSelections],
+    [approvalMode, chatMode, isBuilding, postVisualState, project.id, security, uploads, visualSelections],
   );
 
   async function restoreCheckpoint(message: Message) {
@@ -1605,6 +1666,26 @@ export function WorkspaceClient({
                               />
                             )
                           ) : null}
+                          {!security && message.metadata.chatMode === "plan" && !isStreamingMessage && !questionRequest && !isBuilding ? (
+                            <div className="mt-3">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setChatMode("build");
+                                  void submitPrompt(
+                                    "Implement the approved plan above step by step, run the full production build, and verify the live preview.",
+                                    [],
+                                    [],
+                                    "build",
+                                  );
+                                }}
+                                className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-[12.5px] font-semibold text-black hover:bg-white/85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white [@media(pointer:coarse)]:h-11"
+                              >
+                                <Hammer className="size-3.5" aria-hidden="true" />
+                                Build this plan
+                              </button>
+                            </div>
+                          ) : null}
                           {message.metadata.error === true && previousUserMessage ? (
                             <button
                               type="button"
@@ -1679,6 +1760,31 @@ export function WorkspaceClient({
             </div>
 
             <div className="chat-composer-wrap shrink-0 pt-2">
+              {!security && visualEditEnabled ? (
+                <VisualEditInspector
+                  projectId={project.id}
+                  selections={visualSelections}
+                  onPreviewElement={postVisualElementPreview}
+                  onPreviewTheme={postVisualThemePreview}
+                  onFileSaved={(saved) =>
+                    setFiles((current) => {
+                      const exists = current.some((item) => item.path === saved.path);
+                      return exists
+                        ? current.map((item) => (item.path === saved.path ? saved : item))
+                        : [...current, saved].sort((a, b) => a.path.localeCompare(b.path));
+                    })
+                  }
+                  onAskAiInstead={(nextPrompt) => {
+                    setChatMode("build");
+                    askAgent(nextPrompt);
+                  }}
+                  onClose={() => {
+                    postVisualThemePreview([]);
+                    postVisualState(false, visualSelections);
+                    setVisualEditEnabled(false);
+                  }}
+                />
+              ) : null}
               <div className="mb-2 flex gap-2 overflow-x-auto px-1 pb-0.5">
                 {activeSuggestions.map((suggestion) => <button key={suggestion} type="button" className="suggestion-chip" onClick={() => setPrompt(suggestion)}>{suggestion}</button>)}
               </div>
@@ -1730,7 +1836,13 @@ export function WorkspaceClient({
                     ref={composerRef}
                     value={prompt}
                     rows={2}
-                    placeholder={security ? "Ask about this repository, or type / for skills…" : "Ask anything, or type / for skills…"}
+                    placeholder={
+                      security
+                        ? "Ask about this repository, or type / for skills…"
+                        : chatMode === "plan"
+                          ? "Ask a question or plan a feature (read-only)…"
+                          : "Ask anything, or type / for skills…"
+                    }
                     aria-label={security ? "Message the security agent" : "Continue building this app"}
                     {...skillCommands.textareaProps}
                     onChange={(event) => {
@@ -1777,7 +1889,11 @@ export function WorkspaceClient({
                       </button>
                     </div>
                     <div className="flex items-center gap-1">
-                      {security ? <ApprovalModeMenu value={approvalMode} onChange={chooseApprovalMode} disabled={isBuilding} /> : null}
+                      {security ? (
+                        <ApprovalModeMenu value={approvalMode} onChange={chooseApprovalMode} disabled={isBuilding} />
+                      ) : (
+                        <BuildModeMenu value={chatMode} onChange={setChatMode} disabled={isBuilding} />
+                      )}
                       <button
                         type="button"
                         onClick={voice.start}

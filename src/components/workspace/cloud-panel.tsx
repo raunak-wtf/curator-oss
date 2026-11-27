@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  BarChart3,
   Check,
   Cloud,
   Database,
@@ -23,13 +24,14 @@ import { SecretsPanel } from "@/components/secrets-panel";
 import { CLOUD_FEATURE_ORDER, CLOUD_FEATURES, type CloudFeature } from "@/lib/cloud-features";
 import type { Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { CloudAnalyticsPanel } from "./cloud-analytics-panel";
 import { CloudAuthPanel } from "./cloud-auth-panel";
 import { CloudDatabasePanel } from "./cloud-database-panel";
 import { CloudEmailsPanel } from "./cloud-emails-panel";
 import { ProjectSettings } from "./project-settings";
 import { PublishSection } from "./publish-section";
 
-export type CloudSection = "settings" | "publish" | "domains" | "secrets" | "cloud" | CloudFeature;
+export type CloudSection = "settings" | "publish" | "domains" | "analytics" | "secrets" | "cloud" | CloudFeature;
 
 const FEATURE_ICONS: Record<CloudFeature, LucideIcon> = {
   database: Database,
@@ -44,6 +46,7 @@ const NAV: { heading: string; items: { id: CloudSection; label: string; icon: Lu
     items: [
       { id: "publish", label: "Publish", icon: Rocket },
       { id: "domains", label: "Domains", icon: Globe2 },
+      { id: "analytics", label: "Analytics", icon: BarChart3 },
       { id: "secrets", label: "Secrets", icon: KeyRound },
       { id: "settings", label: "Settings", icon: Settings },
     ],
@@ -247,6 +250,13 @@ export function CloudPanel(props: CloudPanelProps) {
                   onSlugChange={props.onSlugChange}
                   onPublish={props.onPublish}
                   onUnpublish={props.onUnpublish}
+                  onAskAgent={onAskAgent}
+                />
+              ) : section === "analytics" ? (
+                <CloudAnalyticsPanel
+                  projectId={project.id}
+                  publishedUrl={props.publishedUrl}
+                  isPublished={Boolean(project.publishedAt)}
                 />
               ) : section === "domains" ? (
                 <section aria-label="Domains">

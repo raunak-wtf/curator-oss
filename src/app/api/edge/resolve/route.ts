@@ -83,6 +83,7 @@ export async function GET(request: Request) {
     }
     return Response.json(
       {
+        projectId: project.id,
         upstream: target.upstream,
         headers: publishedProxyHeaders(target, hostname),
         title: project.title,
@@ -109,6 +110,7 @@ export async function GET(request: Request) {
 
   return Response.json(
     {
+      projectId: published.project.id,
       upstream: target.upstream,
       headers: publishedProxyHeaders(target, hostname),
       title: published.project.title,

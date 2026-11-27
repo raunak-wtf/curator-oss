@@ -2,7 +2,7 @@ import { getProjectRoot, getSandbox } from "@/lib/daytona";
 import { executeAgentTool } from "@/lib/ai/tools";
 import { requireViewer } from "@/lib/auth0";
 import { errorResponse, notFound } from "@/lib/http";
-import { getProject, listProjectFiles, upsertProjectFile } from "@/lib/store";
+import { getProject, getProjectCloud, listProjectFiles, upsertProjectFile } from "@/lib/store";
 import { z } from "zod";
 
 export const runtime = "nodejs";
@@ -43,8 +43,15 @@ export async function PATCH(request: Request, context: Context) {
     if (!project) return notFound();
     const body = z.object({ path: z.string().min(1).max(500), content: z.string().max(1_000_000) }).parse(await request.json());
     if (project.sandboxId) {
-      const sandbox = await getSandbox(project);
-      if (sandbox) await executeAgentTool(project, sandbox, "write_file", body);
+      const [sandbox, cloud] = await Promise.all([
+        getSandbox(project),
+        getProjectCloud(project.id).catch(() => null),
+      ]);
+      if (sandbox) {
+        await executeAgentTool(project, sandbox, "write_file", body, {
+          cloudEnabled: cloud?.status === "ready",
+        });
+      }
     }
     const file = await upsertProjectFile(project.id, body.path, body.content);
     return Response.json({ file });

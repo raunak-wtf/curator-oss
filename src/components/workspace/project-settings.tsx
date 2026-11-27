@@ -14,13 +14,16 @@ type Setting = "showBadge" | "publicRemix";
 export function ProjectSettings({ project, onProjectChange }: { project: Project; onProjectChange: (project: Project) => void }) {
   const [title, setTitle] = useState(project.title);
   const [savingTitle, setSavingTitle] = useState(false);
+  const [instructions, setInstructions] = useState(project.customInstructions ?? "");
+  const [savingInstructions, setSavingInstructions] = useState(false);
   const [saving, setSaving] = useState<Setting | null>(null);
   const [remixOpen, setRemixOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const nameId = useId();
+  const instructionsId = useId();
   const remixLink = typeof window === "undefined" ? `/remix/${project.id}` : `${window.location.origin}/remix/${project.id}`;
 
-  async function save(patch: Partial<Pick<Project, "title" | Setting>>) {
+  async function save(patch: Partial<Pick<Project, "title" | "customInstructions" | Setting>>) {
     const response = await fetch(`/api/projects/${project.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -91,6 +94,59 @@ export function ProjectSettings({ project, onProjectChange }: { project: Project
             className="inline-flex h-9 items-center gap-2 rounded-lg border border-white/10 px-3 text-[12.5px] font-medium text-white/80 hover:bg-white/[0.06] hover:text-white disabled:opacity-40 [@media(pointer:coarse)]:h-11"
           >
             {savingTitle ? <PixelLoader /> : null} Save
+          </button>
+        </div>
+      </form>
+
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (savingInstructions || instructions === (project.customInstructions ?? "")) return;
+          setSavingInstructions(true);
+          void save({ customInstructions: instructions })
+            .then(() => toast.success("Project knowledge saved."))
+            .catch((error: Error) => toast.error(error.message))
+            .finally(() => setSavingInstructions(false));
+        }}
+        className={card}
+      >
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <label htmlFor={instructionsId} className="text-[13px] font-medium text-white">
+            Project knowledge
+          </label>
+          <span className="text-[11.5px] tabular-nums text-white/40">
+            {instructions.length.toLocaleString()} / 12,000
+          </span>
+        </div>
+        <p className="mt-1 text-[12px] leading-5 text-white/50">
+          Persistent brand guidelines, UI conventions, domain terminology, or API notes automatically included in every Build and Plan prompt for this project.
+        </p>
+        <textarea
+          id={instructionsId}
+          rows={5}
+          maxLength={12000}
+          value={instructions}
+          onChange={(event) => setInstructions(event.target.value)}
+          placeholder="Example: Target audience is freelance interior designers. Keep tone editorial and concise, use USD currency formatting, and require admin approval on public listings…"
+          className="mt-2.5 block w-full resize-y rounded-lg border border-white/[0.12] bg-[#101010] px-3 py-2 text-[13px] leading-5 text-white outline-none placeholder:text-white/30 focus:border-white/35"
+        />
+        <div className="mt-2.5 flex items-center justify-end gap-2">
+          {instructions !== (project.customInstructions ?? "") ? (
+            <button
+              type="button"
+              disabled={savingInstructions}
+              onClick={() => setInstructions(project.customInstructions ?? "")}
+              className="inline-flex h-8 items-center rounded-lg px-3 text-[12px] font-medium text-white/65 hover:bg-white/[0.06] hover:text-white [@media(pointer:coarse)]:h-11"
+            >
+              Discard
+            </button>
+          ) : null}
+          <button
+            type="submit"
+            disabled={savingInstructions || instructions === (project.customInstructions ?? "")}
+            className="inline-flex h-8 items-center gap-2 rounded-lg bg-white px-3 text-[12.5px] font-semibold text-black hover:bg-white/85 disabled:cursor-not-allowed disabled:opacity-40 [@media(pointer:coarse)]:h-11"
+          >
+            {savingInstructions ? <PixelLoader /> : null} Save knowledge
           </button>
         </div>
       </form>

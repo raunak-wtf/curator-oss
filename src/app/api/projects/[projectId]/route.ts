@@ -82,6 +82,7 @@ export async function PATCH(request: Request, context: Context) {
         description: z.string().max(500).optional(),
         showBadge: z.boolean().optional(),
         publicRemix: z.boolean().optional(),
+        customInstructions: z.string().max(12_000).optional(),
       })
       .parse(await request.json());
     const project = await updateProject(projectId, viewer.id, patch);

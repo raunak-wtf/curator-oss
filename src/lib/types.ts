@@ -3,6 +3,9 @@ export type ProjectStatus = "draft" | "building" | "publishing" | "ready" | "pub
 /** "build" projects make apps; "security" projects review a GitHub repository without changing it. */
 export type ProjectMode = "build" | "security";
 
+/** In Build projects: "build" edits code and updates the preview; "plan" inspects read-only and proposes a plan. */
+export type BuildChatMode = "build" | "plan";
+
 /** The repository a security project reviews. Cognix's agent never pushes to it; the user commits and pushes from Git Control. */
 export type SecuritySource = {
   fullName: string;
@@ -60,6 +63,8 @@ export type Project = {
   publishedAt: string | null;
   showBadge: boolean;
   publicRemix: boolean;
+  /** Project-specific instructions ("Knowledge") automatically included in every Build/Plan prompt. */
+  customInstructions?: string;
   mode: ProjectMode;
   securitySource: SecuritySource | null;
   createdAt: string;
@@ -223,6 +228,7 @@ export type AgentEvent =
       commands?: TerminalCommand[];
       questions?: AgentQuestionRequest;
       github?: GitHubCommitInfo;
+      chatMode?: BuildChatMode;
       runDurationMs?: number;
     }
   | { type: "error"; message: string };
@@ -382,4 +388,51 @@ export type RepositoryCache = {
   commits: RepositoryCommit[] | null;
   /** When the commits were fetched; null when a push or pull made them out of date. */
   commitsFetchedAt: string | null;
+};
+
+
+export type AnalyticsDevice = "desktop" | "mobile" | "tablet";
+
+export type AnalyticsEventRecord = {
+  projectId: string;
+  hostname: string;
+  path: string;
+  referrerHost: string | null;
+  device: AnalyticsDevice;
+  visitorHash: string;
+  statusCode: number;
+  createdAt?: string;
+};
+
+export type ProjectAnalyticsSummary = {
+  days: number;
+  totalPageviews: number;
+  uniqueVisitors: number;
+  dailySeries: { date: string; pageviews: number; visitors: number }[];
+  topPaths: { path: string; views: number; visitors: number }[];
+  topReferrers: { referrer: string; views: number }[];
+  topHosts: { hostname: string; views: number }[];
+  devices: { device: AnalyticsDevice; views: number; percentage: number }[];
+};
+
+export type PublishCheckSeverity = "critical" | "warning" | "info";
+
+export type PublishCheckIssue = {
+  id: string;
+  category: "security" | "seo";
+  severity: PublishCheckSeverity;
+  title: string;
+  detail: string;
+  file?: string;
+  line?: number;
+  fixHint: string;
+};
+
+export type PublishCheckReport = {
+  score: number;
+  readyToPublish: boolean;
+  checkedFileCount: number;
+  checkedAt: string;
+  securityIssues: PublishCheckIssue[];
+  seoIssues: PublishCheckIssue[];
 };

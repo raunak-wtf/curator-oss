@@ -1,11 +1,11 @@
 "use client";
 
-import { Copy, ExternalLink, History, Rocket } from "lucide-react";
+import { CheckCircle2, Copy, ExternalLink, History, RefreshCw, Rocket, SearchCheck, ShieldAlert, Sparkles } from "lucide-react";
 import { PixelLoader } from "@/components/pixel-loader";
-import { useEffect, useId, useRef } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
 import { isReservedPublishSlug } from "@/lib/domains";
-import type { Project } from "@/lib/types";
+import type { Project, PublishCheckIssue, PublishCheckReport } from "@/lib/types";
 import { cn, formatRelativeDate } from "@/lib/utils";
 
 const SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
@@ -27,6 +27,7 @@ type PublishSectionProps = {
   onSlugChange: (slug: string) => void;
   onPublish: () => void;
   onUnpublish: () => void;
+  onAskAgent?: (prompt: string) => void;
 };
 
 export function PublishSection({
@@ -44,9 +45,52 @@ export function PublishSection({
   onSlugChange,
   onPublish,
   onUnpublish,
+  onAskAgent,
 }: PublishSectionProps) {
   const slugId = useId();
   const slugInputRef = useRef<HTMLInputElement>(null);
+  const [checkReport, setCheckReport] = useState<PublishCheckReport | null>(null);
+  const [checking, setChecking] = useState(true);
+  const [checkError, setCheckError] = useState<string | null>(null);
+
+  const loadPublishCheck = useCallback(async () => {
+    const response = await fetch(`/api/projects/${project.id}/publish-check`, { cache: "no-store" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error ?? "Could not run pre-publish checks.");
+    return payload as PublishCheckReport;
+  }, [project.id]);
+
+  useEffect(() => {
+    let active = true;
+    loadPublishCheck()
+      .then((report) => {
+        if (!active) return;
+        setCheckReport(report);
+        setCheckError(null);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setCheckError(err instanceof Error ? err.message : "Could not run pre-publish checks.");
+      })
+      .finally(() => {
+        if (active) setChecking(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [hasUnpublishedChanges, isBuilding, loadPublishCheck]);
+
+  async function rescanPublishChecks() {
+    setChecking(true);
+    setCheckError(null);
+    try {
+      setCheckReport(await loadPublishCheck());
+    } catch (err) {
+      setCheckError(err instanceof Error ? err.message : "Could not run pre-publish checks.");
+    } finally {
+      setChecking(false);
+    }
+  }
   const publishing = isPublishing || project.status === "publishing";
   const published = Boolean(project.publishedAt);
   const slugFormatValid = slug.length >= 3 && slug.length <= 48 && SLUG_PATTERN.test(slug);
@@ -263,6 +307,125 @@ export function PublishSection({
                 </button>
               </div>
             </form>
+          </div>
+
+          <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.02] p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-[13px] font-medium text-white">Pre-publish Security &amp; SEO readiness</h3>
+                <p className="mt-0.5 text-[12px] text-white/45">
+                  Scans source files for exposed secrets, unprotected API routes, metadata, OpenGraph, and crawler files.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void rescanPublishChecks()}
+                disabled={checking}
+                className={secondaryButton}
+              >
+                {checking ? <PixelLoader /> : <RefreshCw className="size-3.5" aria-hidden="true" />}
+                Re-scan
+              </button>
+            </div>
+
+            {checkError ? (
+              <div role="alert" className="mt-3 rounded-lg border border-red-400/25 bg-red-500/10 p-3 text-[12px] text-red-200">
+                <p>{checkError}</p>
+                <button
+                  type="button"
+                  onClick={() => void rescanPublishChecks()}
+                  className="mt-2 inline-flex h-7 items-center rounded-md bg-white px-2.5 text-[11.5px] font-semibold text-black hover:bg-white/85 [@media(pointer:coarse)]:h-10"
+                >
+                  Try again
+                </button>
+              </div>
+            ) : checking && !checkReport ? (
+              <div className="mt-3 flex items-center gap-2 text-[12px] text-white/50">
+                <PixelLoader /> <span>Scanning project files…</span>
+              </div>
+            ) : checkReport ? (
+              <div className="mt-3 space-y-3">
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <div className="rounded-lg border border-white/[0.07] bg-[#101010] px-3 py-2">
+                    <span className="text-[11px] text-white/45">Readiness score</span>
+                    <p className="mt-0.5 text-[15px] font-semibold tabular-nums text-white">{checkReport.score} / 100</p>
+                  </div>
+                  <div className="rounded-lg border border-white/[0.07] bg-[#101010] px-3 py-2">
+                    <span className="flex items-center gap-1.5 text-[11px] text-white/45">
+                      <ShieldAlert className="size-3" aria-hidden="true" /> Security findings
+                    </span>
+                    <p className="mt-0.5 text-[15px] font-semibold tabular-nums text-white">{checkReport.securityIssues.length}</p>
+                  </div>
+                  <div className="rounded-lg border border-white/[0.07] bg-[#101010] px-3 py-2">
+                    <span className="flex items-center gap-1.5 text-[11px] text-white/45">
+                      <SearchCheck className="size-3" aria-hidden="true" /> SEO &amp; metadata
+                    </span>
+                    <p className="mt-0.5 text-[15px] font-semibold tabular-nums text-white">{checkReport.seoIssues.length}</p>
+                  </div>
+                </div>
+
+                {checkReport.securityIssues.length === 0 && checkReport.seoIssues.length === 0 ? (
+                  <p className="flex items-center gap-2 text-[12px] text-emerald-300">
+                    <CheckCircle2 className="size-4 shrink-0" aria-hidden="true" />
+                    {checkReport.checkedFileCount > 0
+                      ? `Checked ${checkReport.checkedFileCount} files — no security or SEO issues detected.`
+                      : "Build your app first to run security and SEO checks."}
+                  </p>
+                ) : (
+                  <>
+                    <ul className="space-y-2">
+                      {[...checkReport.securityIssues, ...checkReport.seoIssues].map((issue: PublishCheckIssue) => (
+                        <li
+                          key={issue.id}
+                          className="rounded-lg border border-white/[0.07] bg-[#101010] p-2.5 text-[12px]"
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span
+                              className={cn(
+                                "rounded-full px-2 py-0.5 text-[10.5px] font-semibold uppercase tracking-wide",
+                                issue.severity === "critical"
+                                  ? "bg-red-500/15 text-red-300"
+                                  : issue.severity === "warning"
+                                    ? "bg-amber-400/15 text-amber-200"
+                                    : "bg-sky-400/15 text-sky-200",
+                              )}
+                            >
+                              {issue.category} · {issue.severity}
+                            </span>
+                            <span className="font-medium text-white/90">{issue.title}</span>
+                            {issue.file ? (
+                              <code className="ml-auto font-mono text-[11px] text-white/45">
+                                {issue.file}
+                                {issue.line ? `:${issue.line}` : ""}
+                              </code>
+                            ) : null}
+                          </div>
+                          <p className="mt-1 text-[11.5px] leading-5 text-white/55">{issue.fixHint}</p>
+                        </li>
+                      ))}
+                    </ul>
+
+                    {onAskAgent ? (
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const items = [...checkReport.securityIssues, ...checkReport.seoIssues]
+                              .map((issue) => `- [${issue.category.toUpperCase()} / ${issue.severity}] ${issue.title}: ${issue.fixHint}`)
+                              .join("\n");
+                            onAskAgent(`Fix these pre-publish Security and SEO findings:\n\n${items}`);
+                          }}
+                          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-[12px] font-semibold text-black hover:bg-white/85 [@media(pointer:coarse)]:h-11"
+                        >
+                          <Sparkles className="size-3.5" aria-hidden="true" />
+                          Fix issues with Cognix
+                        </button>
+                      </div>
+                    ) : null}
+                  </>
+                )}
+              </div>
+            ) : null}
           </div>
     </section>
   );

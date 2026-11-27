@@ -35,10 +35,48 @@ if (!COGNIX_EDGE_SECRET) {
 }
 
 const RESOLVE_PATH = "/api/edge/resolve";
+const ANALYTICS_PATH = "/api/edge/analytics";
 const PROBE_PATH = "/.well-known/cognix-domain-check";
 const HEALTH_PATH = "/_cognix-edge/healthz";
 const MAX_CACHED_HOSTS = 2000;
 const DEFAULT_RETRY_SECONDS = 4;
+
+/** @type {Array<{ projectId: string, hostname: string, path: string, referrer: string | null, userAgent: string | null, clientIp: string | null, statusCode: number, timestamp: string }>} */
+const pendingAnalytics = [];
+
+function queuePageviewAnalytics(projectId, hostname, req, statusCode) {
+  if (!projectId || req.method !== "GET" || statusCode >= 400) return;
+  const rawPath = safeTargetPath(req.url).split("?")[0] || "/";
+  if (/^(?:\/_next\/|\/__cognix|\/\.well-known\/|\/favicon|\/robots\.txt$|\/sitemap\.xml$)/i.test(rawPath)) return;
+  if (pendingAnalytics.length >= 500) return;
+  const xff = String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "").split(",")[0].trim();
+  const referrer = typeof req.headers.referer === "string" ? req.headers.referer.slice(0, 1000) : null;
+  const userAgent = typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"].slice(0, 500) : null;
+  pendingAnalytics.push({
+    projectId,
+    hostname,
+    path: rawPath.slice(0, 400),
+    referrer,
+    userAgent,
+    clientIp: xff || null,
+    statusCode,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+setInterval(() => {
+  if (!pendingAnalytics.length) return;
+  const batch = pendingAnalytics.splice(0, 100);
+  fetch(new URL(ANALYTICS_PATH, COGNIX_INTERNAL_URL), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-cognix-edge-secret": COGNIX_EDGE_SECRET,
+    },
+    body: JSON.stringify({ events: batch }),
+    signal: AbortSignal.timeout(8_000),
+  }).catch(() => undefined);
+}, 5_000).unref();
 
 const INTERNAL_HEADERS = new Set([
   "x-cognix-edge-host",
@@ -120,6 +158,7 @@ async function fetchTarget(hostname) {
   if (response.status === 200 && payload.upstream && payload.headers) {
     const value = {
       kind: "proxy",
+      projectId: typeof payload.projectId === "string" ? payload.projectId : null,
       upstream: payload.upstream,
       headers: payload.headers,
       badge: payload.badge ?? null,
@@ -315,6 +354,9 @@ function forwardHttpRequest(req, res, upstreamBase, extraHeaders, options) {
       }
 
       const contentType = String(proxyRes.headers["content-type"] || "").toLowerCase();
+      if (!options.isPreview && options.projectId && contentType.includes("text/html")) {
+        queuePageviewAnalytics(options.projectId, options.visitorHost, req, status);
+      }
       const shouldInjectBadge =
         Boolean(options.badge) &&
         status === 200 &&
@@ -444,6 +486,7 @@ const server = http.createServer(async (req, res) => {
       visitorHost: hostname,
       visitorProto: proto,
       isPreview: Boolean(target.isPreview),
+      projectId: target.projectId ?? null,
       badge: target.badge,
     });
     return;

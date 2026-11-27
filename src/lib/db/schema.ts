@@ -40,6 +40,8 @@ export const projects = pgTable(
     showBadge: boolean("show_badge").default(true).notNull(),
     /** Lets anyone with the remix link copy this project's code into their own project. */
     publicRemix: boolean("public_remix").default(false).notNull(),
+    /** Persistent per-project instructions ("Knowledge") injected into agent runs. */
+    customInstructions: text("custom_instructions").default("").notNull(),
     /** "build" for app projects; "security" for read-only security reviews of a GitHub repository. */
     mode: text("mode").$type<ProjectMode>().default("build").notNull(),
     /** Security mode: the repository being reviewed. Cognix only ever reads it. */
@@ -257,4 +259,24 @@ export const agentApprovals = pgTable(
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
   },
   (table) => [index("agent_approvals_project_status_idx").on(table.projectId, table.status)],
+);
+
+
+/** Cookieless edge pageview events for published apps (no raw IPs or cookies stored). */
+export const projectAnalyticsEvents = pgTable(
+  "project_analytics_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    hostname: text("hostname").notNull(),
+    path: text("path").notNull(),
+    referrerHost: text("referrer_host"),
+    device: text("device").default("desktop").notNull(),
+    visitorHash: text("visitor_hash").notNull(),
+    statusCode: integer("status_code").default(200).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index("project_analytics_project_created_idx").on(table.projectId, table.createdAt)],
 );

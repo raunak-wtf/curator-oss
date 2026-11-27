@@ -1,17 +1,20 @@
 import { encryptSecret, decryptSecret } from './secrets-crypto';
 import { and, asc, desc, eq, gte, lte, ne, sql } from "drizzle-orm";
 import { db } from "./db";
-import { agentApprovals, attachments, githubConnections, messages, projectDomains, projectFiles, projectRepositories, projects, users, projectSecrets, projectCloud, skills } from "./db/schema";
+import { agentApprovals, attachments, githubConnections, messages, projectAnalyticsEvents, projectDomains, projectFiles, projectRepositories, projects, users, projectSecrets, projectCloud, skills } from "./db/schema";
 import { previewSlugForProjectId } from "./domains";
 import { SKILLS_PER_ACCOUNT, SkillRequestError } from "./skills";
 import type {
   AgentApprovalDecision,
   AgentApprovalItem,
   AgentApprovalRequest,
+  AnalyticsDevice,
+  AnalyticsEventRecord,
   Attachment,
   Message,
   MessageRole,
   Project,
+  ProjectAnalyticsSummary,
   ProjectDomain,
   ProjectDomainStatus,
   ProjectFile,
@@ -62,6 +65,7 @@ type MemoryStore = {
   githubConnections: (GitHubConnection & StoredGitHubTokens)[];
   repositories: ProjectRepository[];
   repositoryCache: Map<string, RepositoryCache>;
+  analyticsEvents?: (AnalyticsEventRecord & { id: string; createdAt: string })[];
 };
 
 declare global {
@@ -82,6 +86,7 @@ const memory =
     githubConnections: [],
     repositories: [],
     repositoryCache: new Map<string, RepositoryCache>(),
+    analyticsEvents: [],
   });
 
 // Keeps development sessions working when an older in-memory store is reused after a reload.
@@ -92,6 +97,7 @@ memory.clouds ??= [];
 memory.skills ??= [];
 memory.githubConnections ??= [];
 memory.repositories ??= [];
+memory.analyticsEvents ??= [];
 
 function mapProject(row: typeof projects.$inferSelect): Project {
   return {
@@ -107,6 +113,7 @@ function mapProject(row: typeof projects.$inferSelect): Project {
     publishedAt: row.publishedAt?.toISOString() ?? null,
     showBadge: row.showBadge,
     publicRemix: row.publicRemix,
+    customInstructions: row.customInstructions ?? "",
     mode: row.mode === "security" ? "security" : "build",
     securitySource: row.securitySource ?? null,
     createdAt: row.createdAt.toISOString(),
@@ -276,6 +283,7 @@ export async function createProject(
     publishedAt: null,
     showBadge: true,
     publicRemix: false,
+    customInstructions: "",
     mode: options.mode ?? "build",
     securitySource: options.securitySource ?? null,
     createdAt: now.toISOString(),
@@ -308,7 +316,7 @@ export async function updateProject(
   patch: Partial<
     Pick<
       Project,
-      "title" | "description" | "status" | "sandboxId" | "previewUrl" | "publishSlug" | "publishedAt" | "showBadge" | "publicRemix" | "securitySource"
+      "title" | "description" | "status" | "sandboxId" | "previewUrl" | "publishSlug" | "publishedAt" | "showBadge" | "publicRemix" | "customInstructions" | "securitySource"
     >
   >,
 ): Promise<Project | null> {
@@ -1302,4 +1310,148 @@ export async function getPendingAgentApproval(projectId: string, ownerId: string
     .orderBy(desc(agentApprovals.createdAt))
     .limit(1);
   return row ? { id: row.id, items: row.items, createdAt: row.createdAt.toISOString() } : null;
+}
+
+
+export async function recordProjectAnalyticsEvents(events: AnalyticsEventRecord[]): Promise<number> {
+  if (!events.length) return 0;
+  const sanitized = events.slice(0, 100).map((event) => ({
+    projectId: event.projectId,
+    hostname: event.hostname.slice(0, 255).toLowerCase(),
+    path: (event.path.startsWith("/") ? event.path : `/${event.path}`).slice(0, 400),
+    referrerHost: event.referrerHost ? event.referrerHost.slice(0, 255).toLowerCase() : null,
+    device: (["desktop", "mobile", "tablet"].includes(event.device) ? event.device : "desktop") as AnalyticsDevice,
+    visitorHash: event.visitorHash.slice(0, 128),
+    statusCode: Math.max(100, Math.min(599, Math.trunc(event.statusCode || 200))),
+    createdAt: event.createdAt ? new Date(event.createdAt) : new Date(),
+  }));
+
+  if (!db) {
+    const store = globalThis.__cognixMemoryStore ?? memory;
+    store.analyticsEvents ??= [];
+    for (const item of sanitized) {
+      store.analyticsEvents.push({
+        id: crypto.randomUUID(),
+        ...item,
+        createdAt: item.createdAt.toISOString(),
+      });
+    }
+    if (store.analyticsEvents.length > 20_000) {
+      store.analyticsEvents.splice(0, store.analyticsEvents.length - 20_000);
+    }
+    return sanitized.length;
+  }
+
+  await db.insert(projectAnalyticsEvents).values(sanitized);
+  return sanitized.length;
+}
+
+export async function getProjectAnalyticsSummary(projectId: string, requestedDays = 7): Promise<ProjectAnalyticsSummary> {
+  const days = requestedDays === 30 ? 30 : 7;
+  const now = new Date();
+  const startUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - (days - 1)));
+
+  let rows: {
+    hostname: string;
+    path: string;
+    referrerHost: string | null;
+    device: string;
+    visitorHash: string;
+    createdAt: Date;
+  }[];
+
+  if (!db) {
+    const store = globalThis.__cognixMemoryStore ?? memory;
+    store.analyticsEvents ??= [];
+    rows = store.analyticsEvents
+      .filter((event) => event.projectId === projectId && new Date(event.createdAt) >= startUtc)
+      .map((event) => ({
+        hostname: event.hostname,
+        path: event.path,
+        referrerHost: event.referrerHost,
+        device: event.device,
+        visitorHash: event.visitorHash,
+        createdAt: new Date(event.createdAt),
+      }));
+  } else {
+    rows = await db
+      .select({
+        hostname: projectAnalyticsEvents.hostname,
+        path: projectAnalyticsEvents.path,
+        referrerHost: projectAnalyticsEvents.referrerHost,
+        device: projectAnalyticsEvents.device,
+        visitorHash: projectAnalyticsEvents.visitorHash,
+        createdAt: projectAnalyticsEvents.createdAt,
+      })
+      .from(projectAnalyticsEvents)
+      .where(and(eq(projectAnalyticsEvents.projectId, projectId), gte(projectAnalyticsEvents.createdAt, startUtc)))
+      .limit(50_000);
+  }
+
+  const dailyBuckets = new Map<string, { pageviews: number; visitors: Set<string> }>();
+  for (let offset = 0; offset < days; offset += 1) {
+    const day = new Date(startUtc.getTime() + offset * 86_400_000).toISOString().slice(0, 10);
+    dailyBuckets.set(day, { pageviews: 0, visitors: new Set() });
+  }
+
+  const allVisitors = new Set<string>();
+  const pathMap = new Map<string, { views: number; visitors: Set<string> }>();
+  const referrerMap = new Map<string, number>();
+  const hostMap = new Map<string, number>();
+  const deviceMap: Record<AnalyticsDevice, number> = { desktop: 0, mobile: 0, tablet: 0 };
+
+  for (const row of rows) {
+    const day = row.createdAt.toISOString().slice(0, 10);
+    const bucket = dailyBuckets.get(day);
+    if (bucket) {
+      bucket.pageviews += 1;
+      bucket.visitors.add(row.visitorHash);
+    }
+    allVisitors.add(row.visitorHash);
+
+    const pathEntry = pathMap.get(row.path) ?? { views: 0, visitors: new Set<string>() };
+    pathEntry.views += 1;
+    pathEntry.visitors.add(row.visitorHash);
+    pathMap.set(row.path, pathEntry);
+
+    const refLabel = row.referrerHost || "Direct / None";
+    referrerMap.set(refLabel, (referrerMap.get(refLabel) ?? 0) + 1);
+
+    hostMap.set(row.hostname, (hostMap.get(row.hostname) ?? 0) + 1);
+
+    const dev: AnalyticsDevice =
+      row.device === "mobile" || row.device === "tablet" ? row.device : "desktop";
+    deviceMap[dev] += 1;
+  }
+
+  const totalPageviews = rows.length;
+  const devices: ProjectAnalyticsSummary["devices"] = (["desktop", "mobile", "tablet"] as const).map((device) => ({
+    device,
+    views: deviceMap[device],
+    percentage: totalPageviews > 0 ? Math.round((deviceMap[device] / totalPageviews) * 100) : 0,
+  }));
+
+  return {
+    days,
+    totalPageviews,
+    uniqueVisitors: allVisitors.size,
+    dailySeries: [...dailyBuckets.entries()].map(([date, item]) => ({
+      date,
+      pageviews: item.pageviews,
+      visitors: item.visitors.size,
+    })),
+    topPaths: [...pathMap.entries()]
+      .map(([path, item]) => ({ path, views: item.views, visitors: item.visitors.size }))
+      .sort((a, b) => b.views - a.views)
+      .slice(0, 10),
+    topReferrers: [...referrerMap.entries()]
+      .map(([referrer, views]) => ({ referrer, views }))
+      .sort((a, b) => b.views - a.views)
+      .slice(0, 8),
+    topHosts: [...hostMap.entries()]
+      .map(([hostname, views]) => ({ hostname, views }))
+      .sort((a, b) => b.views - a.views)
+      .slice(0, 6),
+    devices,
+  };
 }

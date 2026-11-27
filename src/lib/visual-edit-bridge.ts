@@ -377,6 +377,42 @@ const CLIENT_BRIDGE_SOURCE = String.raw`(function () {
       state.selections = Array.isArray(data.selections) ? data.selections.slice(0, 5) : [];
       renderSelections();
     }
+    if (data.type === "apply_live_preview" && typeof data.selector === "string") {
+      var previewEl = null;
+      try { previewEl = document.querySelector(data.selector); } catch (_) { previewEl = null; }
+      if (previewEl) {
+        if (typeof data.className === "string") previewEl.setAttribute("class", data.className.slice(0, 2000));
+        if (typeof data.text === "string" && previewEl.children.length === 0) {
+          previewEl.textContent = data.text.slice(0, 1000);
+        }
+        renderSelections();
+      }
+    }
+    if (data.type === "apply_theme_preview" && Array.isArray(data.tokens)) {
+      var styleTag = document.getElementById("__cognix_theme_preview__");
+      if (!data.tokens.length) {
+        if (styleTag) styleTag.remove();
+        return;
+      }
+      if (!styleTag) {
+        styleTag = document.createElement("style");
+        styleTag.id = "__cognix_theme_preview__";
+        document.head.appendChild(styleTag);
+      }
+      var rootVars = [];
+      var darkVars = [];
+      data.tokens.slice(0, 40).forEach(function (token) {
+        if (!token || typeof token.name !== "string" || typeof token.value !== "string") return;
+        if (!/^--[a-zA-Z0-9-_]+$/.test(token.name)) return;
+        var safeVal = token.value.replace(/[;{}<>]/g, "").trim().slice(0, 120);
+        if (!safeVal) return;
+        if (token.scope === "dark") darkVars.push(token.name + ":" + safeVal + " !important;");
+        else rootVars.push(token.name + ":" + safeVal + " !important;");
+      });
+      styleTag.textContent =
+        (rootVars.length ? ":root{" + rootVars.join("") + "}" : "") +
+        (darkVars.length ? ".dark{" + darkVars.join("") + "}" : "");
+    }
   }
 
   function onViewportChange() {

@@ -11,6 +11,7 @@ import type {
   AgentRunActivity,
   ApprovalMode,
   Attachment,
+  BuildChatMode,
   FileChangeSnapshot,
   GitHubCommitInfo,
   Message,
@@ -21,7 +22,7 @@ import type {
 import { safeFileName } from "../utils";
 import { ensureVisualEditBridge } from "../visual-edit-bridge";
 import { isProductionBuildCommand, resolveAgentMaxTurns, shouldRefreshAgentContext } from "./agent-policy";
-import { buildSystemPrompt } from "./system-prompt";
+import { buildPlanSystemPrompt, buildSystemPrompt } from "./system-prompt";
 import { buildMultimodalUserContent, hasNativeFileParts } from "./multimodal";
 import { createTerminalLog, parseRunCommandOutput } from "./terminal-log";
 import { interactiveTools, isInteractiveTool, runInteractiveTool } from "./interactive-tools";
@@ -79,10 +80,13 @@ export async function runAgent(input: {
   skills?: Skill[];
   /** Security mode only: whether file changes and commands wait for the user's approval. */
   approvalMode?: ApprovalMode;
+  /** Build mode only: "plan" inspects read-only and returns an implementation plan without modifying files. */
+  chatMode?: BuildChatMode;
   emit: Emit;
 }) {
   const { emit, prompt } = input;
   const approvalMode: ApprovalMode = input.approvalMode ?? "auto";
+  const planMode = input.project.mode !== "security" && input.chatMode === "plan";
 
   if (!isAgentConfigured) {
     await emit({ type: "status", label: "Waiting for a model connection" });
@@ -203,7 +207,9 @@ export async function runAgent(input: {
             approvalMode,
             secretNames,
           })
-        : `${buildSystemPrompt(project, projectRoot, stagedAttachments.map((item) => item.attachment), input.skills, cloudState, repository)}${githubSyncNote ? `\n\n${githubSyncNote}` : ""}`,
+        : planMode
+          ? buildPlanSystemPrompt(project, projectRoot, stagedAttachments.map((item) => item.attachment), input.skills, cloudState)
+          : `${buildSystemPrompt(project, projectRoot, stagedAttachments.map((item) => item.attachment), input.skills, cloudState, repository)}${githubSyncNote ? `\n\n${githubSyncNote}` : ""}`,
     },
     ...history,
     {
@@ -269,6 +275,24 @@ export async function runAgent(input: {
     pullRequestTool,
   ];
   const securityToolNames = new Set(securityTools.map((tool) => tool.function.name));
+  const PLAN_READONLY_TOOLS = new Set([
+    "list_files",
+    "find_files",
+    "read_file",
+    "search_files",
+    "get_process_logs",
+    "list_processes",
+    "inspect_preview",
+    "web_search",
+    "fetch_url",
+  ]);
+  const planTools = [
+    ...agentTools.filter((tool) => tool.type === "function" && PLAN_READONLY_TOOLS.has(tool.function.name)),
+    ...interactiveTools.filter(
+      (tool) => tool.function.name === "ask_user" || (cloudState.enabled && tool.function.name === "read_cloud_guide"),
+    ),
+  ];
+  const planToolNames = new Set(planTools.map((tool) => tool.function.name));
   // Request review: set when the user chooses "Allow everything for this run".
   let approveRestOfRun = false;
 
@@ -328,7 +352,7 @@ export async function runAgent(input: {
     const createStream = () => client.chat.completions.create({
       model: process.env.OPENAI_MODEL!,
       messages,
-      tools: security ? securityTools : buildTools,
+      tools: security ? securityTools : planMode ? planTools : buildTools,
       tool_choice: "auto",
       stream: true,
       temperature: 0.2,
@@ -383,7 +407,7 @@ export async function runAgent(input: {
     });
 
     if (!calls.length) {
-      if (!security && (!previewReady || !productionBuildPassed) && completionNudges < 2 && turn < maxAgentTurns - 1) {
+      if (!security && !planMode && (!previewReady || !productionBuildPassed) && completionNudges < 2 && turn < maxAgentTurns - 1) {
         completionNudges += 1;
         messages.push({
           role: "user",
@@ -464,6 +488,18 @@ export async function runAgent(input: {
           role: "tool",
           tool_call_id: call.id,
           content: JSON.stringify({ error: "This tool isn't available in Security mode. There is no preview, and only the user commits and pushes to GitHub (propose_pull_request asks them)." }),
+        });
+        continue;
+      }
+
+      if (planMode && !planToolNames.has(call.function.name)) {
+        const summary = `Skipped: ${call.function.name} is disabled in Plan mode`;
+        await emit({ type: "tool_result", id: activityId, name: call.function.name, summary });
+        runActivity.push({ id: activityId, name: call.function.name, label: summary, status: "error", durationMs: 0 });
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: JSON.stringify({ error: "Plan mode is strictly read-only. Do not modify files or run commands; return your diagnosis or Markdown implementation plan instead." }),
         });
         continue;
       }
@@ -673,6 +709,36 @@ export async function runAgent(input: {
 
   if (pendingRequest) {
     return finishWithQuestions(pendingRequest);
+  }
+
+  if (planMode) {
+    if (!finalContent.trim()) {
+      finalContent = completedNaturally
+        ? "## Plan\n\nI inspected the project, but no written plan was produced. Ask a follow-up question to refine the plan."
+        : "## Plan checkpoint\n\nCognix reached the inspection turn limit. Send \"Continue\" to finish the plan.";
+    }
+    await emit({ type: "token", value: finalContent });
+    const completedAt = new Date();
+    const restoredStatus = project.publishedAt ? "published" : project.previewUrl ? "ready" : "draft";
+    const message = await createMessage(project.id, "assistant", finalContent, {
+      tools: usedTools,
+      activity: runActivity.slice(-100),
+      commands: terminal.commands,
+      chatMode: "plan",
+      runStartedAt: new Date(runStartedAt).toISOString(),
+      runCompletedAt: completedAt.toISOString(),
+      runDurationMs: completedAt.getTime() - runStartedAt,
+    });
+    await updateProject(project.id, project.ownerId, { status: restoredStatus });
+    await emit({
+      type: "done",
+      messageId: message.id,
+      activity: runActivity.slice(-100),
+      commands: terminal.commands,
+      chatMode: "plan",
+      runDurationMs: completedAt.getTime() - runStartedAt,
+    });
+    return message;
   }
 
   if (security) {

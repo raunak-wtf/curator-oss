@@ -44,6 +44,8 @@ export async function POST(request: Request, context: Context) {
         visualSelections: visualSelectionsSchema.optional().default([]),
         /** Security mode: "review" makes file changes and commands wait for the user's approval. */
         approvalMode: z.enum(["auto", "review"]).optional().default("auto"),
+        /** Build mode: "plan" inspects read-only and returns an implementation plan without modifying files. */
+        chatMode: z.enum(["build", "plan"]).optional().default("build"),
       })
       .parse(await request.json());
 
@@ -68,6 +70,7 @@ export async function POST(request: Request, context: Context) {
         size: item.size,
       })),
       visualSelections: body.visualSelections,
+      ...(project.mode !== "security" && body.chatMode === "plan" ? { chatMode: "plan" } : {}),
     });
 
     const encoder = new TextEncoder();
@@ -96,6 +99,7 @@ export async function POST(request: Request, context: Context) {
           visualSelections: body.visualSelections,
           skills,
           approvalMode: body.approvalMode,
+          chatMode: body.chatMode,
           emit,
         })
           .catch(async (error) => {
