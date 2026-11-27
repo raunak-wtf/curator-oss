@@ -3,15 +3,17 @@ import { canonicalAccountId } from "./identity";
 import type { Viewer } from "./types";
 
 export const isAuthConfigured = Boolean(
-  process.env.AUTH0_DOMAIN &&
-    process.env.AUTH0_CLIENT_ID &&
-    process.env.AUTH0_CLIENT_SECRET &&
-    process.env.AUTH0_SECRET &&
-    process.env.APP_BASE_URL,
+  process.env.AUTH0_DOMAIN?.trim() &&
+    process.env.AUTH0_CLIENT_ID?.trim() &&
+    process.env.AUTH0_CLIENT_SECRET?.trim() &&
+    process.env.AUTH0_SECRET?.trim(),
 );
 
 export const auth0 = isAuthConfigured
-  ? new Auth0Client({ enableAccessTokenEndpoint: false })
+  ? new Auth0Client({
+      enableAccessTokenEndpoint: false,
+      ...(process.env.APP_BASE_URL?.trim() ? { appBaseUrl: process.env.APP_BASE_URL.trim() } : {}),
+    })
   : null;
 
 export async function getViewer(): Promise<Viewer | null> {

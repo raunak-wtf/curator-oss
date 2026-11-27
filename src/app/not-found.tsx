@@ -11,10 +11,10 @@ export default function NotFound() {
           Cognix
         </span>
         <p className="not-published-code">404</p>
-        <h1>This project is not published</h1>
+        <h1>Page or project not found</h1>
         <p className="not-published-copy">
-          Nothing is being served at this address. The link may be mistyped, or the owner unpublished the project or
-          moved it to a different domain.
+          Nothing is being served at this address. The link may be mistyped, or if this is a published app URL, the
+          owner may have unpublished it or moved it to another domain.
         </p>
         <div className="not-published-actions">
           <Link href="/">Build an app with Cognix</Link>
