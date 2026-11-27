@@ -139,6 +139,8 @@ describe("buildSystemPrompt", () => {
     const onPrompt = buildSystemPrompt(project, "/home/daytona/app", [], [], {
       enabled: true,
       secretNames: ["DATABASE_URL", "BETTER_AUTH_SECRET"],
+      liveDatabaseSummary: "- **Cloud Database (PostgreSQL)**: Connected — 2 live tables",
+      liveStorageSummary: "- **Cloud Storage**: `cx-12345678-storage` (private, active in `.env.local`, 0 objects).",
     });
     expect(onPrompt).toContain("Cognix Cloud is **on** for this project");
     expect(onPrompt).toContain("## Exclusive Cognix Cloud tech stack");
@@ -149,6 +151,9 @@ describe("buildSystemPrompt", () => {
     expect(onPrompt).toContain("never run `npx create-next-app .` directly in the project root");
     expect(onPrompt).toContain("Do not call request_cognix_cloud.");
     expect(onPrompt).toContain("White-label communication rule");
+    expect(onPrompt).toContain("### Live Cognix Cloud resource state");
+    expect(onPrompt).toContain("2 live tables");
+    expect(onPrompt).toContain("read_preview_console");
     expect(offPrompt).toContain("## Built-in Cognix Cloud intelligence");
     expect(offPrompt).toContain('<cloud-skill name="cognix-cloud-auto-detection">');
     expect(offPrompt).not.toContain("## Built-in Cognix Cloud architecture skills");

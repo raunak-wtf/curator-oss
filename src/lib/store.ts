@@ -1,7 +1,7 @@
 import { encryptSecret, decryptSecret } from './secrets-crypto';
 import { and, asc, desc, eq, gte, lte, ne, sql } from "drizzle-orm";
 import { db } from "./db";
-import { agentApprovals, attachments, githubConnections, messages, projectAnalyticsEvents, projectDomains, projectFiles, projectRepositories, projects, users, projectSecrets, projectCloud, skills } from "./db/schema";
+import { agentApprovals, attachments, githubConnections, messages, projectAnalyticsEvents, projectConsoleLogs, projectDomains, projectFiles, projectRepositories, projects, users, projectSecrets, projectCloud, skills } from "./db/schema";
 import { previewSlugForProjectId } from "./domains";
 import { SKILLS_PER_ACCOUNT, SkillRequestError } from "./skills";
 import type {
@@ -30,7 +30,17 @@ import type {
   ProjectMode,
   RepositoryCache,
   SecuritySource,
+  PreviewConsoleEntry,
+  PreviewConsoleInput,
+  PreviewConsoleLevel,
+  PreviewConsoleSource,
 } from "./types";
+import {
+  PREVIEW_CONSOLE_MAX_ENTRIES,
+  computeConsoleFingerprint,
+  isIgnorableConsoleError,
+  redactConsoleSecrets,
+} from "./preview-console";
 import { titleFromPrompt } from "./utils";
 
 /** Plain token values. Expiry fields are null for OAuth App tokens, which do not expire. */
@@ -66,6 +76,7 @@ type MemoryStore = {
   repositories: ProjectRepository[];
   repositoryCache: Map<string, RepositoryCache>;
   analyticsEvents?: (AnalyticsEventRecord & { id: string; createdAt: string })[];
+  consoleLogs?: PreviewConsoleEntry[];
 };
 
 declare global {
@@ -98,6 +109,7 @@ memory.skills ??= [];
 memory.githubConnections ??= [];
 memory.repositories ??= [];
 memory.analyticsEvents ??= [];
+memory.consoleLogs ??= [];
 
 function mapProject(row: typeof projects.$inferSelect): Project {
   return {
@@ -500,6 +512,7 @@ export async function deleteProject(id: string, ownerId: string): Promise<boolea
     memory.secrets = memory.secrets.filter((item) => item.projectId !== id);
     memory.clouds = memory.clouds.filter((item) => item.projectId !== id);
     memory.repositories = memory.repositories.filter((item) => item.projectId !== id);
+    memory.consoleLogs = (memory.consoleLogs ?? []).filter((item) => item.projectId !== id);
     return true;
   }
   const deleted = await db
@@ -1454,4 +1467,197 @@ export async function getProjectAnalyticsSummary(projectId: string, requestedDay
       .slice(0, 6),
     devices,
   };
+}
+
+// ── Persistent Preview Console Logs ──────────────────────────────────────
+
+function mapConsoleLog(row: typeof projectConsoleLogs.$inferSelect): PreviewConsoleEntry {
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    source: (["browser", "network", "server"].includes(row.source) ? row.source : "browser") as PreviewConsoleSource,
+    level: (["log", "info", "warn", "error"].includes(row.level) ? row.level : "log") as PreviewConsoleLevel,
+    message: row.message,
+    stack: row.stack ?? null,
+    route: row.route ?? null,
+    statusCode: row.statusCode ?? null,
+    fingerprint: row.fingerprint,
+    repeatCount: row.repeatCount,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+function appendConsoleLogsInMemory(projectId: string, sanitized: Omit<PreviewConsoleEntry, "id">[]) {
+  const store = globalThis.__cognixMemoryStore ?? memory;
+  store.consoleLogs ??= [];
+  const projectEntries = store.consoleLogs.filter((item) => item.projectId === projectId);
+  const otherEntries = store.consoleLogs.filter((item) => item.projectId !== projectId);
+
+  for (const incoming of sanitized) {
+    const last = projectEntries.at(-1);
+    if (last && last.fingerprint === incoming.fingerprint) {
+      last.repeatCount += incoming.repeatCount;
+      last.createdAt = incoming.createdAt;
+      if (incoming.stack) last.stack = incoming.stack;
+      if (incoming.route) last.route = incoming.route;
+      if (incoming.statusCode) last.statusCode = incoming.statusCode;
+    } else {
+      projectEntries.push({ id: crypto.randomUUID(), ...incoming });
+    }
+  }
+
+  const trimmed = projectEntries.slice(-PREVIEW_CONSOLE_MAX_ENTRIES);
+  store.consoleLogs = [...otherEntries, ...trimmed];
+  return trimmed;
+}
+
+export async function listProjectConsoleLogs(
+  projectId: string,
+  limit = 200,
+): Promise<PreviewConsoleEntry[]> {
+  const safeLimit = Math.max(1, Math.min(PREVIEW_CONSOLE_MAX_ENTRIES, Math.trunc(limit)));
+  const store = globalThis.__cognixMemoryStore ?? memory;
+  store.consoleLogs ??= [];
+
+  if (!db) {
+    return store.consoleLogs.filter((item) => item.projectId === projectId).slice(-safeLimit);
+  }
+
+  try {
+    const rows = await db
+      .select()
+      .from(projectConsoleLogs)
+      .where(eq(projectConsoleLogs.projectId, projectId))
+      .orderBy(desc(projectConsoleLogs.createdAt))
+      .limit(safeLimit);
+    return rows.reverse().map(mapConsoleLog);
+  } catch {
+    return store.consoleLogs.filter((item) => item.projectId === projectId).slice(-safeLimit);
+  }
+}
+
+export async function appendProjectConsoleLogs(
+  projectId: string,
+  inputs: PreviewConsoleInput[],
+): Promise<PreviewConsoleEntry[]> {
+  if (!inputs.length) return listProjectConsoleLogs(projectId);
+
+  const secrets = await getDecryptedSecrets(projectId).catch(() => ({} as Record<string, string>));
+  const secretValues = Object.values(secrets);
+
+  const sanitized: Omit<PreviewConsoleEntry, "id">[] = [];
+  for (const raw of inputs.slice(0, 60)) {
+    const source: PreviewConsoleSource = ["browser", "network", "server"].includes(raw.source) ? raw.source : "browser";
+    const level: PreviewConsoleLevel = ["log", "info", "warn", "error"].includes(raw.level) ? raw.level : "log";
+    const message = redactConsoleSecrets(raw.message, secretValues).trim().slice(0, 4_000);
+    if (!message) continue;
+    const route = raw.route ? redactConsoleSecrets(raw.route, secretValues).trim().slice(0, 400) : null;
+    const statusCode =
+      typeof raw.statusCode === "number" && raw.statusCode >= 100 && raw.statusCode <= 599
+        ? Math.trunc(raw.statusCode)
+        : null;
+    if (level === "error" && isIgnorableConsoleError({ message, route, statusCode })) continue;
+
+    const stack = raw.stack ? redactConsoleSecrets(raw.stack, secretValues).trim().slice(0, 8_000) : null;
+    const fingerprint = computeConsoleFingerprint({ source, level, message, statusCode });
+    const parsedTime = raw.createdAt ? Date.parse(raw.createdAt) : Number.NaN;
+    const createdAt = Number.isFinite(parsedTime) ? new Date(parsedTime).toISOString() : new Date().toISOString();
+
+    const prev = sanitized.at(-1);
+    if (prev && prev.fingerprint === fingerprint) {
+      prev.repeatCount += 1;
+      prev.createdAt = createdAt;
+      if (stack) prev.stack = stack;
+      if (route) prev.route = route;
+      if (statusCode) prev.statusCode = statusCode;
+    } else {
+      sanitized.push({
+        projectId,
+        source,
+        level,
+        message,
+        stack,
+        route,
+        statusCode,
+        fingerprint,
+        repeatCount: 1,
+        createdAt,
+      });
+    }
+  }
+
+  if (!sanitized.length) return listProjectConsoleLogs(projectId);
+
+  if (!db) {
+    return appendConsoleLogsInMemory(projectId, sanitized);
+  }
+
+  try {
+    const [latestRow] = await db
+      .select()
+      .from(projectConsoleLogs)
+      .where(eq(projectConsoleLogs.projectId, projectId))
+      .orderBy(desc(projectConsoleLogs.createdAt))
+      .limit(1);
+
+    let toInsert = sanitized;
+    if (latestRow && latestRow.fingerprint === sanitized[0].fingerprint) {
+      const first = sanitized[0];
+      await db
+        .update(projectConsoleLogs)
+        .set({
+          repeatCount: latestRow.repeatCount + first.repeatCount,
+          createdAt: new Date(first.createdAt),
+          ...(first.stack ? { stack: first.stack } : {}),
+          ...(first.route ? { route: first.route } : {}),
+          ...(first.statusCode ? { statusCode: first.statusCode } : {}),
+        })
+        .where(eq(projectConsoleLogs.id, latestRow.id));
+      toInsert = sanitized.slice(1);
+    }
+
+    if (toInsert.length > 0) {
+      await db.insert(projectConsoleLogs).values(
+        toInsert.map((entry) => ({
+          projectId: entry.projectId,
+          source: entry.source,
+          level: entry.level,
+          message: entry.message,
+          stack: entry.stack,
+          route: entry.route,
+          statusCode: entry.statusCode,
+          fingerprint: entry.fingerprint,
+          repeatCount: entry.repeatCount,
+          createdAt: new Date(entry.createdAt),
+        })),
+      );
+    }
+
+    // Keep per-project logs bounded to PREVIEW_CONSOLE_MAX_ENTRIES rows
+    await db.execute(sql`
+      DELETE FROM project_console_logs
+      WHERE project_id = ${projectId}::uuid
+        AND id NOT IN (
+          SELECT id FROM project_console_logs
+          WHERE project_id = ${projectId}::uuid
+          ORDER BY created_at DESC
+          LIMIT ${PREVIEW_CONSOLE_MAX_ENTRIES}
+        )
+    `);
+
+    return listProjectConsoleLogs(projectId);
+  } catch {
+    return appendConsoleLogsInMemory(projectId, sanitized);
+  }
+}
+
+export async function clearProjectConsoleLogs(projectId: string): Promise<void> {
+  const store = globalThis.__cognixMemoryStore ?? memory;
+  store.consoleLogs = (store.consoleLogs ?? []).filter((item) => item.projectId !== projectId);
+  if (!db) return;
+  try {
+    await db.delete(projectConsoleLogs).where(eq(projectConsoleLogs.projectId, projectId));
+  } catch {
+    // Table may not exist yet before migration; memory store is already cleared.
+  }
 }

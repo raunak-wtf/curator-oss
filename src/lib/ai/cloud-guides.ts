@@ -11,31 +11,31 @@ const SHARED_RULES = `
 ## Rules for every Cognix Cloud feature
 
 - Read configuration only from \`process.env\` on the server. Never import server secrets into client components, never prefix them with \`NEXT_PUBLIC_\`, and never print, log, or read \`.env*\` files.
-- Cognix syncs the project's secrets into \`.env.local\` in the sandbox. The system prompt lists which secret names are set. If a required variable is missing, first provision it with \`neon_database\` or \`cloud_storage\` (for managed resources), or write a clean fallback naming **Cloud → Emails** / **Cloud → Secrets** (for user-supplied keys like \`RESEND_API_KEY\`).
+- Cognix syncs the project's secrets into \`.env.local\` in the workspace root automatically. The system prompt lists which secret names are set and shows a live summary of PostgreSQL tables and Storage buckets. If a required variable is missing, provision it immediately with \`neon_database({ action: "provision" })\` or \`cloud_storage({ action: "provision" })\` (for managed resources), or write a clean fallback naming **Cloud → Emails** / **Cloud → Secrets** (for user-supplied keys like \`RESEND_API_KEY\`).
 - Keep each integration behind one server module (for example \`src/lib/db.ts\`, \`src/lib/storage.ts\`, \`src/lib/email.ts\`, \`src/lib/auth.ts\` — or \`lib/*\` if the project does not use \`src/\`, matching \`tsconfig.json\`'s \`@/*\` alias) so routes and actions do not construct clients ad hoc.
 - Validate every input at the server boundary with \`zod\` before it reaches the database, a bucket, or an email.
-- Run \`npm run build\` after integrating and fix every TypeScript or bundler error before finishing.
+- In every Route Handler and Server Action \`catch\` block, log \`console.error("[route-name]", error)\` so the Cognix Preview Console captures server stack traces, and return a clear JSON \`{ error: message }\` response that client forms display directly with recovery guidance.
+- Never display third-party infrastructure brand names (Daytona, Neon, Better Auth, Bucketline, Resend, or Drizzle) in generated app UI copy, footers, badges, or chat responses—use the app's own brand in its UI and **Cognix Cloud** in chat explanations.
+- Run \`npm run build\` after integrating, verify the running app with \`read_preview_console\` + \`inspect_preview\`, and fix every build or runtime error before finishing.
 `;
 
-const DATABASE_GUIDE = `# Cognix Cloud: Managed Neon PostgreSQL Database
+const DATABASE_GUIDE = `# Cognix Cloud: Managed PostgreSQL Database
 
-Use the project's Cognix-managed Neon serverless PostgreSQL database through ${env("database")} (pooled) and \`DIRECT_URL\` (unpooled, for schema push/migrations).
+Use the project's Cognix Cloud serverless PostgreSQL database through ${env("database")} (pooled) and \`DIRECT_URL\` (unpooled, for schema push and SQL migrations).
 
-## 1. Managed Neon Tool (\`neon_database\`)
+## 1. Managed Database Tool (\`neon_database\`)
 
-Cognix manages this project's Neon database on the server via \`NEON_API_KEY\`. Never ask the user for a Neon API key or database URL when Cognix Cloud is on:
-- If \`DATABASE_URL\` is not listed in project secrets yet, call \`neon_database\` with \`{ "action": "provision" }\` first. Cognix creates an isolated Neon PostgreSQL project and syncs \`DATABASE_URL\` and \`DIRECT_URL\` into \`.env.local\` automatically.
-- Use \`neon_database\` whenever you need Neon platform capabilities:
+Cognix manages this project's PostgreSQL database on the server. Never ask the user for a database API key or connection URL when Cognix Cloud is on:
+- If \`DATABASE_URL\` is not listed in project secrets yet, call \`neon_database\` with \`{ "action": "provision" }\` first. Cognix creates an isolated PostgreSQL project and syncs \`DATABASE_URL\` and \`DIRECT_URL\` into \`.env.local\` automatically.
+- Use \`neon_database\` whenever you need database platform operations:
   - \`status\` / \`inspect_schema\` / \`compare_schema\`: inspect live tables, columns, DDL, or diff two branches.
-  - \`run_sql\`: execute parameterized DDL/DML/SELECT queries directly against Neon.
-  - \`create_branch\`, \`restore_branch\`, \`set_default_branch\`, \`delete_branch\`: create instant copy-on-write branches (for risky migrations or testing) or point-in-time restores.
-  - \`create_database\`, \`create_role\`, \`reset_role_password\`: manage databases and roles.
-  - \`create_endpoint\`, \`update_endpoint\`, \`start_endpoint\`, \`suspend_endpoint\`, \`restart_endpoint\`: manage compute autoscaling or read-only replicas.
-  - \`create_snapshot\`, \`restore_snapshot\`, \`use_connection\`: create/restore snapshots or point \`.env.local\` at a specific branch/database.
+  - \`run_sql\`: execute parameterized DDL/DML/SELECT queries or seed starter data directly.
+  - \`create_branch\`, \`restore_branch\`, \`set_default_branch\`, \`delete_branch\`: create instant copy-on-write branches (before destructive migrations on live user tables) or point-in-time restores.
+  - \`create_database\`, \`create_role\`, \`reset_role_password\`, \`create_snapshot\`, \`restore_snapshot\`, \`use_connection\`.
 
-## 2. Application Code Setup
+## 2. Application Code & Migration Setup
 
-1. Install \`drizzle-orm\`, \`pg\`, \`server-only\`, \`zod\`, and dev dependencies \`drizzle-kit\` and \`@types/pg\` in a single \`npm install\`. Cognix Cloud exclusively uses Drizzle ORM and PostgreSQL — never install Prisma, SQLite, Supabase, Firebase, MongoDB, or any other database/ORM.
+1. Install \`drizzle-orm\`, \`pg\`, \`server-only\`, \`zod\`, and dev dependencies \`drizzle-kit\` and \`@types/pg\` in a single \`npm install --no-audit --no-fund\`. Add scripts \`"db:generate": "drizzle-kit generate"\` and \`"db:push": "drizzle-kit push --force"\` to \`package.json\`.
 2. Create \`src/lib/db.ts\` (or \`lib/db.ts\` matching \`@/*\` in \`tsconfig.json\`):
    \`\`\`ts
    import "server-only";
@@ -45,18 +45,29 @@ Cognix manages this project's Neon database on the server via \`NEON_API_KEY\`. 
 
    const connectionString = process.env.DATABASE_URL;
    if (!connectionString) {
-     throw new Error("DATABASE_URL is not set. Provision Managed Neon in Cloud → Database.");
+     throw new Error("DATABASE_URL is not set. Provision Cloud Database in Cloud → Database.");
    }
 
    const globalForDb = globalThis as unknown as { __cognixPool?: Pool };
-   export const pool = globalForDb.__cognixPool ?? new Pool({ connectionString, max: 5 });
+   export const pool =
+     globalForDb.__cognixPool ??
+     new Pool({
+       connectionString,
+       max: 5,
+       connectionTimeoutMillis: 10_000,
+     });
+
+   pool.on("error", (err) => {
+     console.error("[db] Unexpected PostgreSQL pool error:", err.message);
+   });
+
    if (process.env.NODE_ENV !== "production") globalForDb.__cognixPool = pool;
 
    export const db = drizzle(pool, { schema });
    \`\`\`
 3. Define tables in \`src/lib/schema.ts\` with \`pgTable\`.
-   - **Important**: If the app also uses Better Auth, include Better Auth's 4 tables (\`user\`, \`session\`, \`account\`, \`verification\`) in this exact same \`schema.ts\` file (see the \`auth\` guide) so \`drizzle-kit push\` manages all tables together without conflicts!
-   - Use \`uuid("id").defaultRandom().primaryKey()\` (or \`text("id")\`), \`timestamp("created_at", { withTimezone: true }).defaultNow().notNull()\`, foreign keys with \`onDelete: "cascade"\`, and \`index(...)\` on \`userId\`, status, and sort columns.
+   - **Important**: If the app also uses authentication, include the 4 authentication tables (\`user\`, \`session\`, \`account\`, \`verification\`) in this exact same \`schema.ts\` file (see the \`auth\` guide) so \`drizzle-kit push --force\` manages all tables together without dropping auth tables!
+   - Use \`uuid("id").defaultRandom().primaryKey()\` (or \`text("id")\`), \`timestamp("created_at", { withTimezone: true }).defaultNow().notNull()\`, foreign keys with \`onDelete: "cascade"\`, and \`index(...)\` on \`userId\`, status, token, and sort columns.
 4. Create \`drizzle.config.ts\` at the project root — **always load \`.env.local\` explicitly** because \`drizzle-kit\` only loads \`.env\` by default while Cognix writes secrets to \`.env.local\`:
    \`\`\`ts
    import { existsSync } from "node:fs";
@@ -73,33 +84,33 @@ Cognix manages this project's Neon database on the server via \`NEON_API_KEY\`. 
      },
    });
    \`\`\`
-5. Push the schema non-interactively with \`npx drizzle-kit push --force\`, then call \`neon_database({ action: "inspect_schema" })\` to verify every expected table is live in Neon.
+5. Every time you create or update \`schema.ts\`, generate SQL migration tracking files AND push the schema non-interactively:
+   \`npx drizzle-kit generate && npx drizzle-kit push --force\`
+   Then call \`neon_database({ action: "inspect_schema" })\` to confirm every table and column is live in PostgreSQL.
 
 ## 3. Query & Mutation Rules
 
-- Query from Server Components, Route Handlers, or \`"use server"\` Server Actions only. Use Drizzle's query builder or parameterized \`sql\` templates; never concatenate strings into SQL.
-- Scope every personal/workspace query and mutation to \`session.user.id\` (\`and(eq(items.id, id), eq(items.userId, session.user.id))\`).
+- Query from Server Components, Route Handlers, or \`"use server"\` Server Actions only. Mark dynamic database-backed pages with \`export const dynamic = "force-dynamic";\` when they read request headers/cookies or live mutable data so \`npm run build\` never fails trying to statically prerender authenticated or live-DB routes.
+- Scope every personal/workspace query and mutation to \`session.user.id\` (\`and(eq(items.id, id), eq(items.userId, session.user.id))\`). For public share-token routes (e.g. \`/review/[shareToken]\`), query strictly by \`and(eq(projects.shareToken, shareToken), eq(projects.isPublicShareEnabled, true))\`.
 - Call \`revalidatePath(...)\` after mutations and design clear loading, empty, dense, and recoverable error states.
 ${SHARED_RULES}`;
 
-const STORAGE_GUIDE = `# Cognix Cloud: Managed S3 Storage & CDN (Bucketline)
+const STORAGE_GUIDE = `# Cognix Cloud: Managed S3 Object Storage & CDN
 
-Use Cognix-managed S3-compatible buckets and CDN delivery through ${env("storage")} (plus \`S3_CDN_URL\` and \`S3_ACCESS_MODE\`).
+Use Cognix Cloud S3-compatible buckets and CDN delivery through ${env("storage")} (plus \`S3_CDN_URL\` and \`S3_ACCESS_MODE\`).
 
 ## 1. Managed Storage Tool (\`cloud_storage\`)
 
-Cognix manages this project's storage buckets on the server via \`BUCKETLINE_API_KEY\`. Never ask the user for S3 credentials when Cognix Cloud is on:
-- If \`S3_BUCKET\` or \`S3_ACCESS_KEY_ID\` is not listed in project secrets yet, call \`cloud_storage\` with \`{ "action": "provision" }\` first (or \`{ "action": "create_bucket", "suffix": "public-media", "accessMode": "public" }\` when public CDN assets such as avatars, cover images, or product photos are needed). Cognix creates an isolated \`cx-<project>-*\` bucket, mints bucket-scoped \`AKIA…\` credentials, and syncs \`S3_ENDPOINT\`, \`S3_REGION\`, \`S3_BUCKET\`, \`S3_ACCESS_KEY_ID\`, \`S3_SECRET_ACCESS_KEY\`, \`S3_CDN_URL\`, and \`S3_ACCESS_MODE\` into \`.env.local\` automatically.
+Cognix manages this project's storage buckets on the server. Never ask the user for S3 credentials when Cognix Cloud is on:
+- If \`S3_BUCKET\` or \`S3_ACCESS_KEY_ID\` is not listed in project secrets yet, call \`cloud_storage\` with \`{ "action": "provision" }\` first (or \`{ "action": "create_bucket", "suffix": "media", "accessMode": "public", "makeActive": true }\` when fast public CDN URLs for inline image thumbnails, avatars, galleries, or public share links are desirable). Cognix creates an isolated \`cx-<project>-*\` bucket, mints bucket-scoped credentials, and syncs \`S3_ENDPOINT\`, \`S3_REGION\`, \`S3_BUCKET\`, \`S3_ACCESS_KEY_ID\`, \`S3_SECRET_ACCESS_KEY\`, \`S3_CDN_URL\`, and \`S3_ACCESS_MODE\` into \`.env.local\` automatically.
 - Use \`cloud_storage\` to inspect/create/delete project buckets, switch the active bucket (\`use_bucket\`), rotate S3 keys (\`rotate_credentials\`), list/copy/delete objects, upload text/JSON seed assets, or mint presigned URLs.
 
-## 2. Gateway & CDN Contract
+## 2. Gateway, Next.js Images & CORS Contract
 
-- **S3 Gateway (path-style required)**: \`endpoint: process.env.S3_ENDPOINT\` (\`https://cloudnest-cdn-vault.lovable.app/api/public/s3\`), \`region: process.env.S3_REGION || "auto"\`, \`forcePathStyle: true\`.
+- **S3 Gateway (path-style required)**: \`endpoint: process.env.S3_ENDPOINT\`, \`region: process.env.S3_REGION || "auto"\`, \`forcePathStyle: true\`.
 - **Hard object size limit**: **50 MB** maximum per object (\`50 * 1024 * 1024\` bytes). Enforce this limit on both client and server.
-- **Access modes**:
-  - \`private\` (default): Serve files using SigV4 presigned \`GET\` URLs (\`@aws-sdk/s3-request-presigner\`, 60s to 7 days).
-  - \`public\`: Files are also served directly via \`\${process.env.S3_CDN_URL}/\${objectKey}\` with edge caching and HTTP Range (\`206 Partial Content\`) streaming for video/audio. Raster images (PNG, JPEG, WebP, GIF, AVIF) render inline in \`<img>\`; HTML/SVG/XML/JS are served with \`nosniff\` as \`application/octet-stream\` for XSS protection.
-- **CORS-safe browser uploads**: Do **not** \`PUT\` directly from browser \`fetch()\` to the external S3 gateway (cross-origin preview iframes will hit CORS preflight blocks). Instead, post \`FormData\` to an authenticated same-origin Next.js Route Handler (\`POST /api/storage/upload\`) that validates the user session, size, and MIME type and sends \`PutObjectCommand\` from Node.js!
+- **Next.js image configuration**: In \`next.config.ts\`, always allow remote HTTPS images (\`images: { remotePatterns: [{ protocol: "https", hostname: "**" }] }\`) or render dynamic user-uploaded thumbnails with standard \`<img>\` (\`loading="lazy"\`) so Next.js never throws \`Invalid src prop\` hostname errors on storage/CDN URLs!
+- **CORS-safe browser uploads**: Never \`PUT\` directly from browser \`fetch()\` to the external S3 gateway (cross-origin preview iframes will fail CORS preflight). Always post \`FormData\` to a same-origin Next.js Route Handler (\`POST /api/storage/upload\`) that validates the user session, size, and MIME type and executes \`PutObjectCommand\` on the server.
 
 ## 3. Application Code Setup
 
@@ -115,7 +126,7 @@ Cognix manages this project's storage buckets on the server via \`BUCKETLINE_API
    const accessKeyId = process.env.S3_ACCESS_KEY_ID;
    const secretAccessKey = process.env.S3_SECRET_ACCESS_KEY;
 
-   export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB Bucketline limit
+   export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50 MB limit
 
    export const s3 =
      bucket && endpoint && accessKeyId && secretAccessKey
@@ -128,7 +139,11 @@ Cognix manages this project's storage buckets on the server via \`BUCKETLINE_API
        : null;
 
    export function buildSafeObjectKey(ownerPrefix: string, fileName: string) {
-     const safeName = fileName.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "file";
+     const safeName =
+       fileName
+         .replace(/[^a-zA-Z0-9._-]+/g, "-")
+         .replace(/^-+|-+$/g, "")
+         .slice(0, 80) || "file";
      return \`\${ownerPrefix.replace(/^\\/+|\\/+$/g, "")}/\${crypto.randomUUID()}-\${safeName}\`;
    }
 
@@ -137,7 +152,9 @@ Cognix manages this project's storage buckets on the server via \`BUCKETLINE_API
      body: Buffer | Uint8Array;
      contentType: string;
    }) {
-     if (!s3 || !bucket) throw new Error("Cloud Storage is not configured. Provision it in Cloud → Storage.");
+     if (!s3 || !bucket) {
+       throw new Error("Cloud Storage is not configured. Provision it in Cloud → Storage.");
+     }
      if (input.body.byteLength > MAX_UPLOAD_BYTES) {
        throw new Error("File exceeds the 50 MB Cloud Storage limit.");
      }
@@ -157,33 +174,35 @@ Cognix manages this project's storage buckets on the server via \`BUCKETLINE_API
      if (process.env.S3_ACCESS_MODE === "public" && process.env.S3_CDN_URL) {
        return \`\${process.env.S3_CDN_URL.replace(/\\/+$/, "")}/\${cleanKey}\`;
      }
-     if (!s3 || !bucket) throw new Error("Cloud Storage is not configured. Provision it in Cloud → Storage.");
+     if (!s3 || !bucket) {
+       throw new Error("Cloud Storage is not configured. Provision it in Cloud → Storage.");
+     }
      return getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: cleanKey }), { expiresIn });
    }
 
    export async function deleteStoredObject(key: string) {
-     if (!s3 || !bucket) return;
+     if (!s3 || !bucket || !key) return;
      await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key.replace(/^\\/+/, "") }));
    }
    \`\`\`
-3. Create \`src/app/api/storage/upload/route.ts\` (checking \`auth.api.getSession\` if the app has auth, validating \`file instanceof File\`, MIME type, and \`file.size <= MAX_UPLOAD_BYTES\`, calling \`uploadObject\`, persisting metadata + \`key\` in Neon PostgreSQL, and returning \`{ key, url: await resolveObjectUrl(key) }\`).
+3. Create \`src/app/api/storage/upload/route.ts\` (verifying \`auth.api.getSession\` when auth is used, checking \`file instanceof File\`, MIME type, and \`file.size <= MAX_UPLOAD_BYTES\`, calling \`uploadObject\`, persisting \`fileKey\` + metadata in PostgreSQL, and returning \`{ key, url: await resolveObjectUrl(key), size: file.size, contentType: file.type, name: file.name }\`).
 
 ## 4. Storage Rules
 
-- Store the durable object \`key\` (never an expiring presigned URL) in Neon PostgreSQL alongside the record that owns it, and resolve \`url\` via \`resolveObjectUrl(key)\` when loading records on the server.
-- When deleting a database record that owns a stored file, verify ownership first and delete both the Postgres row and the S3 object (\`deleteStoredObject(row.fileKey)\`).
-- Show upload progress/pending state, file size & type hints, previews for images, and actionable error messages.
+- Store the durable object \`key\` (never an expiring presigned URL) in PostgreSQL alongside the record that owns it, and resolve \`url\` via \`resolveObjectUrl(key)\` when loading records on the server (including on public share routes).
+- When deleting a database record that owns a stored file, verify ownership first and delete both the PostgreSQL row and the stored object (\`deleteStoredObject(row.fileKey)\`).
+- Show upload progress/pending state, file size & type hints, inline image thumbnails for \`image/*\`, download links, and actionable error messages.
 ${SHARED_RULES}`;
 
-const EMAIL_GUIDE = `# Cognix Cloud: Emails with Resend
+const EMAIL_GUIDE = `# Cognix Cloud: Transactional & Broadcast Emails
 
-Send transactional and broadcast email through Resend using ${env("email")}.
+Send transactional and broadcast email using ${env("email")}.
 
-## 1. Resend Management Tool (\`resend_email\`)
+## 1. Email Management Tool (\`resend_email\`)
 
-Users connect their own Resend account in **Cloud → Emails**.
-- When \`RESEND_API_KEY\` is listed in project secrets, call \`resend_email({ action: "status" })\` (or \`list_domains\`) to inspect verified domains and ensure \`EMAIL_FROM\` uses a verified sender. You can also use \`resend_email\` to verify domains, send emails/batches, or manage audiences, contacts, broadcasts, and webhooks.
-- When \`RESEND_API_KEY\` is **not** set yet, still write the full \`src/lib/email.ts\` integration with the safe fallback below so every sign-up, invite, and notification flow works cleanly without throwing errors, and mention in your summary that live email delivery activates once the user connects Resend in **Cloud → Emails**.
+Users connect their email API key in **Cloud → Emails**.
+- When \`RESEND_API_KEY\` is listed in project secrets, call \`resend_email({ action: "status" })\` (or \`list_domains\`) to inspect verified domains and ensure \`EMAIL_FROM\` uses a verified sender.
+- When \`RESEND_API_KEY\` is **not** set yet, still write \`src/lib/email.ts\` with the safe fallback below so every sign-up, invite, and notification flow works cleanly without throwing errors, and mention concisely that live email delivery activates once an email key is added in **Cloud → Emails**.
 
 ## 2. Application Code Setup
 
@@ -216,7 +235,7 @@ Users connect their own Resend account in **Cloud → Emails**.
      replyTo?: string;
    }) {
      if (!resend || !from) {
-       console.info(\`[email skipped — connect Resend in Cloud → Emails] subject="\${input.subject}"\`);
+       console.info(\`[email skipped — configure Cloud → Emails] subject="\${input.subject}"\`);
        return { skipped: true as const, id: null };
      }
      const { data, error } = await resend.emails.send({
@@ -237,20 +256,20 @@ Users connect their own Resend account in **Cloud → Emails**.
 ## 3. Rules
 
 - Send email only from server code after validating inputs with \`zod\`.
-- Inside Better Auth callbacks (\`sendVerificationEmail\`, \`sendResetPassword\`), trigger \`void sendEmail(...).catch(() => undefined)\` without awaiting so response timing does not leak account existence or block auth latency.
+- Inside authentication callbacks (\`sendVerificationEmail\`, \`sendResetPassword\`), trigger \`void sendEmail(...).catch(() => undefined)\` without awaiting so response timing does not leak account existence or slow down sign-in.
 ${SHARED_RULES}`;
 
-const AUTH_GUIDE = `# Cognix Cloud: Authentication with Better Auth (on Neon PostgreSQL)
+const AUTH_GUIDE = `# Cognix Cloud: Full-Stack Authentication (PostgreSQL-Backed)
 
-Authentication must use **Better Auth** (\`better-auth\`) stored in the project's Managed Neon PostgreSQL database via **Drizzle ORM**. Required secrets: ${env("auth")} (auto-provisioned when Cognix Cloud is on). Always read the \`database\` guide as well; only read the \`email\` guide if the app sends verification, password-reset, or transactional emails.
+Authentication uses \`better-auth\` stored in the project's Cognix Cloud PostgreSQL database via \`drizzle-orm\`. Required secrets: ${env("auth")} (auto-provisioned when Cognix Cloud is on). Always read the \`database\` guide as well; only read the \`email\` guide if the app sends verification, password-reset, or transactional emails.
 
 ## 1. Install
 
 Install \`better-auth\`, \`drizzle-orm\`, \`pg\`, \`server-only\`, and dev dependencies \`drizzle-kit\` and \`@types/pg\` in a single \`npm install --no-audit --no-fund\` (add \`resend\` too only when email is used).
 
-## 2. Unified Drizzle Auth Tables in \`src/lib/schema.ts\`
+## 2. Unified Auth Tables in \`src/lib/schema.ts\`
 
-Always include these exact 4 Better Auth core tables inside \`src/lib/schema.ts\` alongside your application tables so \`npx drizzle-kit push --force\` manages both auth and app tables together without table-drop conflicts, and so **Cloud → Authentication** can display live users and sessions:
+Always include these exact 4 core tables inside \`src/lib/schema.ts\` alongside your application tables so \`npx drizzle-kit push --force\` manages both auth and app tables together without table-drop conflicts, and so **Cloud → Authentication** displays live users and sessions:
 
 \`\`\`ts
 import { boolean, index, pgTable, text, timestamp } from "drizzle-orm/pg-core";
@@ -318,11 +337,12 @@ export const verification = pgTable(
 );
 \`\`\`
 
-Reference \`user.id\` in your domain tables (\`userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" })\`), then run \`npx drizzle-kit push --force\`.
+Reference \`user.id\` in your domain tables (\`userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" })\`), then run \`npx drizzle-kit generate && npx drizzle-kit push --force\`.
 
-## 3. Server Config: \`src/lib/auth.ts\`
+## 3. Server Config: \`src/lib/auth.ts\` (Cross-Origin Preview Iframe Safe!)
 
-### Default (no email verification required — instant sign-up & sign-in):
+**Critical**: Cognix serves live previews and published apps over HTTPS inside a cross-origin preview iframe (\`COGNIX_HOSTED_PREVIEW="1"\` is set even during \`npm run dev\` when \`NODE_ENV="development"\`). You **must** include \`COGNIX_HOSTED_PREVIEW === "1"\` in \`isHostedHttps\` AND enable \`useSecureCookies: true\` + \`sameSite: "none", secure: true, partitioned: true\` + wildcard/dynamic \`trustedOrigins\` so session cookies and CSRF origin checks succeed inside the preview iframe and on published custom domains!
+
 \`\`\`ts
 import "server-only";
 import { betterAuth } from "better-auth";
@@ -331,7 +351,10 @@ import { nextCookies } from "better-auth/next-js";
 import { db } from "./db";
 import * as schema from "./schema";
 
-const isHostedHttps = process.env.NODE_ENV === "production" || process.env.CI === "1";
+const isHostedHttps =
+  process.env.NODE_ENV === "production" ||
+  process.env.COGNIX_HOSTED_PREVIEW === "1" ||
+  process.env.CI === "1";
 
 export const auth = betterAuth({
   database: drizzleAdapter(db, {
@@ -340,7 +363,12 @@ export const auth = betterAuth({
   }),
   secret: process.env.BETTER_AUTH_SECRET,
   trustedOrigins: (request) => {
-    const origins = new Set<string>(["http://localhost:3000"]);
+    const origins = new Set<string>([
+      "http://localhost:3000",
+      "https://*.daytona.work",
+      "https://*.curatorsite.in",
+      "https://*.curator.codes",
+    ]);
     const origin = request?.headers.get("origin");
     const host = request?.headers.get("x-forwarded-host") ?? request?.headers.get("host");
     const proto = request?.headers.get("x-forwarded-proto") ?? "https";
@@ -360,6 +388,7 @@ export const auth = betterAuth({
   },
   advanced: isHostedHttps
     ? {
+        useSecureCookies: true,
         defaultCookieAttributes: {
           sameSite: "none",
           secure: true,
@@ -371,9 +400,9 @@ export const auth = betterAuth({
 });
 \`\`\`
 
-If the app **also** requests email verification or password-reset emails, wire \`sendResetPassword\` and \`emailVerification\` using \`isEmailConfigured\` and \`sendEmail\` from \`src/lib/email.ts\` (gating \`requireEmailVerification: isEmailConfigured\` so sign-up still works immediately before Resend is connected in **Cloud → Emails**).
+If the app **also** requests email verification or password-reset emails, wire \`sendResetPassword\` and \`emailVerification\` using \`isEmailConfigured\` and \`sendEmail\` from \`src/lib/email.ts\` (gating \`requireEmailVerification: isEmailConfigured\` so sign-up works immediately even before email credentials are configured).
 
-## 4. Route Handler & Client
+## 4. Route Handler & Browser Auth Client (Never Hardcode \`localhost:3000\` in Browser!)
 
 - \`src/app/api/auth/[...all]/route.ts\`:
   \`\`\`ts
@@ -382,21 +411,26 @@ If the app **also** requests email verification or password-reset emails, wire \
 
   export const { GET, POST } = toNextJsHandler(auth);
   \`\`\`
-- \`src/lib/auth-client.ts\`:
+- \`src/lib/auth-client.ts\` — **Never** pass \`process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"\` in browser code (that forces the visitor's browser to call \`localhost:3000\` and fails in hosted previews!). Always resolve \`window.location.origin\` on the client:
   \`\`\`ts
+  "use client";
   import { createAuthClient } from "better-auth/react";
 
-  export const authClient = createAuthClient();
+  export const authClient = createAuthClient({
+    baseURL:
+      typeof window !== "undefined"
+        ? window.location.origin
+        : process.env.BETTER_AUTH_URL || "http://localhost:3000",
+  });
   \`\`\`
-  - Sign up: \`await authClient.signUp.email({ name, email, password })\`
-  - Sign in: \`await authClient.signIn.email({ email, password })\`
-  - Sign out: \`await authClient.signOut()\`
-  - Client session hook: \`authClient.useSession()\`
-  - Request password reset: \`await authClient.requestPasswordReset({ email, redirectTo: "/reset-password" })\` (check installed \`better-auth\` client types if using \`forgetPassword\`), then \`await authClient.resetPassword({ newPassword, token })\`.
+  - Sign up: \`const { data, error } = await authClient.signUp.email({ name, email, password });\`
+  - Sign in: \`const { data, error } = await authClient.signIn.email({ email, password });\`
+  - Sign out: \`await authClient.signOut(); router.push("/sign-in"); router.refresh();\`
+  - Always check \`if (error) { console.error("[auth]", error); setError(error.message || "Could not sign in. Check your credentials and try again."); return; }\` and after success call \`router.push("/dashboard"); router.refresh();\` so Server Components re-render with the new session cookie!
 
 ## 5. Protecting Pages, Server Actions & API Routes
 
-- Server Components & Server Actions:
+- Server Components & Server Actions (add \`export const dynamic = "force-dynamic";\` on authenticated pages):
   \`\`\`ts
   import { headers } from "next/headers";
   import { redirect } from "next/navigation";
@@ -409,8 +443,8 @@ If the app **also** requests email verification or password-reset emails, wire \
 
 ## 6. Auth UI Screens to Build
 
-- Build \`/sign-in\`, \`/sign-up\`, \`/forgot-password\`, and \`/reset-password\` (plus \`/verify-email\` notice when \`isEmailConfigured\` is true), and include an account badge + sign-out button in the authenticated shell.
-- Use native \`<form>\` + \`<label>\` controls, proper \`autocomplete\` attributes (\`name\`, \`email\`, \`current-password\`, \`new-password\`), visible focus rings, loading states, and actionable error messages.
+- Build \`/sign-in\` and \`/sign-up\` (plus \`/forgot-password\` and \`/reset-password\` when password-reset flows are part of the product), and include an account badge + sign-out button in the authenticated shell.
+- Use native \`<form>\` + \`<label>\` controls, proper \`autocomplete\` attributes (\`name\`, \`email\`, \`current-password\`, \`new-password\`), visible focus rings, loading states, and real server error messages.
 ${SHARED_RULES}`;
 
 export const CLOUD_GUIDES: Record<CloudFeature, string> = {

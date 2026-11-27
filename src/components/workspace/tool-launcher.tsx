@@ -65,7 +65,7 @@ export function ToolLauncher({ openTabs, onOpen, onCancel, tools = TOOL_TABS, or
                   ref={index === 0 ? firstRef : undefined}
                   type="button"
                   onClick={() => onOpen(tab)}
-                  className="flex min-h-14 w-full items-center gap-3 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 text-left transition-colors hover:border-white/[0.14] hover:bg-white/[0.07]"
+                  className="flex min-h-14 w-full items-center gap-3 rounded-xl border border-white/[0.08] bg-white/[0.04] px-3 text-left transition-colors hover:border-white/[0.14] hover:bg-white/[0.07] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8c7dff]"
                 >
                   <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-white/[0.06] text-white/75">
                     <tool.icon className="size-4" />

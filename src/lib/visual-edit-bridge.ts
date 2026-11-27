@@ -305,7 +305,203 @@ const CLIENT_BRIDGE_SOURCE = String.raw`(function () {
       channelId: state.channelId || null,
       type: type
     }, payload || {});
-    window.parent.postMessage(message, PARENT_ORIGIN);
+    try {
+      window.parent.postMessage(message, PARENT_ORIGIN);
+    } catch (_) {}
+  }
+
+  // ── Runtime Console, Exception, Network & Crash Telemetry ────────────
+  var inConsoleEmit = false;
+  var rateWindowStart = Date.now();
+  var rateWindowCount = 0;
+  var lastOverlayError = "";
+
+  function serializeArg(arg) {
+    if (arg == null) return String(arg);
+    if (typeof arg === "string") return arg;
+    if (typeof arg === "number" || typeof arg === "boolean" || typeof arg === "bigint") return String(arg);
+    if (arg instanceof Error) return (arg.name ? arg.name + ": " : "") + (arg.message || String(arg));
+    if (arg instanceof Element) return "<" + arg.tagName.toLowerCase() + ">";
+    if (typeof arg === "object") {
+      try {
+        return JSON.stringify(arg).slice(0, 1200);
+      } catch (_) {
+        return Object.prototype.toString.call(arg);
+      }
+    }
+    return String(arg);
+  }
+
+  function extractStack(args) {
+    for (var i = 0; i < args.length; i += 1) {
+      if (args[i] instanceof Error && args[i].stack) {
+        return String(args[i].stack).slice(0, 4000);
+      }
+    }
+    return null;
+  }
+
+  function emitConsoleEntry(source, level, message, stack, route, statusCode) {
+    if (inConsoleEmit) return;
+    var now = Date.now();
+    if (now - rateWindowStart > 5000) {
+      rateWindowStart = now;
+      rateWindowCount = 0;
+    }
+    rateWindowCount += 1;
+    if (rateWindowCount > 45) return;
+
+    var cleanMessage = String(message == null ? "" : message).trim().slice(0, 2500);
+    if (!cleanMessage) return;
+
+    inConsoleEmit = true;
+    try {
+      send("console_entry", {
+        entry: {
+          source: source,
+          level: level,
+          message: cleanMessage,
+          stack: stack ? String(stack).slice(0, 4000) : null,
+          route: (route || window.location.pathname || "/").slice(0, 300),
+          statusCode: typeof statusCode === "number" ? statusCode : null,
+          createdAt: new Date(now).toISOString()
+        }
+      });
+    } finally {
+      inConsoleEmit = false;
+    }
+  }
+
+  var originalConsole = {
+    log: console.log,
+    info: console.info,
+    warn: console.warn,
+    error: console.error
+  };
+
+  ["log", "info", "warn", "error"].forEach(function (level) {
+    var orig = originalConsole[level];
+    if (typeof orig !== "function") return;
+    console[level] = function () {
+      var args = Array.prototype.slice.call(arguments);
+      try {
+        var joined = args.map(serializeArg).join(" ");
+        emitConsoleEntry("browser", level, joined, extractStack(args), window.location.pathname, null);
+      } catch (_) {}
+      return orig.apply(console, args);
+    };
+  });
+
+  function onWindowError(event) {
+    try {
+      if (event && event.target && event.target !== window && event.target instanceof Element) {
+        var tag = event.target.tagName ? event.target.tagName.toLowerCase() : "";
+        if (tag === "script" || tag === "link") {
+          var assetUrl = safeUrl(event.target.getAttribute("src") || event.target.getAttribute("href") || "");
+          if (assetUrl && assetUrl.indexOf("favicon") === -1) {
+            emitConsoleEntry("network", "error", "Failed to load resource: " + assetUrl, null, window.location.pathname, null);
+          }
+        }
+        return;
+      }
+      var err = event && event.error;
+      var msg = (event && event.message) || (err && err.message) || "Uncaught runtime error";
+      var loc = event && event.filename ? safePath(event.filename) + (event.lineno ? ":" + event.lineno : "") : "";
+      var stack = (err && err.stack) ? String(err.stack) : (loc ? "at " + loc : null);
+      emitConsoleEntry("browser", "error", msg, stack, window.location.pathname, null);
+    } catch (_) {}
+  }
+
+  function onUnhandledRejection(event) {
+    try {
+      var reason = event ? event.reason : null;
+      var msg = reason instanceof Error
+        ? (reason.name ? reason.name + ": " : "") + reason.message
+        : "Unhandled promise rejection: " + serializeArg(reason);
+      var stack = reason instanceof Error && reason.stack ? String(reason.stack) : null;
+      emitConsoleEntry("browser", "error", msg, stack, window.location.pathname, null);
+    } catch (_) {}
+  }
+
+  var originalFetch = typeof window.fetch === "function" ? window.fetch.bind(window) : null;
+  if (originalFetch) {
+    window.fetch = function (input, init) {
+      var method = "GET";
+      var rawUrl = "";
+      try {
+        if (init && typeof init.method === "string") method = init.method.toUpperCase();
+        else if (input && typeof input === "object" && typeof input.method === "string") method = input.method.toUpperCase();
+        rawUrl = typeof input === "string" ? input : (input && typeof input.url === "string" ? input.url : String(input || ""));
+      } catch (_) {}
+
+      var parsedUrl = null;
+      try { parsedUrl = rawUrl ? new URL(rawUrl, window.location.href) : null; } catch (_) { parsedUrl = null; }
+      var isSameOriginApi = Boolean(parsedUrl && parsedUrl.origin === window.location.origin && parsedUrl.pathname.indexOf("/api/") === 0);
+      var apiPath = parsedUrl ? parsedUrl.pathname : "";
+
+      return originalFetch(input, init).then(
+        function (response) {
+          if (isSameOriginApi && response && response.status >= 400) {
+            var status = response.status;
+            var isAuthCritical = apiPath.indexOf("/api/auth/") === 0 && (status === 403 || status >= 500);
+            var level = status >= 500 || isAuthCritical ? "error" : "warn";
+            try {
+              response.clone().text().then(function (bodyText) {
+                var detail = "";
+                if (bodyText) {
+                  try {
+                    var parsed = JSON.parse(bodyText);
+                    detail = bounded(parsed.error || parsed.message || bodyText, 360);
+                  } catch (_) {
+                    detail = bounded(bodyText.replace(/<[^>]+>/g, " "), 360);
+                  }
+                }
+                var summary = method + " " + apiPath + " → HTTP " + status + (detail ? " (" + detail + ")" : "");
+                emitConsoleEntry("network", level, summary, null, window.location.pathname, status);
+              }).catch(function () {
+                emitConsoleEntry("network", level, method + " " + apiPath + " → HTTP " + status, null, window.location.pathname, status);
+              });
+            } catch (_) {}
+          }
+          return response;
+        },
+        function (error) {
+          if (isSameOriginApi && !(error && error.name === "AbortError")) {
+            var reason = error && error.message ? error.message : "Network request failed";
+            emitConsoleEntry(
+              "network",
+              "error",
+              method + " " + apiPath + " failed: " + bounded(reason, 300),
+              error && error.stack ? String(error.stack) : null,
+              window.location.pathname,
+              null
+            );
+          }
+          throw error;
+        }
+      );
+    };
+  }
+
+  function inspectFrameworkOverlay() {
+    try {
+      var portal = document.querySelector("nextjs-portal");
+      var overlayText = "";
+      if (portal && portal.shadowRoot) {
+        var dialog = portal.shadowRoot.querySelector("[role='dialog'], [data-nextjs-dialog-body], [data-nextjs-toast]");
+        if (dialog) overlayText = bounded(dialog.textContent || "", 600);
+      }
+      if (!overlayText && document.body) {
+        var bodyCopy = document.body.innerText || "";
+        if (bodyCopy.indexOf("Application error: a client-side exception has occurred") !== -1) {
+          overlayText = "Application error: a client-side exception has occurred while rendering " + (window.location.pathname || "/");
+        }
+      }
+      if (overlayText && overlayText !== lastOverlayError) {
+        lastOverlayError = overlayText;
+        emitConsoleEntry("browser", "error", overlayText, null, window.location.pathname, null);
+      }
+    } catch (_) {}
   }
 
   function setEnabled(enabled) {
@@ -421,8 +617,10 @@ const CLIENT_BRIDGE_SOURCE = String.raw`(function () {
   }
 
   function checkRoute() {
+    inspectFrameworkOverlay();
     if (state.route === window.location.pathname) return;
     state.route = window.location.pathname;
+    lastOverlayError = "";
     state.selections = [];
     clearHover();
     renderSelections();
@@ -430,22 +628,30 @@ const CLIENT_BRIDGE_SOURCE = String.raw`(function () {
   }
 
   window.addEventListener("message", onMessage);
+  window.addEventListener("error", onWindowError, true);
+  window.addEventListener("unhandledrejection", onUnhandledRejection);
   document.addEventListener("pointermove", onPointerMove, true);
   document.addEventListener("click", onClick, true);
   document.addEventListener("keydown", onKeyDown, true);
   window.addEventListener("scroll", onViewportChange, true);
   window.addEventListener("resize", onViewportChange);
-  var routeTimer = window.setInterval(checkRoute, 500);
+  var routeTimer = window.setInterval(checkRoute, 750);
 
   window.__COGNIX_VISUAL_EDIT_BRIDGE__ = {
     destroy: function () {
       window.removeEventListener("message", onMessage);
+      window.removeEventListener("error", onWindowError, true);
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
       document.removeEventListener("pointermove", onPointerMove, true);
       document.removeEventListener("click", onClick, true);
       document.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("scroll", onViewportChange, true);
       window.removeEventListener("resize", onViewportChange);
       window.clearInterval(routeTimer);
+      ["log", "info", "warn", "error"].forEach(function (level) {
+        if (originalConsole[level]) console[level] = originalConsole[level];
+      });
+      if (originalFetch) window.fetch = originalFetch;
       if (state.frame) cancelAnimationFrame(state.frame);
       document.documentElement.style.cursor = state.cursor;
       clearHover();
@@ -456,6 +662,7 @@ const CLIENT_BRIDGE_SOURCE = String.raw`(function () {
   };
 
   send("ready", { route: state.route.slice(0, 400) });
+  window.setTimeout(inspectFrameworkOverlay, 600);
 })();
 `;
 

@@ -52,7 +52,7 @@ describe("buildSecurityPrompt", () => {
     const prompt = buildSecurityPrompt(project, "/home/daytona/app", {
       secretNames: ["DATABASE_URL", "API_TOKEN"],
     });
-    expect([...SECURITY_EXCLUDED_TOOLS]).toEqual(["get_preview_url", "inspect_preview"]);
+    expect([...SECURITY_EXCLUDED_TOOLS]).toEqual(["get_preview_url", "inspect_preview", "read_preview_console"]);
     expect(prompt).toContain("Agent file and search tools intentionally exclude `.env*`");
     expect(prompt).toContain("Never read, print, source, or load that file during a review");
     expect(prompt).toContain("Do not read or print any .env* file or ../.cognix-env");

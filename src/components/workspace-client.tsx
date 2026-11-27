@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  AlertCircle,
   ArrowUp,
   AtSign,
   Check,
@@ -31,6 +32,8 @@ import {
   Share2,
   ShieldCheck,
   Smartphone,
+  Sparkles,
+  SquareTerminal,
   Tablet,
   TerminalSquare,
   X,
@@ -52,6 +55,7 @@ import { useVoiceInput } from "@/components/use-voice-input";
 import { BuildModeMenu } from "@/components/workspace/build-mode-menu";
 import { CloudPanel } from "@/components/workspace/cloud-panel";
 import { GitPanel, type BuildCheckpoint } from "@/components/workspace/git-panel";
+import { PreviewConsolePanel, type ConsoleFilter } from "@/components/workspace/preview-console-panel";
 import { TerminalPanel, type TerminalEntry } from "@/components/workspace/terminal-panel";
 import { SECURITY_TOOL_ORDER, SECURITY_TOOL_TABS, TOOL_ORDER, TOOL_TABS, ToolLauncher, type ToolTab } from "@/components/workspace/tool-launcher";
 import { VisualEditInspector } from "@/components/workspace/visual-edit-inspector";
@@ -71,6 +75,8 @@ import type {
   FileChangeSnapshot,
   GitHubCommitInfo,
   Message,
+  PreviewConsoleEntry,
+  PreviewConsoleInput,
   Project,
   ProjectFile,
   TerminalCommand,
@@ -78,6 +84,13 @@ import type {
   VisualElementSelection,
 } from "@/lib/types";
 import { checkpointCanRestore } from "@/lib/checkpoints";
+import {
+  buildConsoleFixPrompt,
+  computeConsoleFingerprint,
+  isIgnorableConsoleError,
+  previewConsoleInputSchema,
+  selectActionableConsoleErrors,
+} from "@/lib/preview-console";
 import { validateUpload } from "@/lib/upload-policy";
 import { cn, formatRelativeDate, publishSlugFromTitle } from "@/lib/utils";
 import {
@@ -109,6 +122,7 @@ type WorkspaceClientProps = {
   initialProject: Project;
   initialMessages: Message[];
   initialFiles: ProjectFile[];
+  initialConsoleEntries?: PreviewConsoleEntry[];
   viewer: Viewer;
   initialNow: string;
   initialPrompt?: string;
@@ -347,6 +361,7 @@ function ActivityIcon({ name, running }: { name: string; running: boolean }) {
   if (name === "web_search" || name === "fetch_url") return <Globe2 className="size-3.5" />;
   if (name === "neon_database") return <Database className="size-3.5" />;
   if (name === "resend_email") return <Mail className="size-3.5" />;
+  if (name === "read_preview_console") return <SquareTerminal className="size-3.5" />;
   if (name === "get_preview_url" || name === "inspect_preview") return <Play className="size-3.5" />;
   return <FileCode2 className="size-3.5" />;
 }
@@ -404,6 +419,7 @@ export function WorkspaceClient({
   initialProject,
   initialMessages,
   initialFiles,
+  initialConsoleEntries = [],
   viewer,
   initialNow,
   initialPrompt,
@@ -449,6 +465,18 @@ export function WorkspaceClient({
   const [visualEditConnecting, setVisualEditConnecting] = useState(false);
   const [visualBridgeReady, setVisualBridgeReady] = useState(false);
   const [visualSelections, setVisualSelections] = useState<VisualElementSelection[]>([]);
+  const [consoleEntries, setConsoleEntries] = useState<PreviewConsoleEntry[]>(initialConsoleEntries);
+  const [serverLogs, setServerLogs] = useState("");
+  const [consoleLoading, setConsoleLoading] = useState(false);
+  const [consoleFetchError, setConsoleFetchError] = useState<string | null>(null);
+  const [consoleDrawerOpen, setConsoleDrawerOpen] = useState(false);
+  const [consoleExpanded, setConsoleExpanded] = useState(false);
+  const [consoleFilterRequest, setConsoleFilterRequest] = useState<{ value: ConsoleFilter; nonce: number } | undefined>(undefined);
+  const [dismissedErrorFingerprints, setDismissedErrorFingerprints] = useState<Set<string>>(() => new Set());
+  const [errorBaselineIso, setErrorBaselineIso] = useState<string | null>(null);
+  const fixAttemptsByFingerprintRef = useRef<Map<string, number>>(new Map());
+  const pendingConsoleBatchRef = useRef<PreviewConsoleInput[]>([]);
+  const consoleFlushTimerRef = useRef<number | null>(null);
   const [prompt, setPrompt] = useState("");
   const [uploads, setUploads] = useState<ComposerUpload[]>([]);
   const [isDraggingUpload, setIsDraggingUpload] = useState(false);
@@ -601,6 +629,7 @@ export function WorkspaceClient({
   // Stop following a run's server-side continuation when the workspace unmounts.
   useEffect(() => () => {
     if (continueWatchRef.current) window.clearTimeout(continueWatchRef.current);
+    if (consoleFlushTimerRef.current) window.clearTimeout(consoleFlushTimerRef.current);
   }, []);
 
   // Keep the isBuilding ref in step for async callbacks (the approval watcher) that read it later.
@@ -745,6 +774,135 @@ export function WorkspaceClient({
     [previewOrigin, visualChannel],
   );
 
+  const flushConsoleBatch = useCallback(async () => {
+    if (consoleFlushTimerRef.current) {
+      window.clearTimeout(consoleFlushTimerRef.current);
+      consoleFlushTimerRef.current = null;
+    }
+    if (security) return;
+    while (pendingConsoleBatchRef.current.length > 0) {
+      const batch = pendingConsoleBatchRef.current.splice(0, 60);
+      try {
+        const response = await fetch(`/api/projects/${project.id}/console`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ entries: batch }),
+        });
+        if (response.ok) {
+          const payload = await response.json().catch(() => null);
+          if (payload && Array.isArray(payload.entries)) {
+            setConsoleEntries(payload.entries as PreviewConsoleEntry[]);
+          }
+        }
+      } catch {
+        // Keep optimistic local entries even if background persistence transiently fails.
+        break;
+      }
+    }
+  }, [project.id, security]);
+
+  const enqueueConsoleEntry = useCallback(
+    (incoming: PreviewConsoleInput) => {
+      if (security) return;
+      if (incoming.level === "error" && isIgnorableConsoleError(incoming)) return;
+      const fingerprint = computeConsoleFingerprint({
+        source: incoming.source,
+        level: incoming.level,
+        message: incoming.message,
+        statusCode: incoming.statusCode,
+      });
+      const createdAt = incoming.createdAt || new Date().toISOString();
+
+      setConsoleEntries((current) => {
+        const last = current.at(-1);
+        if (last && last.fingerprint === fingerprint) {
+          return [
+            ...current.slice(0, -1),
+            {
+              ...last,
+              repeatCount: last.repeatCount + 1,
+              createdAt,
+              stack: incoming.stack ?? last.stack,
+              route: incoming.route ?? last.route,
+              statusCode: incoming.statusCode ?? last.statusCode,
+            },
+          ];
+        }
+        return [
+          ...current.slice(-299),
+          {
+            id: `live-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            projectId: project.id,
+            source: incoming.source,
+            level: incoming.level,
+            message: incoming.message,
+            stack: incoming.stack ?? null,
+            route: incoming.route ?? null,
+            statusCode: incoming.statusCode ?? null,
+            fingerprint,
+            repeatCount: 1,
+            createdAt,
+          },
+        ];
+      });
+
+      pendingConsoleBatchRef.current.push(incoming);
+      if (!consoleFlushTimerRef.current) {
+        consoleFlushTimerRef.current = window.setTimeout(() => void flushConsoleBatch(), 900);
+      }
+    },
+    [flushConsoleBatch, project.id, security],
+  );
+
+  const loadConsoleSnapshot = useCallback(
+    async (options?: { wake?: boolean; silent?: boolean }) => {
+      if (security) return;
+      if (!options?.silent) {
+        setConsoleLoading(true);
+        setConsoleFetchError(null);
+      }
+      try {
+        const response = await fetch(
+          `/api/projects/${project.id}/console${options?.wake ? "?wake=1" : ""}`,
+          { cache: "no-store" },
+        );
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload.error ?? "Could not load console logs. Try refreshing.");
+        }
+        setConsoleFetchError(null);
+        if (Array.isArray(payload.entries)) {
+          setConsoleEntries(payload.entries as PreviewConsoleEntry[]);
+        }
+        if (typeof payload.serverLogs === "string") {
+          setServerLogs(payload.serverLogs);
+        }
+      } catch (error) {
+        if (!options?.silent) {
+          setConsoleFetchError(
+            error instanceof Error ? error.message : "Could not load console logs. Try refreshing.",
+          );
+        }
+      } finally {
+        if (!options?.silent) setConsoleLoading(false);
+      }
+    },
+    [project.id, security],
+  );
+
+  const clearConsoleLogs = useCallback(async () => {
+    pendingConsoleBatchRef.current = [];
+    setConsoleEntries([]);
+    setServerLogs("");
+    setDismissedErrorFingerprints(new Set());
+    try {
+      const response = await fetch(`/api/projects/${project.id}/console`, { method: "DELETE" });
+      if (!response.ok) throw new Error("Could not clear console.");
+    } catch {
+      toast.error("Could not clear saved console logs. Try again.");
+    }
+  }, [project.id]);
+
   useEffect(() => {
     function handleVisualMessage(event: MessageEvent) {
       if (!previewOrigin || event.origin !== previewOrigin || event.source !== previewFrameRef.current?.contentWindow) return;
@@ -752,6 +910,14 @@ export function WorkspaceClient({
       if (!data || typeof data !== "object") return;
       const message = data as Record<string, unknown>;
       if (message.source !== VISUAL_EDIT_SOURCE || message.version !== VISUAL_EDIT_VERSION) return;
+
+      if (message.type === "console_entry") {
+        const parsedEntry = previewConsoleInputSchema.safeParse(message.entry);
+        if (parsedEntry.success) {
+          enqueueConsoleEntry(parsedEntry.data);
+        }
+        return;
+      }
 
       if (message.type === "ready") {
         setVisualBridgeReady(true);
@@ -777,7 +943,24 @@ export function WorkspaceClient({
 
     window.addEventListener("message", handleVisualMessage);
     return () => window.removeEventListener("message", handleVisualMessage);
-  }, [postVisualState, previewOrigin, visualChannel, visualEditEnabled, visualSelections]);
+  }, [enqueueConsoleEntry, postVisualState, previewOrigin, visualChannel, visualEditEnabled, visualSelections]);
+
+  // Keep server-side runtime logs & errors synced while preview is live or Console is open
+  useEffect(() => {
+    if (security || !currentPreviewUrl || isPreviewReconnecting || isBuilding) return;
+    const initialTimer = window.setTimeout(() => {
+      void loadConsoleSnapshot({ silent: true });
+    }, 150);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void loadConsoleSnapshot({ silent: true });
+      }
+    }, 12_000);
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(interval);
+    };
+  }, [currentPreviewUrl, isBuilding, isPreviewReconnecting, loadConsoleSnapshot, security]);
 
   useEffect(() => {
     if (visualBridgeReady) postVisualState(visualEditEnabled, visualSelections);
@@ -864,6 +1047,9 @@ export function WorkspaceClient({
       const attachmentIds = [...preuploadedIds, ...uploadedAttachments.map((item) => item.id)];
       const selectedElements = ignoreComposer ? [] : referencedSelections;
       setIsBuilding(true);
+      if (effectiveChatMode === "build") {
+        setErrorBaselineIso(new Date().toISOString());
+      }
       setProject((current) => ({ ...current, status: "building" }));
       if (!ignoreComposer) setPrompt("");
       // A new run starts: drop any approval left over from a previous (possibly disconnected) run, and stop
@@ -962,7 +1148,9 @@ export function WorkspaceClient({
                       ? "Reading Cloud guide"
                       : event.name === "request_cognix_cloud"
                         ? "Cognix Cloud"
-                        : event.name.replaceAll("_", " ");
+                        : event.name === "read_preview_console"
+                          ? "Reading preview console"
+                          : event.name.replaceAll("_", " ");
             setActivities((current) => [
               ...current.map((item) => ({ ...item, status: "done" as const })),
               { id: event.id, name: event.name, label: friendlyToolName, status: "running", target: activityTarget(event.name, event.input) },
@@ -1008,6 +1196,9 @@ export function WorkspaceClient({
               ? { ...item, label: `Read ${event.path} · Ready at ${event.appUrl}`, status: "done" }
               : item));
           }
+          if (event.type === "cloud_status") {
+            setCloudEnabled(event.enabled);
+          }
           if (event.type === "preview") {
             setVisualBridgeReady(false);
             setProject((current) => ({
@@ -1016,6 +1207,7 @@ export function WorkspaceClient({
               sandboxId: event.sandboxId ?? current.sandboxId,
               status: "ready",
             }));
+            setPreviewRevision((current) => current + 1);
             setActiveTab("preview");
             setLastTab("preview");
           }
@@ -1040,6 +1232,7 @@ export function WorkspaceClient({
             // The finished build saves its commands on the message, which the terminal reads from now on.
             if (event.commands) setLiveCommands([]);
             if (event.github) setGithubRefreshKey((current) => current + 1);
+            void loadConsoleSnapshot({ silent: true });
             setProject((current) => ({
               ...current,
               status:
@@ -1107,7 +1300,7 @@ export function WorkspaceClient({
         setLiveCommands((current) => current.map((item) => (item.running ? { ...item, running: false } : item)));
       }
     },
-    [approvalMode, chatMode, isBuilding, postVisualState, project.id, security, uploads, visualSelections],
+    [approvalMode, chatMode, isBuilding, loadConsoleSnapshot, postVisualState, project.id, security, uploads, visualSelections],
   );
 
   async function restoreCheckpoint(message: Message) {
@@ -1291,6 +1484,7 @@ export function WorkspaceClient({
       item.name === "neon_database" ||
       item.name === "resend_email" ||
       item.name === "cloud_storage" ||
+      item.name === "read_preview_console" ||
       item.name === "propose_pull_request"
     );
   }
@@ -1299,6 +1493,11 @@ export function WorkspaceClient({
     if (FILE_TOOLS.has(item.name) && item.target && files.some((file) => file.path === item.target)) openFile(item.target);
     else if (FILE_TOOLS.has(item.name) || BROWSE_TOOLS.has(item.name)) openTab("code");
     else if (SHELL_TOOLS.has(item.name)) openTab("terminal");
+    else if (item.name === "read_preview_console") {
+      showTab("preview");
+      setConsoleDrawerOpen(true);
+      void loadConsoleSnapshot({ wake: true, silent: true });
+    }
     else if (item.name === "neon_database" || item.name === "resend_email" || item.name === "cloud_storage") openTab("cloud");
     else if (item.name === "propose_pull_request") openTab("git");
   }
@@ -1469,6 +1668,46 @@ export function WorkspaceClient({
     ...liveCommands,
   ];
   const terminalRunning = liveCommands.some((item) => item.running);
+  const consoleErrorCount = useMemo(
+    () => (security ? 0 : consoleEntries.filter((entry) => entry.level === "error" && !isIgnorableConsoleError(entry)).length),
+    [consoleEntries, security],
+  );
+  const actionableConsoleErrors = useMemo(
+    () =>
+      security
+        ? []
+        : selectActionableConsoleErrors(consoleEntries, {
+            afterIso: errorBaselineIso,
+            dismissedFingerprints: dismissedErrorFingerprints,
+          }),
+    [consoleEntries, dismissedErrorFingerprints, errorBaselineIso, security],
+  );
+
+  const handleFixConsoleErrors = useCallback(
+    (targetErrors: PreviewConsoleEntry[]) => {
+      if (!targetErrors.length || isBuilding || security) return;
+      let nextAttempt = 1;
+      for (const entry of targetErrors) {
+        const prev = fixAttemptsByFingerprintRef.current.get(entry.fingerprint) ?? 0;
+        const updated = prev + 1;
+        fixAttemptsByFingerprintRef.current.set(entry.fingerprint, updated);
+        if (updated > nextAttempt) nextAttempt = updated;
+      }
+      setErrorBaselineIso(new Date().toISOString());
+      setChatMode("build");
+      const fixPrompt = buildConsoleFixPrompt(targetErrors, nextAttempt);
+      void submitPrompt(fixPrompt, [], [], "build", { preserveComposer: true });
+    },
+    [isBuilding, security, submitPrompt],
+  );
+
+  const dismissDetectedErrors = useCallback(() => {
+    setDismissedErrorFingerprints((current) => {
+      const next = new Set(current);
+      for (const item of actionableConsoleErrors) next.add(item.fingerprint);
+      return next;
+    });
+  }, [actionableConsoleErrors]);
   const builds: BuildCheckpoint[] = messages.flatMap((message) => {
     if (message.role !== "assistant") return [];
     const paths = changedPathsFor(message);
@@ -2046,6 +2285,11 @@ export function WorkspaceClient({
                           {tab === "terminal" && terminalRunning ? (
                             <span className="size-1.5 rounded-full bg-sky-400 animate-pulse motion-reduce:animate-none" aria-label="Running a command" />
                           ) : null}
+                          {tab === "preview" && consoleErrorCount > 0 ? (
+                            <span className="rounded-full bg-rose-500/25 px-1.5 py-0.5 text-[10px] font-semibold text-rose-200 tabular-nums leading-none">
+                              {consoleErrorCount}
+                            </span>
+                          ) : null}
                         </button>
                         {tab !== "preview" ? (
                           <button
@@ -2164,29 +2408,149 @@ export function WorkspaceClient({
                       <span>{projectHost}</span>
                       {currentPreviewUrl ? <a href={currentPreviewUrl} target="_blank" rel="noreferrer" aria-label="Open preview in a new tab"><ExternalLink className="size-3.5" /></a> : null}
                     </div>
+                    <button
+                      type="button"
+                      className={cn(
+                        "visual-edit-button toolbar-expandable ml-auto gap-1.5",
+                        consoleDrawerOpen && "is-active",
+                        consoleErrorCount > 0 && !consoleDrawerOpen && "border-rose-500/40 bg-rose-500/10 text-rose-200 hover:border-rose-400/60 hover:bg-rose-500/15",
+                      )}
+                      onClick={() => {
+                        setConsoleDrawerOpen((open) => {
+                          const next = !open;
+                          if (next) void loadConsoleSnapshot({ wake: true, silent: true });
+                          return next;
+                        });
+                      }}
+                      aria-expanded={consoleDrawerOpen}
+                      aria-controls="preview-console-drawer"
+                      aria-label={
+                        consoleErrorCount > 0
+                          ? `Toggle preview console (${consoleErrorCount} ${consoleErrorCount === 1 ? "error" : "errors"})`
+                          : "Toggle preview console"
+                      }
+                      title="Toggle preview console"
+                    >
+                      <SquareTerminal className="size-3.5" aria-hidden="true" />
+                      <span className="toolbar-control-label">Console</span>
+                      {consoleErrorCount > 0 ? (
+                        <span className="rounded-full bg-rose-500/30 px-1.5 py-0.5 text-[9.5px] font-semibold text-rose-100 tabular-nums leading-none">
+                          {consoleErrorCount}
+                        </span>
+                      ) : null}
+                    </button>
                   </div>
-                  <div className="min-h-0 flex-1">
-                    {currentPreviewUrl && !isPreviewReconnecting ? (
-                      <div className={cn("preview-frame-wrap", `is-${previewDevice}`)}>
-                        <div className="preview-device-stage">
-                          <iframe
-                            key={`${currentPreviewUrl}:${previewRevision}`}
-                            ref={previewFrameRef}
-                            title={`${project.title} ${previewDevice} preview`}
-                            src={currentPreviewUrl}
-                            sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
-                            onLoad={() => postVisualState(visualEditEnabled, visualSelections)}
-                          />
-                        </div>
-                        {visualEditEnabled ? (
-                          <div className={cn("visual-edit-hint", !visualBridgeReady && "is-connecting")}>
-                            {visualBridgeReady ? <MousePointer2 className="size-3.5" /> : <PixelLoader />}
-                            <span>{visualBridgeReady ? "Click an element · Ctrl/Cmd-click to add · Esc to exit" : "Connecting element selector…"}</span>
+                  <div className="relative flex min-h-0 flex-1 flex-col">
+                    <div className={cn("relative min-h-0 flex-1", consoleDrawerOpen && consoleExpanded && "hidden")}>
+                      {currentPreviewUrl && !isPreviewReconnecting ? (
+                        <div className={cn("preview-frame-wrap", `is-${previewDevice}`)}>
+                          <div className="preview-device-stage">
+                            <iframe
+                              key={`${currentPreviewUrl}:${previewRevision}`}
+                              ref={previewFrameRef}
+                              title={`${project.title} ${previewDevice} preview`}
+                              src={currentPreviewUrl}
+                              sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
+                              onLoad={() => postVisualState(visualEditEnabled, visualSelections)}
+                            />
                           </div>
-                        ) : null}
-                        <div className="preview-floating-tools"><button type="button" aria-label="Copy preview URL" title="Copy preview URL" onClick={() => { void navigator.clipboard.writeText(currentPreviewUrl); toast.success("Preview link copied."); }}><Copy className="size-4" /></button></div>
+                          {visualEditEnabled ? (
+                            <div className={cn("visual-edit-hint", !visualBridgeReady && "is-connecting")}>
+                              {visualBridgeReady ? <MousePointer2 className="size-3.5" /> : <PixelLoader />}
+                              <span>{visualBridgeReady ? "Click an element · Ctrl/Cmd-click to add · Esc to exit" : "Connecting element selector…"}</span>
+                            </div>
+                          ) : null}
+                          <div className="preview-floating-tools"><button type="button" aria-label="Copy preview URL" title="Copy preview URL" onClick={() => { void navigator.clipboard.writeText(currentPreviewUrl); toast.success("Preview link copied."); }}><Copy className="size-4" /></button></div>
+                        </div>
+                      ) : <PreviewPlaceholder reconnecting={isPreviewReconnecting} />}
+
+                      {!isBuilding && actionableConsoleErrors.length > 0 ? (
+                        <div
+                          role="status"
+                          aria-live="polite"
+                          className="pointer-events-auto absolute inset-x-3 bottom-3 z-20 mx-auto flex max-w-xl items-center gap-3 rounded-xl border border-rose-500/35 bg-[#191215]/95 px-3.5 py-2.5 text-white shadow-2xl backdrop-blur-md transition-opacity motion-reduce:transition-none"
+                        >
+                          <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-rose-500/15 text-rose-300" aria-hidden="true">
+                            <AlertCircle className="size-4" />
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <strong className="text-[12.5px] font-semibold text-rose-100 tabular-nums">
+                                {actionableConsoleErrors.length === 1
+                                  ? "Runtime error detected"
+                                  : `${actionableConsoleErrors.length} runtime errors detected`}
+                              </strong>
+                              {actionableConsoleErrors[actionableConsoleErrors.length - 1]?.route ? (
+                                <span className="truncate rounded-full bg-white/[0.08] px-2 py-0.5 font-mono text-[10px] text-white/65">
+                                  {actionableConsoleErrors[actionableConsoleErrors.length - 1].route}
+                                </span>
+                              ) : null}
+                            </div>
+                            <p className="mt-0.5 truncate font-mono text-[11px] text-white/70">
+                              {actionableConsoleErrors[actionableConsoleErrors.length - 1]?.message}
+                            </p>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setConsoleDrawerOpen(true);
+                                setConsoleFilterRequest({ value: "errors", nonce: Date.now() });
+                                void loadConsoleSnapshot({ wake: true, silent: true });
+                              }}
+                              className="inline-flex min-h-8 items-center rounded-lg border border-white/15 bg-white/[0.05] px-2.5 text-[11.5px] font-medium text-white/85 transition-colors hover:bg-white/[0.1] hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8c7dff] [@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:px-3"
+                            >
+                              Logs
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleFixConsoleErrors(actionableConsoleErrors)}
+                              className="inline-flex min-h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-[12px] font-semibold text-black transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white [@media(pointer:coarse)]:min-h-11"
+                            >
+                              <Sparkles className="size-3.5" aria-hidden="true" />
+                              Fix error
+                            </button>
+                            <button
+                              type="button"
+                              onClick={dismissDetectedErrors}
+                              aria-label="Dismiss runtime error alert"
+                              title="Dismiss alert"
+                              className="grid size-8 place-items-center rounded-lg text-white/45 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8c7dff] [@media(pointer:coarse)]:size-11"
+                            >
+                              <X className="size-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    {consoleDrawerOpen ? (
+                      <div
+                        id="preview-console-drawer"
+                        className={cn(
+                          "min-h-0 border-t border-white/[0.1]",
+                          consoleExpanded ? "flex-1 border-t-0" : isCompact ? "h-52 shrink-0" : "h-64 shrink-0",
+                        )}
+                      >
+                        <PreviewConsolePanel
+                          entries={consoleEntries}
+                          serverLogs={serverLogs}
+                          loading={consoleLoading}
+                          error={consoleFetchError}
+                          isBuilding={isBuilding}
+                          filterRequest={consoleFilterRequest}
+                          onRefresh={() => void loadConsoleSnapshot({ wake: true })}
+                          onClear={() => void clearConsoleLogs()}
+                          onFixErrors={handleFixConsoleErrors}
+                          expanded={consoleExpanded}
+                          onToggleExpand={() => setConsoleExpanded((value) => !value)}
+                          onCloseDrawer={() => {
+                            setConsoleDrawerOpen(false);
+                            setConsoleExpanded(false);
+                          }}
+                        />
                       </div>
-                    ) : <PreviewPlaceholder reconnecting={isPreviewReconnecting} />}
+                    ) : null}
                   </div>
                 </div>
                 )}

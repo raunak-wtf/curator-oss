@@ -3,8 +3,9 @@ import { isIP } from "node:net";
 import path from "node:path";
 import type { Sandbox } from "@daytona/sdk";
 import { z } from "zod";
-import { getPreviewHealth, getPreviewUrl, getProjectFsRoot, getProjectRoot } from "../daytona";
-import { deleteProjectFile, upsertProjectFile, updateProject } from "../store";
+import { getPreviewHealth, getPreviewUrl, getProjectFsRoot, getProjectRoot, readSandboxRuntimeLogs } from "../daytona";
+import { extractServerErrorsFromLog } from "../preview-console";
+import { appendProjectConsoleLogs, deleteProjectFile, listProjectConsoleLogs, upsertProjectFile, updateProject } from "../store";
 import type { FileChangeSnapshot, Project } from "../types";
 import { assertBuildModeCommandAllowed, assertBuildModeFileChangeAllowed } from "./cloud-stack-policy";
 
@@ -213,6 +214,41 @@ export const agentTools = [
           port: { type: "integer", minimum: 1, maximum: 65535 },
         },
         required: ["routes"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "read_preview_console",
+      description:
+        "Read the persistent runtime console for the live preview app: browser console logs, uncaught client exceptions, failed /api/* network requests, and sandbox dev-server (npm run dev) stdout/stderr. Optionally pass probeRoutes to hit routes first and capture fresh SSR/API logs.",
+      parameters: {
+        type: "object",
+        properties: {
+          level: {
+            type: "string",
+            enum: ["all", "error", "warn"],
+            description: "Filter console entries by severity. Defaults to 'all'.",
+          },
+          source: {
+            type: "string",
+            enum: ["all", "browser", "network", "server"],
+            description: "Filter console entries by origin. Defaults to 'all'.",
+          },
+          limit: {
+            type: "integer",
+            minimum: 1,
+            maximum: 200,
+            description: "Maximum persisted console entries to return. Defaults to 80.",
+          },
+          probeRoutes: {
+            type: "array",
+            items: { type: "string", description: "Optional route path beginning with '/', e.g. '/' or '/sign-in'." },
+            maxItems: 6,
+          },
+        },
         additionalProperties: false,
       },
     },
@@ -798,6 +834,82 @@ export async function executeAgentTool(
     return {
       output: JSON.stringify(results),
       summary: `Inspected ${results.length} preview ${results.length === 1 ? "route" : "routes"}`,
+    };
+  }
+
+  if (name === "read_preview_console") {
+    const input = z
+      .object({
+        level: z.enum(["all", "error", "warn"]).optional().default("all"),
+        source: z.enum(["all", "browser", "network", "server"]).optional().default("all"),
+        limit: z.number().int().min(1).max(200).optional().default(80),
+        probeRoutes: z.array(z.string().min(1).max(400).regex(/^\//)).max(6).optional(),
+      })
+      .parse(rawInput ?? {});
+
+    if (input.probeRoutes?.length) {
+      for (const route of input.probeRoutes) {
+        await sandbox.process
+          .executeCommand(
+            `curl -sS -o /dev/null --max-time 8 ${shellQuote(`http://127.0.0.1:3000${route}`)} || true`,
+            root,
+            undefined,
+            10,
+          )
+          .catch(() => undefined);
+      }
+    }
+
+    const [persisted, runtime] = await Promise.all([
+      listProjectConsoleLogs(project.id, input.limit),
+      readSandboxRuntimeLogs(project, { maxLines: 160 }),
+    ]);
+
+    let entries = persisted;
+    if (runtime.serverLogs) {
+      const serverErrors = extractServerErrorsFromLog(runtime.serverLogs);
+      const fresh = serverErrors.filter(
+        (candidate) => !persisted.some((existing) => existing.source === "server" && existing.message === candidate.message),
+      );
+      if (fresh.length > 0) {
+        entries = await appendProjectConsoleLogs(project.id, fresh);
+      }
+    }
+
+    const filtered = entries
+      .filter((entry) => {
+        if (input.level === "error") return entry.level === "error";
+        if (input.level === "warn") return entry.level === "error" || entry.level === "warn";
+        return true;
+      })
+      .filter((entry) => (input.source === "all" ? true : entry.source === input.source))
+      .slice(-input.limit);
+
+    const errorCount = filtered.filter((entry) => entry.level === "error").length;
+    const warningCount = filtered.filter((entry) => entry.level === "warn").length;
+
+    return {
+      output: JSON.stringify({
+        previewHealthy: runtime.previewHealthy,
+        previewStatus: runtime.previewStatus,
+        errorCount,
+        warningCount,
+        entries: filtered.map((entry) => ({
+          source: entry.source,
+          level: entry.level,
+          message: entry.message,
+          ...(entry.route ? { route: entry.route } : {}),
+          ...(entry.statusCode ? { statusCode: entry.statusCode } : {}),
+          ...(entry.stack ? { stack: entry.stack.slice(0, 2_000) } : {}),
+          ...(entry.repeatCount > 1 ? { repeatCount: entry.repeatCount } : {}),
+          createdAt: entry.createdAt,
+        })),
+        serverLogs: runtime.serverLogs,
+      }),
+      summary:
+        errorCount > 0
+          ? `Read preview console (${errorCount} ${errorCount === 1 ? "error" : "errors"})`
+          : "Read preview console (no errors)",
     };
   }
 

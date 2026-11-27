@@ -17,6 +17,7 @@ describe("agent tool contract", () => {
       "list_processes",
       "stop_process",
       "inspect_preview",
+      "read_preview_console",
       "web_search",
       "fetch_url",
       "get_preview_url",

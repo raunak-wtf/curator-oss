@@ -29,6 +29,8 @@ describe("visual edit bridge installation", () => {
     expect(source).toContain('event.source !== window.parent || event.origin !== PARENT_ORIGIN');
     expect(source).toContain('event.metaKey || event.ctrlKey');
     expect(source).toContain('"href", "src"');
+    expect(source).toContain('"console_entry"');
+    expect(source).toContain('"unhandledrejection"');
     expect(source).not.toContain('getAttribute("value")');
     expect(source).not.toContain("outerHTML");
   });

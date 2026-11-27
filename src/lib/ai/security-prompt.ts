@@ -2,7 +2,7 @@ import type { ApprovalMode, Attachment, Project, Skill } from "../types";
 import { securityMethodologyContext } from "./security-methodology";
 
 /** Tools a security project never gets: there is no preview, and only the user pushes to GitHub. */
-export const SECURITY_EXCLUDED_TOOLS = new Set(["get_preview_url", "inspect_preview"]);
+export const SECURITY_EXCLUDED_TOOLS = new Set(["get_preview_url", "inspect_preview", "read_preview_console"]);
 
 /** System prompt for Security mode: a security engineer working on a copy of the user's GitHub repository. */
 export function buildSecurityPrompt(

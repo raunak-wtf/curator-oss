@@ -280,3 +280,24 @@ export const projectAnalyticsEvents = pgTable(
   },
   (table) => [index("project_analytics_project_created_idx").on(table.projectId, table.createdAt)],
 );
+
+/** Persistent runtime console, network, and dev-server log entries per project (secrets redacted). */
+export const projectConsoleLogs = pgTable(
+  "project_console_logs",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    source: text("source").default("browser").notNull(),
+    level: text("level").default("log").notNull(),
+    message: text("message").notNull(),
+    stack: text("stack"),
+    route: text("route"),
+    statusCode: integer("status_code"),
+    fingerprint: text("fingerprint").notNull(),
+    repeatCount: integer("repeat_count").default(1).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index("project_console_logs_project_created_idx").on(table.projectId, table.createdAt)],
+);

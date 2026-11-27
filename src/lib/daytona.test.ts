@@ -1,7 +1,9 @@
 import type { Sandbox } from "@daytona/sdk";
 import { describe, expect, it } from "vitest";
 import {
+  buildDevServerCommand,
   clonePublishedDependenciesCommand,
+  devServerLogPath,
   getPreviewHealth,
   isDirectPreviewProxyConfigured,
   isHealthyPreviewStatus,
@@ -94,5 +96,13 @@ describe("direct custom preview proxy configuration", () => {
       "X-Forwarded-Proto": "https",
       "X-Daytona-Trust-Forwarded-Host": "true",
     });
+  });
+
+  it("tees dev-server output outside the project root with COGNIX_HOSTED_PREVIEW enabled", () => {
+    expect(devServerLogPath("/home/daytona/app")).toBe("/home/daytona/.cognix-dev-server.log");
+    const cmd = buildDevServerCommand("/home/daytona/app", 3000);
+    expect(cmd).toContain("COGNIX_HOSTED_PREVIEW=1");
+    expect(cmd).toContain("tee -a '/home/daytona/.cognix-dev-server.log'");
+    expect(cmd).not.toContain("/home/daytona/app/.cognix-dev-server.log");
   });
 });

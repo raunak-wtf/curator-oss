@@ -12,6 +12,7 @@ export const MAX_SECRETS_PER_PROJECT = 100;
 /** Names Cognix sets itself. Users can see them but cannot overwrite or delete them. */
 export const RESERVED_SECRET_NAMES = new Set([
   "CI",
+  "COGNIX_HOSTED_PREVIEW",
   "NODE_ENV",
   "PORT",
   "HOSTNAME",

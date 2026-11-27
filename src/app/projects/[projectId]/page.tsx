@@ -3,7 +3,16 @@ import { WorkspaceClient } from "@/components/workspace-client";
 import { getViewer } from "@/lib/auth0";
 import { ensurePreviewUrl, publishedAutoStopMinutes } from "@/lib/daytona";
 import { appsDomain } from "@/lib/domains";
-import { ensureUser, getPendingAgentApproval, getProject, getProjectCloud, listMessages, listProjectFiles, listProjects } from "@/lib/store";
+import {
+  ensureUser,
+  getPendingAgentApproval,
+  getProject,
+  getProjectCloud,
+  listMessages,
+  listProjectConsoleLogs,
+  listProjectFiles,
+  listProjects,
+} from "@/lib/store";
 
 type Props = {
   params: Promise<{ projectId: string }>;
@@ -29,13 +38,14 @@ export default async function ProjectPage({ params, searchParams }: Props) {
     }
   }
 
-  const [messages, files, projects, cloud, query, pendingApproval] = await Promise.all([
+  const [messages, files, projects, cloud, query, pendingApproval, consoleEntries] = await Promise.all([
     listMessages(project.id),
     listProjectFiles(project.id),
     listProjects(viewer.id),
     getProjectCloud(project.id).catch(() => null),
     searchParams,
     project.mode === "security" ? getPendingAgentApproval(project.id, viewer.id).catch(() => null) : Promise.resolve(null),
+    project.mode !== "security" ? listProjectConsoleLogs(project.id, 150).catch(() => []) : Promise.resolve([]),
   ]);
 
   return (
@@ -43,6 +53,7 @@ export default async function ProjectPage({ params, searchParams }: Props) {
       initialProject={project}
       initialMessages={messages}
       initialFiles={files}
+      initialConsoleEntries={consoleEntries}
       viewer={viewer}
       initialNow={new Date().toISOString()}
       initialPrompt={query.prompt}

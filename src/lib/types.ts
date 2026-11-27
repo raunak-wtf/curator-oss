@@ -215,6 +215,7 @@ export type AgentEvent =
   | { type: "attachment_start"; id: string; path: string }
   | { type: "attachment_ready"; id: string; path: string; appUrl: string }
   | { type: "preview"; url: string; sandboxId?: string }
+  | { type: "cloud_status"; enabled: boolean }
   | { type: "files_changed"; paths: string[] }
   /** Request review mode: the run waits until the user allows or denies these actions. */
   | { type: "approval_request"; approval: AgentApprovalRequest }
@@ -435,4 +436,31 @@ export type PublishCheckReport = {
   checkedAt: string;
   securityIssues: PublishCheckIssue[];
   seoIssues: PublishCheckIssue[];
+};
+
+export type PreviewConsoleSource = "browser" | "network" | "server";
+export type PreviewConsoleLevel = "log" | "info" | "warn" | "error";
+
+export type PreviewConsoleEntry = {
+  id: string;
+  projectId: string;
+  source: PreviewConsoleSource;
+  level: PreviewConsoleLevel;
+  message: string;
+  stack: string | null;
+  route: string | null;
+  statusCode: number | null;
+  fingerprint: string;
+  repeatCount: number;
+  createdAt: string;
+};
+
+export type PreviewConsoleInput = {
+  source: PreviewConsoleSource;
+  level: PreviewConsoleLevel;
+  message: string;
+  stack?: string | null;
+  route?: string | null;
+  statusCode?: number | null;
+  createdAt?: string;
 };

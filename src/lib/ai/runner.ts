@@ -2,11 +2,37 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
-import { ensureProjectStorageBucket, isBucketlineConfigured } from "../cloud/bucketline";
-import { ensureProjectNeonDatabase, isNeonApiConfigured } from "../cloud/neon";
-import { ensureSandbox, getPreviewHealth, getPreviewUrl, getProjectFsRoot, getProjectRoot, syncProjectEnv } from "../daytona";
+import { ensureProjectStorageBucket, isBucketlineConfigured, listProjectBuckets } from "../cloud/bucketline";
+import { ensureProjectNeonDatabase, inspectProjectTables, isNeonApiConfigured } from "../cloud/neon";
+import {
+  buildDevServerCommand,
+  ensureSandbox,
+  getPreviewHealth,
+  getPreviewUrl,
+  getProjectFsRoot,
+  getProjectRoot,
+  readSandboxRuntimeLogs,
+  syncProjectEnv,
+} from "../daytona";
+import { extractServerErrorsFromLog, selectActionableConsoleErrors } from "../preview-console";
 import { isSecretsEncryptionConfigured } from "../secrets-crypto";
-import { createAgentApproval, createMessage, expireAgentApproval, getAgentApprovalDecisions, getDecryptedSecrets, getProjectCloud, getProjectRepository, listSecretNames, updateAttachmentSandboxPath, updateProject, upsertSecret } from "../store";
+import {
+  appendProjectConsoleLogs,
+  clearProjectConsoleLogs,
+  createAgentApproval,
+  createMessage,
+  expireAgentApproval,
+  getAgentApprovalDecisions,
+  getDecryptedSecrets,
+  getProjectCloud,
+  getProjectRepository,
+  listProjectConsoleLogs,
+  listSecretNames,
+  updateAttachmentSandboxPath,
+  updateProject,
+  updateProjectCloud,
+  upsertSecret,
+} from "../store";
 import { createSignedObjectReadUrl, downloadObject } from "../storage";
 import type {
   AgentApprovalDecision,
@@ -26,8 +52,10 @@ import type {
 import { safeFileName } from "../utils";
 import { ensureVisualEditBridge } from "../visual-edit-bridge";
 import { isProductionBuildCommand, resolveAgentMaxTurns, shouldRefreshAgentContext } from "./agent-policy";
+import type { CloudFeature } from "../cloud-features";
+import { CLOUD_GUIDES } from "./cloud-guides";
 import { streamModelTurnWithRetry } from "./model-stream";
-import { buildPlanSystemPrompt, buildSystemPrompt } from "./system-prompt";
+import { buildPlanSystemPrompt, buildSystemPrompt, type PromptCloudState } from "./system-prompt";
 import { buildMultimodalUserContent, hasNativeFileParts } from "./multimodal";
 import { createTerminalLog, parseRunCommandOutput } from "./terminal-log";
 import { interactiveTools, isInteractiveTool, runInteractiveTool } from "./interactive-tools";
@@ -74,6 +102,62 @@ function isNativeFileCompatibilityError(error: unknown) {
   const message = error instanceof Error ? error.message : "";
   return [400, 415, 422].includes(status ?? 0)
     || /unsupported.*file|file.*unsupported|invalid.*content.*type|content.*type.*file/i.test(message);
+}
+
+function withFastTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([
+    promise.catch(() => fallback),
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
+async function loadLiveCloudSummaries(project: Project, decryptedSecrets: Record<string, string>) {
+  const dbUrl = decryptedSecrets.DATABASE_URL;
+  const activeBucket = decryptedSecrets.S3_BUCKET;
+
+  const [tables, buckets] = await Promise.all([
+    dbUrl ? withFastTimeout(inspectProjectTables(dbUrl), 5_500, []) : Promise.resolve([]),
+    isBucketlineConfigured() ? withFastTimeout(listProjectBuckets(project.id), 4_500, []) : Promise.resolve([]),
+  ]);
+
+  let liveDatabaseSummary: string | undefined;
+  if (dbUrl) {
+    if (tables.length === 0) {
+      liveDatabaseSummary =
+        "- **Cloud Database (PostgreSQL)**: Connected (`DATABASE_URL` & `DIRECT_URL` ready in `.env.local`), currently **0 tables** in `public` — define `schema.ts` and run `npx drizzle-kit generate && npx drizzle-kit push --force`.";
+    } else {
+      const tableLines = tables.slice(0, 20).map((table) => {
+        const cols = table.columns
+          .slice(0, 12)
+          .map((c) => `${c.name}:${c.dataType}`)
+          .join(", ");
+        const more = table.columns.length > 12 ? `, +${table.columns.length - 12} more` : "";
+        return `  - \`${table.schema}.${table.name}\` (~${table.estimatedRows} rows): ${cols}${more}`;
+      });
+      liveDatabaseSummary = `- **Cloud Database (PostgreSQL)**: Connected — ${tables.length} live ${tables.length === 1 ? "table" : "tables"}:\n${tableLines.join("\n")}`;
+    }
+  }
+
+  let liveStorageSummary: string | undefined;
+  if (buckets.length > 0) {
+    const list = buckets
+      .slice(0, 8)
+      .map((b) => `\`${b.name}\` (${b.accessMode}${b.name === activeBucket ? ", active in `.env.local`" : ""}, ${b.objectCount} objects)`)
+      .join(", ");
+    liveStorageSummary = `- **Cloud Storage**: ${list}.`;
+  } else if (activeBucket) {
+    liveStorageSummary = `- **Cloud Storage**: Active bucket \`${activeBucket}\` (${decryptedSecrets.S3_ACCESS_MODE || "private"} mode).`;
+  }
+
+  return { liveDatabaseSummary, liveStorageSummary };
+}
+
+function extractPgTableNamesFromSchemaSource(source: string): string[] {
+  const names = new Set<string>();
+  for (const match of source.matchAll(/\bpgTable\s*\(\s*["'`]([a-zA-Z0-9_]+)["'`]/g)) {
+    if (match[1]) names.add(match[1]);
+  }
+  return [...names];
 }
 
 export async function runAgent(input: {
@@ -145,16 +229,26 @@ export async function runAgent(input: {
   }
   const runStartedAt = Date.now();
   const runActivity: AgentRunActivity[] = [];
-  const secretValues = Object.values(await getDecryptedSecrets(project.id).catch(() => ({} as Record<string, string>)));
-  const terminal = createTerminalLog(emit, secretValues);
-  const [cloud, secretNames, linkedRepository] = await Promise.all([
+  let decryptedSecrets = await getDecryptedSecrets(project.id).catch(() => ({} as Record<string, string>));
+  const terminal = createTerminalLog(emit, Object.values(decryptedSecrets));
+  const [cloud, secretNames, linkedRepository, recentConsoleEntries] = await Promise.all([
     getProjectCloud(project.id).catch(() => null),
     listSecretNames(project.id).then((items) => items.map((item) => item.name)).catch(() => [] as string[]),
     getProjectRepository(project.id, project.ownerId).catch(() => null),
+    !security ? listProjectConsoleLogs(project.id, 40).catch(() => []) : Promise.resolve([]),
   ]);
   // Security reviews never sync or push, even if a repository is linked in Git Control.
   const repository = security ? null : linkedRepository;
-  const cloudState = { enabled: cloud?.status === "ready", secretNames };
+  // Distinguish "never configured yet" (`cloud === null`) from "user explicitly turned Cloud off" (`cloud.status === "disabled"`).
+  const cloudExplicitlyDisabled = cloud !== null && cloud.status === "disabled";
+  const canAutoEnableCloud =
+    !security &&
+    !planMode &&
+    !cloudExplicitlyDisabled &&
+    isSecretsEncryptionConfigured &&
+    (isNeonApiConfigured() || isBucketlineConfigured());
+
+  const cloudState: PromptCloudState = { enabled: cloud?.status === "ready", secretNames };
   if (!security && cloudState.enabled && isSecretsEncryptionConfigured) {
     let autoProvisioned = false;
     if (!cloudState.secretNames.includes("BETTER_AUTH_SECRET")) {
@@ -184,12 +278,18 @@ export async function runAgent(input: {
         getDecryptedSecrets(project.id).catch(() => ({} as Record<string, string>)),
         listSecretNames(project.id).then((items) => items.map((item) => item.name)).catch(() => cloudState.secretNames),
       ]);
+      decryptedSecrets = freshSecrets;
       terminal.addSecrets(Object.values(freshSecrets));
       cloudState.secretNames = freshNames;
     }
   }
   if (!security && cloudState.secretNames.length > 0) {
     await syncProjectEnv(project).catch(() => undefined);
+  }
+  if (!security && cloudState.enabled) {
+    const liveSummaries = await loadLiveCloudSummaries(project, decryptedSecrets);
+    cloudState.liveDatabaseSummary = liveSummaries.liveDatabaseSummary;
+    cloudState.liveStorageSummary = liveSummaries.liveStorageSummary;
   }
   let githubInfo: GitHubCommitInfo | undefined;
 
@@ -254,32 +354,51 @@ export async function runAgent(input: {
         : ({ role: "assistant", content: message.content } satisfies ChatCompletionMessageParam),
     );
 
+  // Surface active preview console errors automatically if the user didn't already click "Fix error"
+  const thirtyMinutesAgoIso = new Date(Date.now() - 30 * 60_000).toISOString();
+  const activeConsoleErrors = !security
+    ? selectActionableConsoleErrors(recentConsoleEntries, { afterIso: thirtyMinutesAgoIso }).slice(-4)
+    : [];
+  const promptAlreadyContainsErrors = /Fix (?:this|these) runtime errors? detected in the live app preview/i.test(prompt);
+  const consoleContextNote =
+    activeConsoleErrors.length > 0 && !promptAlreadyContainsErrors
+      ? `\n\n<recent_preview_console_errors>\nRecent errors captured from the live preview console (use \`read_preview_console\` if relevant to this request):\n${activeConsoleErrors
+          .map(
+            (e) =>
+              `- [${e.source}${e.route ? ` ${e.route}` : ""}${e.statusCode ? ` HTTP ${e.statusCode}` : ""}] ${e.message.slice(0, 350)}`,
+          )
+          .join("\n")}\n</recent_preview_console_errors>`
+      : "";
+
+  const effectivePrompt = `${prompt}${consoleContextNote}`;
+
+  const computeSystemPromptContent = () =>
+    security
+      ? buildSecurityPrompt(project, projectRoot, {
+          attachments: stagedAttachments.map((item) => item.attachment),
+          skills: input.skills,
+          approvalMode,
+          secretNames: cloudState.secretNames,
+        })
+      : planMode
+        ? buildPlanSystemPrompt(project, projectRoot, stagedAttachments.map((item) => item.attachment), input.skills, cloudState)
+        : `${buildSystemPrompt(project, projectRoot, stagedAttachments.map((item) => item.attachment), input.skills, cloudState, repository)}${githubSyncNote ? `\n\n${githubSyncNote}` : ""}`;
+
   let messages: ChatCompletionMessageParam[] = [
     {
       role: "system",
-      content: security
-        ? buildSecurityPrompt(project, projectRoot, {
-            attachments: stagedAttachments.map((item) => item.attachment),
-            skills: input.skills,
-            approvalMode,
-            secretNames,
-          })
-        : planMode
-          ? buildPlanSystemPrompt(project, projectRoot, stagedAttachments.map((item) => item.attachment), input.skills, cloudState)
-          : `${buildSystemPrompt(project, projectRoot, stagedAttachments.map((item) => item.attachment), input.skills, cloudState, repository)}${githubSyncNote ? `\n\n${githubSyncNote}` : ""}`,
+      content: computeSystemPromptContent(),
     },
     ...history,
     {
       role: "user",
-      content: buildMultimodalUserContent(prompt, stagedAttachments, { visualSelections: input.visualSelections }),
+      content: buildMultimodalUserContent(effectivePrompt, stagedAttachments, { visualSelections: input.visualSelections }),
     },
   ];
   const currentUserMessageIndex = messages.length - 1;
   let nativeFilePartsEnabled = hasNativeFileParts(stagedAttachments);
 
   const usedTools: string[] = [];
-  // Some providers number tool call IDs per turn (e.g. `read_file_10`), so they repeat across turns.
-  // The provider ID is still used for `tool_call_id`; this sequence keeps UI activity IDs unique.
   let activitySequence = 0;
   const changedPaths = new Set<string>();
   const fileChanges = new Map<string, FileChangeSnapshot>();
@@ -321,8 +440,10 @@ export async function runAgent(input: {
     });
     return message;
   }
+
   let previewReady = false;
   let productionBuildPassed = false;
+  let runtimeVerifiedClean = false;
   let completionNudges = 0;
   const maxAgentTurns = resolveAgentMaxTurns();
   // Security mode: the build tools minus the preview, plus ask_user and the pull request proposal. No commit tool.
@@ -340,17 +461,16 @@ export async function runAgent(input: {
     "get_process_logs",
     "list_processes",
     "inspect_preview",
+    "read_preview_console",
     "web_search",
     "fetch_url",
   ]);
-  const planTools = [
+  const getPlanTools = () => [
     ...agentTools.filter((tool) => tool.type === "function" && PLAN_READONLY_TOOLS.has(tool.function.name)),
     ...interactiveTools.filter(
       (tool) => tool.function.name === "ask_user" || (cloudState.enabled && tool.function.name === "read_cloud_guide"),
     ),
   ];
-  const planToolNames = new Set(planTools.map((tool) => tool.function.name));
-  // Request review: set when the user chooses "Allow everything for this run".
   let approveRestOfRun = false;
 
   /** Waits for the user to allow or deny tool calls. Polls the database so it works across server instances. */
@@ -373,10 +493,61 @@ export async function runAgent(input: {
     return expired;
   }
 
+  /**
+   * Verifies that if Drizzle schema tables exist in source code, they are pushed to live PostgreSQL.
+   * Returns an error message if schema push failed and needs agent repair.
+   */
+  async function verifyCloudDatabaseMigrations(): Promise<string | null> {
+    if (!cloudState.enabled || !decryptedSecrets.DATABASE_URL) return null;
+
+    const schemaCandidates = ["src/lib/schema.ts", "lib/schema.ts", "src/db/schema.ts", "db/schema.ts"];
+    let schemaSource: string | null = null;
+    for (const candidate of schemaCandidates) {
+      try {
+        schemaSource = (await sandbox.fs.downloadFile(`${projectFsRoot}/${candidate}`)).toString("utf8");
+        break;
+      } catch {
+        // Try next candidate
+      }
+    }
+    if (!schemaSource) return null;
+
+    const expectedTables = extractPgTableNamesFromSchemaSource(schemaSource);
+    if (!expectedTables.length) return null;
+
+    const liveTables = await inspectProjectTables(decryptedSecrets.DATABASE_URL).catch(() => []);
+    const liveTableNames = new Set(liveTables.map((t) => t.name));
+    const missingTables = expectedTables.filter((name) => !liveTableNames.has(name));
+    if (missingTables.length === 0) return null;
+
+    const configCheck = await sandbox.process.executeCommand(
+      "test -f drizzle.config.ts -o -f drizzle.config.mjs -o -f drizzle.config.js",
+      projectRoot,
+      undefined,
+      10,
+    );
+    if (configCheck.exitCode !== 0) {
+      return `Your schema defines PostgreSQL tables (${missingTables.join(", ")}) that do not exist in the live Cloud Database yet, and \`drizzle.config.ts\` is missing. Create \`drizzle.config.ts\` (loading \`.env.local\`) and run \`npx drizzle-kit generate && npx drizzle-kit push --force\`.`;
+    }
+
+    await syncProjectEnv(project).catch(() => undefined);
+    await emit({ type: "status", label: "Applying Cloud Database schema" });
+    const pushCmd = "npx drizzle-kit push --force";
+    const pushEntry = await terminal.start(pushCmd, "system");
+    const pushRes = await sandbox.process.executeCommand(pushCmd, projectRoot, { CI: "1" }, 120);
+    await terminal.end(pushEntry, { exitCode: pushRes.exitCode, output: pushRes.result, failed: pushRes.exitCode !== 0 });
+
+    if (pushRes.exitCode !== 0) {
+      return `\`npx drizzle-kit push --force\` failed while syncing tables (${missingTables.join(", ")}):\n${pushRes.result.slice(-3000)}\nFix the schema or \`drizzle.config.ts\` (ensure \`if (existsSync(".env.local")) process.loadEnvFile(".env.local");\` is present) and push the schema again.`;
+    }
+    return null;
+  }
+
   let completedNaturally = false;
   for (let turn = 0; turn < maxAgentTurns; turn += 1) {
     if (shouldRefreshAgentContext(turn)) {
       const changedFiles = [...changedPaths];
+      messages[0] = { role: "system", content: computeSystemPromptContent() };
       messages = [
         messages[0],
         {
@@ -392,7 +563,7 @@ export async function runAgent(input: {
             security
               ? "Continue the security review from what you have already inspected without re-reading covered files. Complete any remaining review stages, skeptical verification, and coverage checks, then finish with the evidence-gated report."
               : "Re-inspect only the files needed for the remaining work. Do not recreate or overwrite working features unnecessarily.",
-            ...(security ? [] : ["Finish the requested app, run its full production build and fix every build failure, then start or repair the server on 0.0.0.0:3000, inspect the preview, and call get_preview_url."]),
+            ...(security ? [] : ["Finish the requested app, run its full production build and fix every build failure, then start or repair the server on 0.0.0.0:3000, inspect the preview and console, and call get_preview_url."]),
           ].join("\n\n"),
         },
       ];
@@ -400,6 +571,8 @@ export async function runAgent(input: {
       await emit({ type: "status", label: security ? "Continuing with a focused review context" : "Continuing with a focused build context" });
     }
 
+    const planTools = getPlanTools();
+    const planToolNames = new Set(planTools.map((tool) => tool.function.name));
     const buildTools = [
       ...agentTools,
       ...interactiveTools,
@@ -430,7 +603,7 @@ export async function runAgent(input: {
       nativeFilePartsEnabled = false;
       messages[currentUserMessageIndex] = {
         role: "user",
-        content: buildMultimodalUserContent(prompt, stagedAttachments, {
+        content: buildMultimodalUserContent(effectivePrompt, stagedAttachments, {
           includeNativeFiles: false,
           visualSelections: input.visualSelections,
         }),
@@ -459,14 +632,55 @@ export async function runAgent(input: {
     });
 
     if (!calls.length) {
-      if (!security && !planMode && (!previewReady || !productionBuildPassed) && completionNudges < 2 && turn < maxAgentTurns - 1) {
-        completionNudges += 1;
-        messages.push({
-          role: "user",
-          content:
-            "The task is not complete yet. Continue using tools: verify the files are in the project root, install dependencies, run the full production build and fix it until it exits successfully, review any affected UI against the 390 px phone, 768 px tablet, and 1440 px desktop layout contract, then start the development server on 0.0.0.0:3000, confirm it responds, and call get_preview_url. A development preview does not replace the production build.",
-        });
-        continue;
+      if (!security && !planMode && turn < maxAgentTurns - 1) {
+        if ((!previewReady || !productionBuildPassed) && completionNudges < 2) {
+          completionNudges += 1;
+          messages.push({
+            role: "user",
+            content:
+              "The task is not complete yet. Continue using tools: verify the files are in the project root, install dependencies, ensure any database schema is pushed (`npx drizzle-kit push --force`), run the full production build (`npm run build`) and fix it until it exits successfully, then start the development server on 0.0.0.0:3000, confirm zero runtime errors with `read_preview_console`, and call `get_preview_url`.",
+          });
+          continue;
+        }
+
+        // Verify Drizzle schema migrations were pushed to PostgreSQL
+        if (cloudState.enabled && completionNudges < 3) {
+          const migrationError = await verifyCloudDatabaseMigrations();
+          if (migrationError) {
+            completionNudges += 1;
+            previewReady = false;
+            messages.push({
+              role: "user",
+              content: migrationError,
+            });
+            continue;
+          }
+        }
+
+        // Self-heal live preview runtime exceptions caught in dev server logs
+        if (previewReady && !runtimeVerifiedClean && completionNudges < 2) {
+          await sandbox.process
+            .executeCommand("curl -sS -o /dev/null --max-time 8 http://127.0.0.1:3000/ || true", projectRoot, undefined, 10)
+            .catch(() => undefined);
+          const runtimeSnapshot = await readSandboxRuntimeLogs(project, { maxLines: 60 });
+          const recentServerTail = runtimeSnapshot.serverLogs.split("\n").slice(-50).join("\n");
+          const detectedRuntimeErrors = extractServerErrorsFromLog(recentServerTail);
+          if (detectedRuntimeErrors.length > 0) {
+            completionNudges += 1;
+            previewReady = false;
+            productionBuildPassed = false;
+            const formatted = detectedRuntimeErrors
+              .slice(-3)
+              .map((err) => `- ${err.message}${err.stack ? `\n${err.stack.slice(0, 900)}` : ""}`)
+              .join("\n\n");
+            messages.push({
+              role: "user",
+              content: `The production build passed, but the live development server logged runtime errors when rendering:\n\n${formatted}\n\nDiagnose and fix these runtime errors, rerun \`npm run build\`, verify with \`read_preview_console\`, and call \`get_preview_url\`.`,
+            });
+            continue;
+          }
+          runtimeVerifiedClean = true;
+        }
       }
       finalContent = content.trim();
       completedNaturally = true;
@@ -484,12 +698,11 @@ export async function runAgent(input: {
       }
     }
 
-    // If the model pauses to ask for user consent (request_cognix_cloud or ask_user) in Build mode,
-    // never execute file mutations or shell commands in that same turn before the user answers.
+    // Only pause mutating tools when `ask_user` is called, or when `request_cognix_cloud` requires manual user consent.
     const turnPausesForUser = !security && calls.some(
       (call) =>
         !call.truncatedJson &&
-        ((call.function.name === "request_cognix_cloud" && !cloudState.enabled) ||
+        ((call.function.name === "request_cognix_cloud" && !cloudState.enabled && !canAutoEnableCloud) ||
           call.function.name === "ask_user"),
     );
     const mutatingTools = new Set([
@@ -555,7 +768,6 @@ export async function runAgent(input: {
         continue;
       }
 
-      // Security mode: only the security tool set, whatever the model asks for. There is no preview or commit tool.
       if (security && !securityToolNames.has(call.function.name)) {
         const summary = `Needs attention: ${call.function.name} isn't available in Security mode`;
         await emit({ type: "tool_result", id: activityId, name: call.function.name, summary });
@@ -615,6 +827,87 @@ export async function runAgent(input: {
       }
 
       if (isInteractiveTool(call.function.name)) {
+        // Seamless on-demand Cognix Cloud provisioning when the project has not explicitly disabled Cloud!
+        if (call.function.name === "request_cognix_cloud" && !cloudState.enabled && canAutoEnableCloud) {
+          let autoOutput: string;
+          let autoSummary: string;
+          try {
+            const parsed = runInteractiveTool("request_cognix_cloud", toolInput, {
+              cloudEnabled: false,
+              alreadyAsked: false,
+            });
+            const requestedFeatures: CloudFeature[] =
+              parsed.request?.kind === "enable_cloud" ? parsed.request.features : ["database"];
+            const needsDb = requestedFeatures.includes("database") || requestedFeatures.includes("auth");
+            const needsStorage = requestedFeatures.includes("storage");
+
+            await emit({ type: "status", label: "Provisioning Cognix Cloud" });
+            await updateProjectCloud(project.id, {
+              status: "ready",
+              storageEnabled: true,
+              authEnabled: true,
+              lastError: null,
+            });
+
+            if (!cloudState.secretNames.includes("BETTER_AUTH_SECRET")) {
+              await upsertSecret(project.id, "BETTER_AUTH_SECRET", randomBytes(32).toString("base64url"), "cloud");
+            }
+            if (needsDb && isNeonApiConfigured()) {
+              await emit({ type: "status", label: "Provisioning Cloud Database" });
+              await ensureProjectNeonDatabase(project);
+            }
+            if (needsStorage && isBucketlineConfigured()) {
+              await emit({ type: "status", label: "Provisioning Cloud Storage" });
+              await ensureProjectStorageBucket(project);
+            }
+
+            const [freshSecrets, freshNames] = await Promise.all([
+              getDecryptedSecrets(project.id).catch(() => ({} as Record<string, string>)),
+              listSecretNames(project.id).then((items) => items.map((item) => item.name)).catch(() => cloudState.secretNames),
+            ]);
+            decryptedSecrets = freshSecrets;
+            terminal.addSecrets(Object.values(freshSecrets));
+            cloudState.enabled = true;
+            cloudState.secretNames = freshNames;
+            await syncProjectEnv(project);
+
+            const liveSummaries = await loadLiveCloudSummaries(project, decryptedSecrets);
+            cloudState.liveDatabaseSummary = liveSummaries.liveDatabaseSummary;
+            cloudState.liveStorageSummary = liveSummaries.liveStorageSummary;
+            messages[0] = { role: "system", content: computeSystemPromptContent() };
+            await emit({ type: "cloud_status", enabled: true });
+
+            const guidesToInclude = new Set(requestedFeatures);
+            if (guidesToInclude.has("auth")) guidesToInclude.add("database");
+            const inlineGuides = [...guidesToInclude].map((feature) => CLOUD_GUIDES[feature]).join("\n\n---\n\n");
+
+            autoSummary = "Provisioned Cognix Cloud";
+            autoOutput = [
+              `Cognix Cloud is now ON and provisioned automatically for this project.`,
+              `Synced environment secrets in \`.env.local\`: ${freshNames.map((n) => `\`${n}\``).join(", ")}.`,
+              `Continue building the full application right now (do NOT pause or wait for user confirmation). Follow these Cognix Cloud implementation guides:`,
+              "",
+              inlineGuides,
+            ].join("\n");
+          } catch (error) {
+            autoOutput = JSON.stringify({
+              error: error instanceof Error ? error.message : "Could not auto-provision Cognix Cloud.",
+            });
+            autoSummary = "Needs attention: Cloud provisioning failed";
+          }
+
+          await emit({ type: "tool_result", id: activityId, name: call.function.name, summary: autoSummary });
+          runActivity.push({
+            id: activityId,
+            name: call.function.name,
+            label: autoSummary,
+            status: autoSummary.startsWith("Needs attention") ? "error" : "done",
+            durationMs: Date.now() - activityStartedAt,
+          });
+          messages.push({ role: "tool", tool_call_id: call.id, content: autoOutput });
+          continue;
+        }
+
         let interactiveOutput: string;
         let interactiveSummary: string;
         try {
@@ -653,8 +946,10 @@ export async function runAgent(input: {
               getDecryptedSecrets(project.id).catch(() => ({} as Record<string, string>)),
               listSecretNames(project.id).then((items) => items.map((item) => item.name)).catch(() => cloudState.secretNames),
             ]);
+            decryptedSecrets = freshSecrets;
             terminal.addSecrets(Object.values(freshSecrets));
             cloudState.secretNames = freshNames;
+            await syncProjectEnv(project).catch(() => undefined);
           }
         } catch (error) {
           cloudOutput = JSON.stringify({ error: error instanceof Error ? error.message : "Cloud tool failed" });
@@ -712,6 +1007,7 @@ export async function runAgent(input: {
         if (terminalEntry) await terminal.end(terminalEntry, parseRunCommandOutput(result.output));
         if (["write_file", "edit_file", "move_file", "delete_file", "run_command"].includes(call.function.name)) {
           previewReady = false;
+          runtimeVerifiedClean = false;
         }
         if (["write_file", "edit_file", "move_file", "delete_file"].includes(call.function.name)) {
           productionBuildPassed = false;
@@ -818,7 +1114,6 @@ export async function runAgent(input: {
   }
 
   if (security) {
-    // Security mode has no preview, install, or commit step. The user commits and pushes from Git Control.
     if (!finalContent.trim()) {
       finalContent = completedNaturally
         ? "## Done\n\nThe run finished without a written summary. Ask a follow-up question, such as \"Summarize the findings\", to get one."
@@ -869,6 +1164,12 @@ export async function runAgent(input: {
   const packageCheck = await sandbox.process.executeCommand("test -f package.json", projectRoot, undefined, 10);
   if (packageCheck.exitCode !== 0) throw new Error("The generated app is missing package.json. Ask Cognix to repair the project and try again.");
   await ensureVisualEditBridge(sandbox, projectRoot, projectFsRoot).catch(() => null);
+  if (cloudState.secretNames.length > 0) {
+    await syncProjectEnv(project).catch(() => undefined);
+  }
+  if (cloudState.enabled) {
+    await verifyCloudDatabaseMigrations().catch(() => null);
+  }
 
   let health = await getPreviewHealth(sandbox, 3000);
   if (!health.healthy) {
@@ -905,7 +1206,7 @@ export async function runAgent(input: {
       const command = await sandbox.process.executeSessionCommand(
         sessionId,
         {
-          command: `cd ${JSON.stringify(projectRoot)} && npm run dev -- --hostname 0.0.0.0 --port 3000`,
+          command: buildDevServerCommand(projectRoot, 3000),
           runAsync: true,
           suppressInputEcho: true,
         },
@@ -936,6 +1237,19 @@ export async function runAgent(input: {
   await updateProject(project.id, project.ownerId, { previewUrl, status: "ready" });
   await emit({ type: "preview", url: previewUrl, sandboxId: sandbox.id });
   previewReady = true;
+
+  // Clear stale pre-build console errors when files were updated so resolved errors don't linger
+  if (changedPaths.size > 0) {
+    await clearProjectConsoleLogs(project.id).catch(() => undefined);
+    // Persist any fresh server-side warnings/errors if present right now
+    const freshRuntime = await readSandboxRuntimeLogs(project, { maxLines: 50 }).catch(() => null);
+    if (freshRuntime?.serverLogs) {
+      const freshServerErrors = extractServerErrorsFromLog(freshRuntime.serverLogs);
+      if (freshServerErrors.length > 0) {
+        await appendProjectConsoleLogs(project.id, freshServerErrors).catch(() => undefined);
+      }
+    }
+  }
 
   // The task is finished and verified: save it to GitHub. No confirmation needed; a failed push never fails the build.
   if (repository && changedPaths.size > 0) {

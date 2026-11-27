@@ -1,6 +1,7 @@
 import path from "node:path";
 import { CodeLanguage, Daytona, DaytonaNotFoundError, type Sandbox } from "@daytona/sdk";
 import { appsDomain, directPreviewUrl, type DomainEnv } from "./domains";
+import { redactConsoleSecrets } from "./preview-console";
 import type { Project } from "./types";
 import { updateProject } from "./store";
 
@@ -82,7 +83,7 @@ export async function ensureSandbox(project: Project): Promise<{ sandbox: Sandbo
       autoStopInterval: 30,
       autoArchiveInterval: 1440,
       labels: { app: "cognix", projectId: project.id },
-      envVars: { CI: "1", NEXT_TELEMETRY_DISABLED: "1" },
+      envVars: { CI: "1", NEXT_TELEMETRY_DISABLED: "1", COGNIX_HOSTED_PREVIEW: "1" },
     },
     { timeout: 180 },
   );
@@ -103,6 +104,27 @@ export async function getProjectRoot(sandbox: Sandbox) {
 // while process commands use normal absolute paths inside the sandbox.
 export function getProjectFsRoot() {
   return "app";
+}
+
+function shellQuote(value: string) {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+/** Persistent dev-server log stored outside the project root so git/export/tar never include it. */
+export function devServerLogPath(root: string) {
+  return path.posix.join(path.posix.dirname(root), ".cognix-dev-server.log");
+}
+
+/** Builds a bounded, persistent `npm run dev` command that streams output to both session stdout and `.cognix-dev-server.log`. */
+export function buildDevServerCommand(root: string, port = 3000) {
+  const logFile = devServerLogPath(root);
+  const quotedLog = shellQuote(logFile);
+  const quotedTmp = shellQuote(`${logFile}.tmp`);
+  return [
+    `cd ${shellQuote(root)}`,
+    `if [ -f ${quotedLog} ] && [ "$(wc -c < ${quotedLog} 2>/dev/null || echo 0)" -gt 524288 ]; then tail -c 200000 ${quotedLog} > ${quotedTmp} && mv ${quotedTmp} ${quotedLog}; fi`,
+    `COGNIX_HOSTED_PREVIEW=1 CI=1 npm run dev -- --hostname 0.0.0.0 --port ${port} 2>&1 | tee -a ${quotedLog}`,
+  ].join(" && ");
 }
 
 export async function getPreviewHealth(sandbox: Sandbox, port = 3000) {
@@ -155,12 +177,59 @@ async function isPreviewUrlHealthy(url: string, timeoutMs = 8_000) {
   }
 }
 
+async function writeProjectEnvFiles(sandbox: Sandbox, project: Project, root: string) {
+  const { getDecryptedSecrets } = await import("./store");
+  const { renderEnvFile } = await import("./env-files");
+
+  const secrets = await getDecryptedSecrets(project.id);
+  const secretKeys = Object.keys(secrets);
+  const envContent = renderEnvFile(secrets);
+
+  if (project.mode === "security") {
+    // Security mode works on the user's own repository: keep secrets outside it, so they never show up as a change
+    // to push, and never touch the repository's .gitignore or its own .env files.
+    const outsideAbsPath = `${path.posix.dirname(root)}/.cognix-env`;
+    await sandbox.fs.uploadFile(Buffer.from(envContent), ".cognix-env");
+    await sandbox.process.executeCommand(`chmod 600 ${shellQuote(outsideAbsPath)}`, path.posix.dirname(root), undefined, 10);
+    return { secretCount: secretKeys.length };
+  }
+
+  await sandbox.process.executeCommand("mkdir -p app", path.posix.dirname(root), undefined, 15);
+  const fsEnvPath = `${getProjectFsRoot()}/.env.local`;
+  const absEnvPath = `${root}/.env.local`;
+  await sandbox.fs.uploadFile(Buffer.from(envContent), fsEnvPath);
+  await sandbox.process.executeCommand(`chmod 600 ${shellQuote(absEnvPath)}`, root, undefined, 10);
+  await sandbox.process.executeCommand(
+    `touch .gitignore && (grep -q '^\\.env\\*$' .gitignore || echo '.env*' >> .gitignore)`,
+    root,
+    undefined,
+    10,
+  );
+
+  // If a published production copy exists, keep its `.env.local` in sync too.
+  const currentPublishedDir = publishedPaths(project, root).current;
+  await sandbox.process
+    .executeCommand(
+      `if [ -d ${shellQuote(currentPublishedDir)} ]; then cp -f ${shellQuote(absEnvPath)} ${shellQuote(`${currentPublishedDir}/.env.local`)} && chmod 600 ${shellQuote(`${currentPublishedDir}/.env.local`)}; fi`,
+      root,
+      undefined,
+      10,
+    )
+    .catch(() => undefined);
+
+  return { secretCount: secretKeys.length };
+}
+
 async function ensureDevServerHealthy(sandbox: Sandbox, project: Project, port = 3000) {
   let health = await getPreviewHealth(sandbox, port);
   if (!health.healthy && !health.reachable) {
     const root = await getProjectRoot(sandbox);
     const packageCheck = await sandbox.process.executeCommand("test -f package.json", root, undefined, 10);
     if (packageCheck.exitCode !== 0) return false;
+
+    if (project.mode !== "security") {
+      await writeProjectEnvFiles(sandbox, project, root).catch(() => undefined);
+    }
 
     const dependencyCheck = await sandbox.process.executeCommand(
       "test -d node_modules && if [ -f tsconfig.json ]; then node -e \"require.resolve('typescript/package.json'); require.resolve('@types/node/package.json'); require.resolve('@types/react/package.json'); require.resolve('@types/react-dom/package.json')\"; else true; fi",
@@ -190,7 +259,7 @@ async function ensureDevServerHealthy(sandbox: Sandbox, project: Project, port =
       await sandbox.process.executeSessionCommand(
         sessionId,
         {
-          command: `cd ${JSON.stringify(root)} && npm run dev -- --hostname 0.0.0.0 --port ${port}`,
+          command: buildDevServerCommand(root, port),
           runAsync: true,
           suppressInputEcho: true,
         },
@@ -256,10 +325,6 @@ export async function ensurePreviewUrl(project: Project, port = 3000) {
   return url;
 }
 
-function shellQuote(value: string) {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
 export function clonePublishedDependenciesCommand(sourceNodeModules: string, targetNodeModules: string) {
   const source = shellQuote(sourceNodeModules);
   const target = shellQuote(targetNodeModules);
@@ -319,7 +384,7 @@ async function resumeDevelopmentPreview(sandbox: Sandbox, project: Project, root
   await sandbox.process.executeSessionCommand(
     sessionId,
     {
-      command: `cd ${shellQuote(root)} && npm run dev -- --hostname 0.0.0.0 --port 3000`,
+      command: buildDevServerCommand(root, 3000),
       runAsync: true,
       suppressInputEcho: true,
     },
@@ -363,8 +428,17 @@ async function startPublishedProcess(sandbox: Sandbox, project: Project, product
   }
 }
 
-async function publishedStartCommand(sandbox: Sandbox, root: string) {
-  const packageJson = JSON.parse((await sandbox.fs.downloadFile(`${root}/package.json`)).toString("utf8")) as {
+async function publishedStartCommand(sandbox: Sandbox, targetRoot: string) {
+  const pkgResult = await sandbox.process.executeCommand(
+    `cat ${shellQuote(`${targetRoot}/package.json`)}`,
+    targetRoot,
+    undefined,
+    10,
+  );
+  if (pkgResult.exitCode !== 0) {
+    throw new Error("Could not read package.json for the published release.");
+  }
+  const packageJson = JSON.parse(pkgResult.result) as {
     dependencies?: Record<string, string>;
     devDependencies?: Record<string, string>;
     scripts?: Record<string, string>;
@@ -373,10 +447,10 @@ async function publishedStartCommand(sandbox: Sandbox, root: string) {
   if (scripts.start) {
     const isNext = Boolean(packageJson.dependencies?.next || packageJson.devDependencies?.next);
     return isNext
-      ? `PORT=${PUBLISHED_PORT} HOSTNAME=0.0.0.0 npm run start -- --hostname 0.0.0.0 --port ${PUBLISHED_PORT}`
-      : `PORT=${PUBLISHED_PORT} HOST=0.0.0.0 npm run start`;
+      ? `COGNIX_HOSTED_PREVIEW=1 PORT=${PUBLISHED_PORT} HOSTNAME=0.0.0.0 npm run start -- --hostname 0.0.0.0 --port ${PUBLISHED_PORT}`
+      : `COGNIX_HOSTED_PREVIEW=1 PORT=${PUBLISHED_PORT} HOST=0.0.0.0 npm run start`;
   }
-  if (scripts.preview) return `npm run preview -- --host 0.0.0.0 --port ${PUBLISHED_PORT}`;
+  if (scripts.preview) return `COGNIX_HOSTED_PREVIEW=1 npm run preview -- --host 0.0.0.0 --port ${PUBLISHED_PORT}`;
   throw new Error("The generated app needs a production `start` or `preview` script before it can be published.");
 }
 
@@ -404,6 +478,10 @@ export async function deployPublishedApp(project: Project) {
     const sourcePackage = await sandbox.process.executeCommand("test -f package.json", root, undefined, 10);
     if (sourcePackage.exitCode !== 0) throw new Error("The project is missing package.json.");
 
+    if (project.mode !== "security") {
+      await writeProjectEnvFiles(sandbox, project, root).catch(() => undefined);
+    }
+
     const sourceNodeModules = path.posix.join(root, "node_modules");
     const stagingNodeModules = path.posix.join(paths.staging, "node_modules");
     const prepare = await sandbox.process.executeCommand(
@@ -426,12 +504,14 @@ export async function deployPublishedApp(project: Project) {
     }
 
     const buildLimitsPath = path.posix.join(paths.staging, ".cognix-build-limits.cjs");
-    await sandbox.fs.uploadFile(Buffer.from(publishedBuildLimitsSource), buildLimitsPath);
+    const relativeBuildLimitsPath = path.posix.relative(path.posix.dirname(root), buildLimitsPath);
+    await sandbox.fs.uploadFile(Buffer.from(publishedBuildLimitsSource), relativeBuildLimitsPath);
     const build = await sandbox.process.executeCommand(
       "npm run build",
       paths.staging,
       {
         CI: "1",
+        COGNIX_HOSTED_PREVIEW: "1",
         NEXT_TELEMETRY_DISABLED: "1",
         NODE_OPTIONS: `--max-old-space-size=512 --require=${buildLimitsPath}`,
       },
@@ -763,9 +843,9 @@ export async function readProjectSnapshot(project: Project, limits = { maxFileBy
 }
 
 /** Paths Git sync never reads from or writes to the sandbox: dependencies, build output, secrets, logs. */
-export function isSyncablePath(path: string) {
-  const segments = path.split("/");
-  if (!path || path.startsWith("/") || segments.some((segment) => segment === ".." || segment === "." || segment === "")) return false;
+export function isSyncablePath(filePath: string) {
+  const segments = filePath.split("/");
+  if (!filePath || filePath.startsWith("/") || segments.some((segment) => segment === ".." || segment === "." || segment === "")) return false;
   const [first] = segments;
   if (["node_modules", ".next", ".git", "uploads"].includes(first)) return false;
   const name = segments.at(-1) ?? "";
@@ -785,7 +865,7 @@ export async function applyProjectFiles(
   const root = await getProjectRoot(sandbox);
   const fsRoot = getProjectFsRoot();
   const write = changes.write.filter((file) => isSyncablePath(file.path));
-  const remove = changes.remove.filter(isSyncablePath);
+  const remove = changes.remove.filter((filePath) => isSyncablePath(filePath));
 
   const folders = [...new Set(write.map((file) => path.posix.dirname(file.path)).filter((folder) => folder !== "."))];
   for (let index = 0; index < folders.length; index += 200) {
@@ -835,28 +915,12 @@ export async function syncProjectEnv(project: Project) {
   const sandbox = await getSandbox(project);
   if (!sandbox) return;
 
-  const { getDecryptedSecrets } = await import("./store");
-  const { renderEnvFile } = await import("./env-files");
-  
-  const secrets = await getDecryptedSecrets(project.id);
-  const envContent = renderEnvFile(secrets);
-
   const root = await getProjectRoot(sandbox);
-  if (project.mode === "security") {
-    // Security mode works on the user's own repository: keep secrets outside it, so they never show up as a change
-    // to push, and never touch the repository's .gitignore or its own .env files.
-    const outsidePath = `${path.posix.dirname(root)}/.cognix-env`;
-    await sandbox.fs.uploadFile(Buffer.from(envContent), outsidePath);
-    await sandbox.process.executeCommand(`chmod 600 ${shellQuote(outsidePath)}`, root, undefined, 10);
-    return;
-  }
-  const envPath = `${root}/.env.local`;
-  
-  await sandbox.fs.uploadFile(Buffer.from(envContent), envPath);
-  await sandbox.process.executeCommand(`chmod 600 ${shellQuote(envPath)}`, root, undefined, 10);
-  await sandbox.process.executeCommand(`grep -q '^\\.env\\*$' .gitignore || echo '.env*' >> .gitignore`, root, undefined, 10);
+  await writeProjectEnvFiles(sandbox, project, root);
 
-  // Restart development session
+  if (project.mode === "security") return;
+
+  // Restart development session if one is currently running so Next.js picks up new `.env.local` values immediately.
   const sessionId = `cognix-preview-${project.id.slice(0, 12)}`;
   let hasActiveCommand = false;
   try {
@@ -865,7 +929,7 @@ export async function syncProjectEnv(project: Project) {
   } catch {
     // Session doesn't exist
   }
-  
+
   if (hasActiveCommand) {
     const health = await getPreviewHealth(sandbox, 3000);
     if (health.reachable) {
@@ -878,6 +942,94 @@ export async function syncProjectEnv(project: Project) {
     }
     forgetPreviewProxyTarget(project.id);
     await resumeDevelopmentPreview(sandbox, project, root).catch(() => undefined);
+  }
+}
+
+/**
+ * Reads the running sandbox's persistent dev-server output (`npm run dev` stdout/stderr)
+ * plus active background session logs, scrubbing all decrypted project secrets.
+ */
+export async function readSandboxRuntimeLogs(
+  project: Project,
+  options?: { maxLines?: number; skipWake?: boolean },
+): Promise<{
+  serverLogs: string;
+  previewHealthy: boolean;
+  previewStatus: string;
+  sandboxRunning: boolean;
+}> {
+  if (!project.sandboxId || !isDaytonaConfigured) {
+    return { serverLogs: "", previewHealthy: false, previewStatus: "000", sandboxRunning: false };
+  }
+
+  let sandbox: Sandbox;
+  try {
+    sandbox = await getClient().get(project.sandboxId);
+  } catch {
+    return { serverLogs: "", previewHealthy: false, previewStatus: "000", sandboxRunning: false };
+  }
+
+  if (String(sandbox.state) !== "started") {
+    if (options?.skipWake) {
+      return { serverLogs: "", previewHealthy: false, previewStatus: "stopped", sandboxRunning: false };
+    }
+    await sandbox.start(90);
+  }
+
+  const maxLines = Math.max(20, Math.min(400, Math.trunc(options?.maxLines ?? 160)));
+  const root = await getProjectRoot(sandbox);
+  const logFile = devServerLogPath(root);
+
+  const { getDecryptedSecrets } = await import("./store");
+  const [secrets, health, logRead] = await Promise.all([
+    getDecryptedSecrets(project.id).catch(() => ({} as Record<string, string>)),
+    getPreviewHealth(sandbox, 3000).catch(() => ({ healthy: false, reachable: false, status: "000" })),
+    sandbox.process
+      .executeCommand(`if [ -f ${shellQuote(logFile)} ]; then tail -n ${maxLines} ${shellQuote(logFile)}; fi`, root, undefined, 10)
+      .catch(() => ({ exitCode: 0, result: "" })),
+  ]);
+
+  let combinedLogs = logRead.result?.trim() ?? "";
+
+  // Fallback for dev servers started before persistent file logging or in custom agent sessions
+  if (!combinedLogs) {
+    const chunks: string[] = [];
+    for (const sessionId of developmentSessionIds(project)) {
+      try {
+        const session = await sandbox.process.getSession(sessionId);
+        const recentCommands = (session.commands ?? []).slice(-2);
+        for (const cmd of recentCommands) {
+          const logs = await sandbox.process.getSessionCommandLogs(sessionId, cmd.id).catch(() => null);
+          const text = [logs?.stdout, logs?.stderr, logs?.output].filter(Boolean).join("\n").trim();
+          if (text) chunks.push(text);
+        }
+      } catch {
+        // Session not present
+      }
+    }
+    combinedLogs = chunks.join("\n").split("\n").slice(-maxLines).join("\n");
+  }
+
+  const secretValues = Object.values(secrets);
+  return {
+    serverLogs: redactConsoleSecrets(combinedLogs, secretValues).slice(-24_000),
+    previewHealthy: health.healthy,
+    previewStatus: health.status,
+    sandboxRunning: true,
+  };
+}
+
+/** Clears the persistent `.cognix-dev-server.log` file inside a running sandbox. */
+export async function clearSandboxRuntimeLogs(project: Project): Promise<void> {
+  if (!project.sandboxId || !isDaytonaConfigured) return;
+  try {
+    const sandbox = await getClient().get(project.sandboxId);
+    if (String(sandbox.state) !== "started") return;
+    const root = await getProjectRoot(sandbox);
+    const logFile = devServerLogPath(root);
+    await sandbox.process.executeCommand(`: > ${shellQuote(logFile)}`, root, undefined, 10).catch(() => undefined);
+  } catch {
+    // Ignore when sandbox is offline
   }
 }
 
