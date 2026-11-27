@@ -44,8 +44,8 @@ import { hasPersistedPrompt, stripInitialBuildParams } from "@/lib/initial-build
 import { HomeSidebar, SidebarMobileTrigger } from "@/components/home-sidebar";
 import { GitHubMark } from "@/components/github-mark";
 import { AgentQuestionCard, CloudRequestCard } from "@/components/agent-question-card";
-import { CLOUD_DECLINED_PROMPT, CLOUD_ENABLED_PROMPT, formatAnswers, questionRequestFor } from "@/lib/agent-questions";
-import { CLOUD_FEATURES } from "@/lib/cloud-features";
+import { CLOUD_DECLINED_PROMPT, CLOUD_ENABLED_PROMPT, cloudWireUpPromptFor, formatAnswers, questionRequestFor } from "@/lib/agent-questions";
+import { CLOUD_FEATURES, type CloudFeature } from "@/lib/cloud-features";
 import { LoadingState, PixelLoader } from "@/components/pixel-loader";
 import { useSkillCommands } from "@/components/skills/use-skill-commands";
 import { useVoiceInput } from "@/components/use-voice-input";
@@ -842,24 +842,30 @@ export function WorkspaceClient({
       preuploadedIds: string[] = [],
       referencedSelections: VisualElementSelection[] = visualSelections,
       overrideChatMode?: BuildChatMode,
+      options?: { preserveComposer?: boolean },
     ) => {
       const cleanPrompt = value.trim();
       const effectiveChatMode: BuildChatMode = security ? "build" : (overrideChatMode ?? chatMode);
+      const ignoreComposer = options?.preserveComposer === true;
       if (!cleanPrompt || isBuilding) return;
-      if (uploads.some((item) => item.status === "uploading")) {
-        toast.message("Wait for the image upload to finish before sending.");
-        return;
+      if (!ignoreComposer) {
+        if (uploads.some((item) => item.status === "uploading")) {
+          toast.message("Wait for the image upload to finish before sending.");
+          return;
+        }
+        if (uploads.some((item) => item.status === "error" || !item.attachment)) {
+          toast.error("Remove or retry failed attachments before sending.");
+          return;
+        }
       }
-      if (uploads.some((item) => item.status === "error" || !item.attachment)) {
-        toast.error("Remove or retry failed attachments before sending.");
-        return;
-      }
-      const uploadedAttachments = uploads.flatMap((item) => item.attachment ? [item.attachment] : []);
+      const uploadedAttachments = ignoreComposer
+        ? []
+        : uploads.flatMap((item) => (item.attachment ? [item.attachment] : []));
       const attachmentIds = [...preuploadedIds, ...uploadedAttachments.map((item) => item.id)];
-      const selectedElements = referencedSelections;
+      const selectedElements = ignoreComposer ? [] : referencedSelections;
       setIsBuilding(true);
       setProject((current) => ({ ...current, status: "building" }));
-      setPrompt("");
+      if (!ignoreComposer) setPrompt("");
       // A new run starts: drop any approval left over from a previous (possibly disconnected) run, and stop
       // following an earlier run's server-side continuation.
       setPendingApproval(null);
@@ -905,7 +911,7 @@ export function WorkspaceClient({
       setMessages((current) => [...current, userMessage, assistantMessage]);
 
       try {
-        setUploads([]);
+        if (!ignoreComposer) setUploads([]);
 
         const response = await fetch(`/api/projects/${project.id}/agent`, {
           method: "POST",
@@ -1354,7 +1360,7 @@ export function WorkspaceClient({
   }
 
   /** Turns Cognix Cloud on or off for the project. Returns whether the change was saved. */
-  async function changeCloudEnabled(enabled: boolean) {
+  async function changeCloudEnabled(enabled: boolean, successMessage?: string) {
     if (cloudBusy) return false;
     setCloudBusy(true);
     try {
@@ -1367,7 +1373,7 @@ export function WorkspaceClient({
       if (!response.ok) throw new Error(payload.error ?? "Could not update Cognix Cloud. Try again.");
       setCloudEnabled(payload.enabled === true);
       if (typeof payload.warning === "string") toast.message(payload.warning);
-      else toast.success(enabled ? "Cognix Cloud is on." : "Cognix Cloud is off.");
+      else toast.success(successMessage ?? (enabled ? "Cognix Cloud is on." : "Cognix Cloud is off."));
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not update Cognix Cloud. Try again.";
@@ -1381,8 +1387,35 @@ export function WorkspaceClient({
 
   async function answerCloudRequest(enable: boolean) {
     setCloudRequestError(null);
-    if (enable && !cloudEnabled && !(await changeCloudEnabled(true))) return;
-    void submitPrompt(enable ? CLOUD_ENABLED_PROMPT : CLOUD_DECLINED_PROMPT);
+    if (enable && !cloudEnabled && !(await changeCloudEnabled(true, "Cognix Cloud is on — continuing your build…"))) return;
+    setChatMode("build");
+    void submitPrompt(enable ? CLOUD_ENABLED_PROMPT : CLOUD_DECLINED_PROMPT, [], [], "build", { preserveComposer: true });
+  }
+
+  /**
+   * Enables or disables Cognix Cloud from the Cloud panel, and when turned on, automatically sends
+   * a wire-up instruction to the agent so Cognix connects Cloud services into the app right away.
+   */
+  async function handlePanelCloudToggle(enabled: boolean, feature?: CloudFeature) {
+    if (enabled && isBuilding) {
+      toast.message("Wait for the current build to finish before turning on Cognix Cloud.");
+      return;
+    }
+    setCloudRequestError(null);
+    const changed = await changeCloudEnabled(
+      enabled,
+      enabled ? "Cognix Cloud is on — wiring it into your app…" : undefined,
+    );
+    if (!changed || !enabled || security) return;
+    const lastMessage = messages[messages.length - 1];
+    const pendingCloudQuestion =
+      lastMessage?.role === "assistant" ? questionRequestFor(lastMessage) : null;
+    const wirePrompt =
+      !feature && pendingCloudQuestion?.kind === "enable_cloud"
+        ? CLOUD_ENABLED_PROMPT
+        : cloudWireUpPromptFor(feature);
+    setChatMode("build");
+    void submitPrompt(wirePrompt, [], [], "build", { preserveComposer: true });
   }
 
   function askAgent(text: string) {
@@ -2186,7 +2219,7 @@ export function WorkspaceClient({
                       focusRequest={cloudFocusRequest}
                       cloudEnabled={cloudEnabled}
                       cloudBusy={cloudBusy}
-                      onSetCloudEnabled={(enabled) => void changeCloudEnabled(enabled)}
+                      onSetCloudEnabled={(enabled, feature) => void handlePanelCloudToggle(enabled, feature)}
                       onAskAgent={askAgent}
                       onProjectChange={(next) => setProject((current) => ({ ...next, previewUrl: current.previewUrl }))}
                       onSlugChange={setPublishSlug}

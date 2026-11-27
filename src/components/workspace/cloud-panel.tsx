@@ -82,14 +82,14 @@ type CloudPanelProps = {
   onSlugChange: (slug: string) => void;
   onPublish: () => void;
   onUnpublish: () => void;
-  onSetCloudEnabled: (enabled: boolean) => void;
+  onSetCloudEnabled: (enabled: boolean, feature?: CloudFeature) => void;
   /** Puts a prompt into the chat composer so the agent can build the feature. */
   onAskAgent: (prompt: string) => void;
   onProjectChange: (project: Project) => void;
 };
 
 export function CloudPanel(props: CloudPanelProps) {
-  const { project, cloudEnabled, cloudBusy, focusRequest, onSetCloudEnabled, onAskAgent } = props;
+  const { project, cloudEnabled, cloudBusy, isBuilding, focusRequest, onSetCloudEnabled, onAskAgent } = props;
   const [section, setSection] = useState<CloudSection>("publish");
   const [handledFocus, setHandledFocus] = useState(focusRequest);
   const [secretNames, setSecretNames] = useState<string[] | null>(null);
@@ -139,7 +139,8 @@ export function CloudPanel(props: CloudPanelProps) {
           title={meta.title}
           description={meta.description}
           busy={cloudBusy}
-          onEnable={() => onSetCloudEnabled(true)}
+          isBuilding={isBuilding}
+          onEnable={() => onSetCloudEnabled(true, feature)}
         />
       );
     }
@@ -237,7 +238,7 @@ export function CloudPanel(props: CloudPanelProps) {
                   publishedUrl={props.publishedUrl}
                   canPublish={props.canPublish}
                   isPublishing={props.isPublishing}
-                  isBuilding={props.isBuilding}
+                  isBuilding={isBuilding}
                   hasUnpublishedChanges={props.hasUnpublishedChanges}
                   focusRequest={focusRequest}
                   onSlugChange={props.onSlugChange}
@@ -266,8 +267,9 @@ export function CloudPanel(props: CloudPanelProps) {
                 <CloudOverview
                   enabled={cloudEnabled}
                   busy={cloudBusy}
+                  isBuilding={isBuilding}
                   secretNames={secretNames}
-                  onSetEnabled={onSetCloudEnabled}
+                  onSetEnabled={(next) => onSetCloudEnabled(next)}
                   onOpen={setSection}
                 />
               ) : (
@@ -281,16 +283,27 @@ export function CloudPanel(props: CloudPanelProps) {
   );
 }
 
-function EnableButton({ busy, onClick, label = "Turn on Cognix Cloud" }: { busy: boolean; onClick: () => void; label?: string }) {
+function EnableButton({
+  busy,
+  isBuilding = false,
+  onClick,
+  label = "Turn on Cognix Cloud",
+}: {
+  busy: boolean;
+  isBuilding?: boolean;
+  onClick: () => void;
+  label?: string;
+}) {
   return (
     <button
       type="button"
       onClick={onClick}
-      disabled={busy}
+      disabled={busy || isBuilding}
+      title={isBuilding ? "Wait for the current build to finish before turning on Cognix Cloud" : undefined}
       className="inline-flex h-9 w-full max-w-64 items-center justify-center gap-2 rounded-lg bg-white px-4 text-[13px] font-semibold text-black hover:bg-white/85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#9f94ff] disabled:opacity-60 [@media(pointer:coarse)]:h-11"
     >
       {busy ? <PixelLoader className="text-black" /> : null}
-      {busy ? "Turning on…" : label}
+      {busy ? "Turning on…" : isBuilding ? "Wait for current build…" : label}
     </button>
   );
 }
@@ -301,12 +314,14 @@ function CloudGate({
   title,
   description,
   busy,
+  isBuilding = false,
   onEnable,
 }: {
   icon: LucideIcon;
   title: string;
   description: string;
   busy: boolean;
+  isBuilding?: boolean;
   onEnable: () => void;
 }) {
   return (
@@ -317,10 +332,10 @@ function CloudGate({
       <h2 className="mt-4 text-lg font-semibold tracking-tight text-white">{title}</h2>
       <p className="mt-1.5 max-w-sm text-[13px] leading-5 text-white/55">{description}</p>
       <div className="mt-5 flex w-full justify-center">
-        <EnableButton busy={busy} onClick={onEnable} />
+        <EnableButton busy={busy} isBuilding={isBuilding} onClick={onEnable} />
       </div>
       <p className="mt-3 max-w-sm text-[12px] leading-5 text-white/40">
-        Turning on Cognix Cloud unlocks Managed Neon PostgreSQL, Bucketline S3 Storage, Resend Emails, and Better Auth for this app.
+        Turning on Cognix Cloud provisions Managed Neon PostgreSQL and Bucketline Storage, unlocks Better Auth and Resend Emails, and asks Cognix to wire them into your app.
       </p>
     </div>
   );
@@ -329,12 +344,14 @@ function CloudGate({
 function CloudOverview({
   enabled,
   busy,
+  isBuilding,
   secretNames,
   onSetEnabled,
   onOpen,
 }: {
   enabled: boolean;
   busy: boolean;
+  isBuilding: boolean;
   secretNames: string[] | null;
   onSetEnabled: (enabled: boolean) => void;
   onOpen: (section: CloudSection) => void;
@@ -346,6 +363,7 @@ function CloudOverview({
         title="Turn on Cognix Cloud"
         description="Provision managed Neon PostgreSQL, Bucketline S3 storage & CDN, Better Auth on Postgres, and Resend email management."
         busy={busy}
+        isBuilding={isBuilding}
         onEnable={() => onSetEnabled(true)}
       />
     );
@@ -375,7 +393,7 @@ function CloudOverview({
         </div>
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || isBuilding}
           onClick={() => {
             if (
               window.confirm(
