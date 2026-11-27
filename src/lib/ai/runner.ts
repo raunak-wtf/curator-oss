@@ -94,6 +94,8 @@ function activityTarget(name: string, input: unknown): string | undefined {
   if (name === "search_files" || name === "web_search") return pick("query")?.slice(0, 200);
   if (name === "fetch_url") return pick("url")?.slice(0, 300);
   if (name === "neon_database" || name === "resend_email" || name === "cloud_storage") return pick("action", "bucket", "key", "name", "sql")?.slice(0, 200);
+  if (name === "read_design_guide") return pick("topic")?.slice(0, 100);
+  if (name === "read_cloud_guide") return pick("feature")?.slice(0, 100);
   return pick("path", "directory")?.slice(0, 300);
 }
 
@@ -468,7 +470,10 @@ export async function runAgent(input: {
   const getPlanTools = () => [
     ...agentTools.filter((tool) => tool.type === "function" && PLAN_READONLY_TOOLS.has(tool.function.name)),
     ...interactiveTools.filter(
-      (tool) => tool.function.name === "ask_user" || (cloudState.enabled && tool.function.name === "read_cloud_guide"),
+      (tool) =>
+        tool.function.name === "ask_user"
+        || tool.function.name === "read_design_guide"
+        || (cloudState.enabled && tool.function.name === "read_cloud_guide"),
     ),
   ];
   let approveRestOfRun = false;

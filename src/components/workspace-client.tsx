@@ -1146,11 +1146,13 @@ export function WorkspaceClient({
                     ? "Cloud Storage"
                     : event.name === "read_cloud_guide"
                       ? "Reading Cloud guide"
-                      : event.name === "request_cognix_cloud"
-                        ? "Cognix Cloud"
-                        : event.name === "read_preview_console"
-                          ? "Reading preview console"
-                          : event.name.replaceAll("_", " ");
+                      : event.name === "read_design_guide"
+                        ? "Reading design guide"
+                        : event.name === "request_cognix_cloud"
+                          ? "Cognix Cloud"
+                          : event.name === "read_preview_console"
+                            ? "Reading preview console"
+                            : event.name.replaceAll("_", " ");
             setActivities((current) => [
               ...current.map((item) => ({ ...item, status: "done" as const })),
               { id: event.id, name: event.name, label: friendlyToolName, status: "running", target: activityTarget(event.name, event.input) },

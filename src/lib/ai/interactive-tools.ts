@@ -2,12 +2,18 @@ import { z } from "zod";
 import { CLOUD_FEATURES, type CloudFeature } from "../cloud-features";
 import type { AgentQuestionRequest } from "../types";
 import { CLOUD_GUIDES } from "./cloud-guides";
+import { DESIGN_GUIDES, DESIGN_GUIDE_LABELS, DESIGN_GUIDE_TOPICS } from "./design-guides";
 
 /**
  * Tools that talk to the user or to Cognix rather than the sandbox. `ask_user` and
  * `request_cognix_cloud` pause the build; the user's answer arrives as their next message.
  */
-export const INTERACTIVE_TOOL_NAMES = ["ask_user", "request_cognix_cloud", "read_cloud_guide"] as const;
+export const INTERACTIVE_TOOL_NAMES = [
+  "ask_user",
+  "request_cognix_cloud",
+  "read_cloud_guide",
+  "read_design_guide",
+] as const;
 const FEATURES = ["database", "storage", "auth", "email"] as const;
 
 export const interactiveTools = [
@@ -72,6 +78,20 @@ export const interactiveTools = [
       },
     },
   },
+  {
+    type: "function" as const,
+    function: {
+      name: "read_design_guide",
+      description:
+        "Read Cognix's internal design-to-code playbook for art direction, image/screenshot reference forensics, semantic color & surface systems, typography & fonts, interface craft, motion, or visual verification. Always available in Build and Plan modes.",
+      parameters: {
+        type: "object",
+        properties: { topic: { type: "string", enum: [...DESIGN_GUIDE_TOPICS] } },
+        required: ["topic"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 export function isInteractiveTool(name: string): name is (typeof INTERACTIVE_TOOL_NAMES)[number] {
@@ -95,6 +115,7 @@ const cloudRequestSchema = z.object({
   features: z.array(z.enum(FEATURES)).min(1).max(4),
 });
 const guideSchema = z.object({ feature: z.enum(FEATURES) });
+const designGuideSchema = z.object({ topic: z.enum(DESIGN_GUIDE_TOPICS) });
 
 export type InteractiveToolResult = {
   output: string;
@@ -108,6 +129,14 @@ export function runInteractiveTool(
   rawInput: unknown,
   context: { cloudEnabled: boolean; alreadyAsked: boolean },
 ): InteractiveToolResult {
+  if (name === "read_design_guide") {
+    const { topic } = designGuideSchema.parse(rawInput);
+    return {
+      output: DESIGN_GUIDES[topic],
+      summary: `Read the ${DESIGN_GUIDE_LABELS[topic]} guide`,
+    };
+  }
+
   if (name === "read_cloud_guide") {
     const { feature } = guideSchema.parse(rawInput);
     if (!context.cloudEnabled) {
