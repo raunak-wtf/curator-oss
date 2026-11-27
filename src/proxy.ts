@@ -83,7 +83,18 @@ export async function proxy(request: NextRequest) {
   }
 
   if (!auth0) return NextResponse.next();
-  return auth0.middleware(request);
+  const response = await auth0.middleware(request);
+
+  // Clean up accumulated stale Auth0 transaction cookies (__txn_*) if many unfinished
+  // login attempts piled up on localhost so Cookie headers stay well below limits.
+  const txnCookies = request.cookies.getAll().filter((cookie) => cookie.name.startsWith("__txn_"));
+  if (txnCookies.length > 3 && !request.nextUrl.pathname.startsWith("/auth/callback")) {
+    for (const stale of txnCookies.slice(0, txnCookies.length - 2)) {
+      response.cookies.delete(stale.name);
+    }
+  }
+
+  return response;
 }
 
 export const config = {

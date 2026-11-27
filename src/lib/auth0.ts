@@ -12,7 +12,28 @@ export const isAuthConfigured = Boolean(
 export const auth0 = isAuthConfigured
   ? new Auth0Client({
       enableAccessTokenEndpoint: false,
+      includeIdTokenHintInOIDCLogoutUrl: false,
       ...(process.env.APP_BASE_URL?.trim() ? { appBaseUrl: process.env.APP_BASE_URL.trim() } : {}),
+      // Keep the encrypted __session cookie tiny (~450B instead of 6–12KB of unused OIDC JWTs)
+      // so localhost and proxy headers never hit HTTP 431 (Request Header Fields Too Large).
+      beforeSessionSaved: async (session) => ({
+        ...session,
+        tokenSet: {
+          accessToken: "",
+          expiresAt: session.tokenSet.expiresAt,
+        },
+        accessTokens: undefined,
+        connectionTokenSets: undefined,
+        user: {
+          sub: session.user.sub,
+          email: session.user.email,
+          email_verified: session.user.email_verified,
+          name: session.user.name,
+          nickname: session.user.nickname,
+          picture: session.user.picture,
+          ...(session.user.session_expiry ? { session_expiry: session.user.session_expiry } : {}),
+        },
+      }),
     })
   : null;
 
