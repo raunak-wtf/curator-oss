@@ -287,6 +287,31 @@ function shellQuote(value: string) {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+const SANDBOX_RETRY_DELAYS_MS = [350, 950] as const;
+
+function isTransientSandboxError(error: unknown): boolean {
+  const msg = error instanceof Error ? `${error.name} ${error.message}` : String(error);
+  return /fetch failed|network|econnreset|etimedout|epipe|und_err_socket|socket hang up|502|503|504|bad gateway|service unavailable|gateway timeout/i.test(
+    msg,
+  );
+}
+
+async function withSandboxRetry<T>(fn: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= SANDBOX_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= SANDBOX_RETRY_DELAYS_MS.length || !isTransientSandboxError(error)) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, SANDBOX_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Sandbox operation failed.");
+}
+
 export function applyExactEdit(content: string, oldText: string, newText: string, replaceAll = false) {
   if (!oldText) throw new Error("oldText must not be empty.");
   const matches = content.split(oldText).length - 1;
@@ -462,11 +487,13 @@ export async function executeAgentTool(
       .object({ directory: relativePathSchema.optional().default(""), depth: z.number().int().min(1).max(8).optional().default(4) })
       .parse(rawInput);
     const target = remotePath(root, projectRelativePath(root, input.directory));
-    const response = await sandbox.process.executeCommand(
-      `find . -maxdepth ${input.depth} -not -path './node_modules/*' -not -path './.next/*' -not -name '.env*' -print | sort | head -500`,
-      target,
-      undefined,
-      30,
+    const response = await withSandboxRetry(() =>
+      sandbox.process.executeCommand(
+        `find . -maxdepth ${input.depth} -not -path './node_modules/*' -not -path './.next/*' -not -name '.env*' -print | sort | head -500`,
+        target,
+        undefined,
+        30,
+      ),
     );
     return { output: response.result, summary: `Listed ${input.directory || "the project root"}` };
   }
@@ -480,11 +507,13 @@ export async function executeAgentTool(
       })
       .parse(rawInput);
     const directory = projectRelativePath(root, input.directory);
-    const response = await sandbox.process.executeCommand(
-      `find . -type d \\( -name node_modules -o -name .next -o -name .git \\) -prune -o -type f -not -name '.env*' -iname ${shellQuote(input.pattern)} -print | sort | head -n ${input.maxResults}`,
-      remotePath(root, directory),
-      undefined,
-      30,
+    const response = await withSandboxRetry(() =>
+      sandbox.process.executeCommand(
+        `find . -type d \\( -name node_modules -o -name .next -o -name .git \\) -prune -o -type f -not -name '.env*' -iname ${shellQuote(input.pattern)} -print | sort | head -n ${input.maxResults}`,
+        remotePath(root, directory),
+        undefined,
+        30,
+      ),
     );
     if (response.exitCode !== 0) throw new Error(`File discovery failed:\n${response.result.slice(-3000)}`);
     return {
@@ -505,7 +534,7 @@ export async function executeAgentTool(
       })
       .parse(rawInput);
     const relative = projectRelativePath(root, input.path);
-    const buffer = await sandbox.fs.downloadFile(remotePath(fsRoot, relative));
+    const buffer = await withSandboxRetry(() => sandbox.fs.downloadFile(remotePath(fsRoot, relative)));
     const lines = buffer.toString("utf8").split("\n");
     const endLine = Math.min(input.endLine ?? lines.length, input.startLine + 1_999, lines.length);
     const content = lines.slice(input.startLine - 1, endLine).join("\n").slice(0, 200_000);
@@ -523,13 +552,18 @@ export async function executeAgentTool(
     const target = remotePath(root, relative);
     const fsTarget = remotePath(fsRoot, relative);
     const directory = path.posix.dirname(target);
-    const existing = await sandbox.process.executeCommand(`test -f ${shellQuote(target)}`, root, undefined, 10);
-    const before = existing.exitCode === 0 ? (await sandbox.fs.downloadFile(fsTarget)).toString("utf8") : null;
+    const existing = await withSandboxRetry(() =>
+      sandbox.process.executeCommand(`test -f ${shellQuote(target)}`, root, undefined, 10),
+    );
+    const before =
+      existing.exitCode === 0
+        ? (await withSandboxRetry(() => sandbox.fs.downloadFile(fsTarget))).toString("utf8")
+        : null;
     if (enforceBuildStack) {
       assertBuildModeFileChangeAllowed({ path: relative, before, after: input.content, cloudEnabled });
     }
-    await sandbox.process.executeCommand(`mkdir -p ${shellQuote(directory)}`, root, undefined, 30);
-    await sandbox.fs.uploadFile(Buffer.from(input.content), fsTarget);
+    await withSandboxRetry(() => sandbox.process.executeCommand(`mkdir -p ${shellQuote(directory)}`, root, undefined, 30));
+    await withSandboxRetry(() => sandbox.fs.uploadFile(Buffer.from(input.content), fsTarget));
     await upsertProjectFile(project.id, relative, input.content);
     return {
       output: `Wrote ${Buffer.byteLength(input.content)} bytes to ${input.path}`,
@@ -550,14 +584,14 @@ export async function executeAgentTool(
       .parse(rawInput);
     const relative = projectRelativePath(root, input.path);
     const fsTarget = remotePath(fsRoot, relative);
-    const buffer = await sandbox.fs.downloadFile(fsTarget);
+    const buffer = await withSandboxRetry(() => sandbox.fs.downloadFile(fsTarget));
     if (buffer.length > 1_000_000) throw new Error("This file is too large for a targeted text edit.");
     const before = buffer.toString("utf8");
     const edited = applyExactEdit(before, input.oldText, input.newText, input.replaceAll);
     if (enforceBuildStack) {
       assertBuildModeFileChangeAllowed({ path: relative, before, after: edited.content, cloudEnabled });
     }
-    await sandbox.fs.uploadFile(Buffer.from(edited.content), fsTarget);
+    await withSandboxRetry(() => sandbox.fs.uploadFile(Buffer.from(edited.content), fsTarget));
     await upsertProjectFile(project.id, relative, edited.content);
     return {
       output: `Replaced ${edited.matches} exact ${edited.matches === 1 ? "match" : "matches"} in ${relative}`,

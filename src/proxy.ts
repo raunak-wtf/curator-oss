@@ -47,11 +47,13 @@ export async function proxy(request: NextRequest) {
     if (appsMatch.kind === "published") {
       const suffix = request.nextUrl.pathname === "/" ? "" : request.nextUrl.pathname;
       url.pathname = `/publish/${encodeURIComponent(appsMatch.slug)}${suffix}`;
+      if (url.hostname === "localhost" || url.hostname === "127.0.0.1") url.protocol = "http:";
       return NextResponse.rewrite(url, { request: { headers } });
     }
-    url.pathname = "/_cognix-not-found";
-    url.search = "";
-    return NextResponse.rewrite(url, { request: { headers } });
+    return new NextResponse("Not Found", {
+      status: 404,
+      headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+    });
   }
 
   // A request that arrives on an attached customer domain only ever serves that published app,
@@ -61,6 +63,7 @@ export async function proxy(request: NextRequest) {
     const url = request.nextUrl.clone();
     url.pathname = `/domain/${encodeURIComponent(hostname)}`;
     url.search = "";
+    if (url.hostname === "localhost" || url.hostname === "127.0.0.1") url.protocol = "http:";
     const headers = new Headers(request.headers);
     // The secret must never reach the published-app page or any downstream code.
     headers.delete(EDGE_SECRET_HEADER);
@@ -73,10 +76,10 @@ export async function proxy(request: NextRequest) {
   // `/domain/*` is internal: it only renders through the rewrite above, never by direct request
   // on the builder host, where a client could otherwise spoof the routing headers.
   if (request.nextUrl.pathname.startsWith("/domain/")) {
-    const url = request.nextUrl.clone();
-    url.pathname = "/_cognix-not-found";
-    url.search = "";
-    return NextResponse.rewrite(url);
+    return new NextResponse("Not Found", {
+      status: 404,
+      headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+    });
   }
 
   if (!auth0) return NextResponse.next();

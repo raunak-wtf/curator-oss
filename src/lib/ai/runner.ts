@@ -22,6 +22,7 @@ import type {
 import { safeFileName } from "../utils";
 import { ensureVisualEditBridge } from "../visual-edit-bridge";
 import { isProductionBuildCommand, resolveAgentMaxTurns, shouldRefreshAgentContext } from "./agent-policy";
+import { streamModelTurnWithRetry } from "./model-stream";
 import { buildPlanSystemPrompt, buildSystemPrompt } from "./system-prompt";
 import { buildMultimodalUserContent, hasNativeFileParts } from "./multimodal";
 import { createTerminalLog, parseRunCommandOutput } from "./terminal-log";
@@ -101,7 +102,21 @@ export async function runAgent(input: {
   }
 
   await emit({ type: "status", label: "Starting a secure workspace" });
-  const { sandbox, project: sandboxProject } = await ensureSandbox(input.project);
+  let ensured: Awaited<ReturnType<typeof ensureSandbox>> | null = null;
+  let lastSandboxError: unknown;
+  for (let sandboxAttempt = 1; sandboxAttempt <= 3; sandboxAttempt += 1) {
+    try {
+      ensured = await ensureSandbox(input.project);
+      break;
+    } catch (error) {
+      lastSandboxError = error;
+      if (sandboxAttempt >= 3) throw error;
+      await emit({ type: "status", label: `Reconnecting workspace (attempt ${sandboxAttempt + 1}/3)…` });
+      await new Promise((resolve) => setTimeout(resolve, 1_000 * sandboxAttempt));
+    }
+  }
+  if (!ensured) throw (lastSandboxError instanceof Error ? lastSandboxError : new Error("Could not start workspace."));
+  const { sandbox, project: sandboxProject } = ensured;
   let project = sandboxProject;
   const security = project.mode === "security";
   const projectRoot = await getProjectRoot(sandbox);
@@ -189,6 +204,8 @@ export async function runAgent(input: {
     apiKey: process.env.OPENAI_API_KEY,
     baseURL: process.env.OPENAI_BASE_URL || undefined,
     defaultHeaders: { "User-Agent": "Cognix/1.0" },
+    maxRetries: 0,
+    timeout: 210_000,
   });
 
   const history: ChatCompletionMessageParam[] = input.history
@@ -352,17 +369,25 @@ export async function runAgent(input: {
       ...(cloudState.enabled ? cloudProviderTools : []),
       ...(repository ? [githubTool] : []),
     ];
-    const createStream = () => client.chat.completions.create({
-      model: process.env.OPENAI_MODEL!,
-      messages,
-      tools: security ? securityTools : planMode ? planTools : buildTools,
-      tool_choice: "auto",
-      stream: true,
-      temperature: 0.2,
-    });
-    let stream;
+    const createStream = (signal: AbortSignal) =>
+      client.chat.completions.create(
+        {
+          model: process.env.OPENAI_MODEL!,
+          messages,
+          tools: security ? securityTools : planMode ? planTools : buildTools,
+          tool_choice: "auto",
+          stream: true,
+          temperature: 0.2,
+        },
+        { signal },
+      );
+
+    let turnResult;
     try {
-      stream = await createStream();
+      turnResult = await streamModelTurnWithRetry({
+        createStream,
+        onStatus: (label) => emit({ type: "status", label }),
+      });
     } catch (error) {
       if (!nativeFilePartsEnabled || turn !== 0 || !isNativeFileCompatibilityError(error)) throw error;
       nativeFilePartsEnabled = false;
@@ -374,39 +399,26 @@ export async function runAgent(input: {
         }),
       };
       await emit({ type: "status", label: "Opening attachments in compatibility mode" });
-      stream = await createStream();
+      turnResult = await streamModelTurnWithRetry({
+        createStream,
+        onStatus: (label) => emit({ type: "status", label }),
+      });
     }
 
-    let content = "";
-    const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
-
-    for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta;
-      if (!delta) continue;
-      if (delta.content) {
-        content += delta.content;
-      }
-      for (const toolDelta of delta.tool_calls ?? []) {
-        const current = toolCalls.get(toolDelta.index) ?? { id: "", name: "", arguments: "" };
-        current.id += toolDelta.id ?? "";
-        current.name += toolDelta.function?.name ?? "";
-        current.arguments += toolDelta.function?.arguments ?? "";
-        toolCalls.set(toolDelta.index, current);
-      }
-    }
-
-    const calls = [...toolCalls.entries()]
-      .sort(([a], [b]) => a - b)
-      .map(([, call]) => ({
-        id: call.id || crypto.randomUUID(),
-        type: "function" as const,
-        function: { name: call.name, arguments: call.arguments },
-      }));
+    const { content, calls } = turnResult;
 
     messages.push({
       role: "assistant",
       content: content || null,
-      ...(calls.length ? { tool_calls: calls } : {}),
+      ...(calls.length
+        ? {
+            tool_calls: calls.map((call) => ({
+              id: call.id,
+              type: "function" as const,
+              function: call.function,
+            })),
+          }
+        : {}),
     });
 
     if (!calls.length) {
@@ -427,7 +439,7 @@ export async function runAgent(input: {
     // Request review: ask once for every file change or command in this turn, before running any of them.
     const decisions = new Map<string, AgentApprovalDecision>();
     if (security && approvalMode === "review" && !approveRestOfRun) {
-      const pending = calls.filter((call) => APPROVAL_TOOLS.has(call.function.name));
+      const pending = calls.filter((call) => !call.truncatedJson && APPROVAL_TOOLS.has(call.function.name));
       if (pending.length) {
         const answer = await waitForApproval(pending.map((call) => describeApproval(call.id, call.function.name, parseToolInput(call.function.arguments))));
         for (const item of answer) decisions.set(item.callId, item);
@@ -439,8 +451,9 @@ export async function runAgent(input: {
     // never execute file mutations or shell commands in that same turn before the user answers.
     const turnPausesForUser = !security && calls.some(
       (call) =>
-        (call.function.name === "request_cognix_cloud" && !cloudState.enabled) ||
-        call.function.name === "ask_user",
+        !call.truncatedJson &&
+        ((call.function.name === "request_cognix_cloud" && !cloudState.enabled) ||
+          call.function.name === "ask_user"),
     );
     const mutatingTools = new Set([
       "write_file",
@@ -460,6 +473,28 @@ export async function runAgent(input: {
       const activityId = `${call.id}#${++activitySequence}`;
       usedTools.push(call.function.name);
       await emit({ type: "tool_start", id: activityId, name: call.function.name, input: toolInput });
+
+      if (call.truncatedJson) {
+        const summary = "Split needed: output hit token limit mid-call";
+        await emit({ type: "tool_result", id: activityId, name: call.function.name, summary });
+        runActivity.push({
+          id: activityId,
+          name: call.function.name,
+          label: summary,
+          status: "error",
+          durationMs: 0,
+          target: activityTarget(call.function.name, toolInput),
+        });
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: JSON.stringify({
+            error:
+              "Your previous response reached the output token limit before finishing this tool call's JSON arguments. Re-issue this call now, and keep batches to at most 3–4 files per turn.",
+          }),
+        });
+        continue;
+      }
 
       if ((turnPausesForUser || pendingRequest !== null) && mutatingTools.has(call.function.name)) {
         const summary = "Paused: waiting for user consent first";

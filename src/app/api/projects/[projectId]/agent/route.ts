@@ -16,8 +16,14 @@ function agentErrorMessage(error: unknown) {
   const status = typeof error === "object" && error && "status" in error ? Number(error.status) : undefined;
   if (status === 401) return "The model provider rejected the API key. Update OPENAI_API_KEY and try again.";
   if (status === 403) return "The model provider blocked the request. Check the endpoint access policy and try again.";
-  if (status === 429) return "The model provider rate limit was reached. Wait a moment, then try again.";
+  if (status === 429) return "The model provider rate limit was reached after automatic retries. Wait a moment, then click Retry or Continue.";
   const message = error instanceof Error ? error.message : "";
+  if (
+    error instanceof Error &&
+    (error.name === "ModelStreamTimeoutError" || /stream stalled|did not start responding|exceeded .* turn limit|502|503|504|524/i.test(message))
+  ) {
+    return "The AI model connection timed out after multiple automatic retries. Your completed file changes are saved — click Retry or send \"Continue\" to pick up right where it paused.";
+  }
   if (/development server did not start|dependency installation failed|trying to use TypeScript/i.test(message)) {
     return "The generated preview could not start, but your files were saved. Ask Cognix to repair the preview and it will inspect the existing app and continue.";
   }

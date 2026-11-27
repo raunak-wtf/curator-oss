@@ -242,11 +242,11 @@ ${SHARED_RULES}`;
 
 const AUTH_GUIDE = `# Cognix Cloud: Authentication with Better Auth (on Neon PostgreSQL)
 
-Authentication must use **Better Auth** (\`better-auth\`) stored in the project's Managed Neon PostgreSQL database via **Drizzle ORM**. Required secrets: ${env("auth")} (auto-provisioned when Cognix Cloud is on). Also read the \`database\` and \`email\` guides so \`src/lib/db.ts\`, \`src/lib/schema.ts\`, and \`src/lib/email.ts\` are wired together cleanly.
+Authentication must use **Better Auth** (\`better-auth\`) stored in the project's Managed Neon PostgreSQL database via **Drizzle ORM**. Required secrets: ${env("auth")} (auto-provisioned when Cognix Cloud is on). Always read the \`database\` guide as well; only read the \`email\` guide if the app sends verification, password-reset, or transactional emails.
 
 ## 1. Install
 
-Install \`better-auth\`, \`drizzle-orm\`, \`pg\`, \`resend\`, \`server-only\`, and dev dependencies \`drizzle-kit\` and \`@types/pg\` in a single \`npm install\`.
+Install \`better-auth\`, \`drizzle-orm\`, \`pg\`, \`server-only\`, and dev dependencies \`drizzle-kit\` and \`@types/pg\` in a single \`npm install --no-audit --no-fund\` (add \`resend\` too only when email is used).
 
 ## 2. Unified Drizzle Auth Tables in \`src/lib/schema.ts\`
 
@@ -322,13 +322,13 @@ Reference \`user.id\` in your domain tables (\`userId: text("user_id").notNull()
 
 ## 3. Server Config: \`src/lib/auth.ts\`
 
+### Default (no email verification required — instant sign-up & sign-in):
 \`\`\`ts
 import "server-only";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { nextCookies } from "better-auth/next-js";
 import { db } from "./db";
-import { isEmailConfigured, sendEmail } from "./email";
 import * as schema from "./schema";
 
 const isHostedHttps = process.env.NODE_ENV === "production" || process.env.CI === "1";
@@ -355,29 +355,8 @@ export const auth = betterAuth({
   emailAndPassword: {
     enabled: true,
     autoSignIn: true,
-    requireEmailVerification: isEmailConfigured,
+    requireEmailVerification: false,
     minPasswordLength: 8,
-    sendResetPassword: async ({ user: accountUser, url }) => {
-      void sendEmail({
-        to: accountUser.email,
-        subject: "Reset your password",
-        text: \`Reset your password: \${url}\`,
-        html: \`<p>Reset your password by clicking <a href="\${url}">this secure link</a>.</p>\`,
-      }).catch(() => undefined);
-    },
-  },
-  emailVerification: {
-    sendOnSignUp: isEmailConfigured,
-    sendOnSignIn: isEmailConfigured,
-    autoSignInAfterVerification: true,
-    sendVerificationEmail: async ({ user: accountUser, url }) => {
-      void sendEmail({
-        to: accountUser.email,
-        subject: "Verify your email address",
-        text: \`Verify your email: \${url}\`,
-        html: \`<p>Verify your email address by clicking <a href="\${url}">this confirmation link</a>.</p>\`,
-      }).catch(() => undefined);
-    },
   },
   advanced: isHostedHttps
     ? {
@@ -392,9 +371,7 @@ export const auth = betterAuth({
 });
 \`\`\`
 
-Why this exact config matters:
-- **Zero lock-out before Resend is connected**: \`requireEmailVerification: isEmailConfigured\` + \`autoSignIn: true\` lets users sign up and sign in immediately in the preview right away, and automatically enforces email verification once \`RESEND_API_KEY\` + \`EMAIL_FROM\` are added in **Cloud → Emails**.
-- **Preview iframe & custom domain compatibility**: Dynamic \`trustedOrigins\` and \`SameSite=None; Secure; Partitioned\` cookies ensure sign-in works inside Cognix's cross-origin preview iframe as well as on published domains without \`403 Invalid origin\` or dropped session cookies.
+If the app **also** requests email verification or password-reset emails, wire \`sendResetPassword\` and \`emailVerification\` using \`isEmailConfigured\` and \`sendEmail\` from \`src/lib/email.ts\` (gating \`requireEmailVerification: isEmailConfigured\` so sign-up still works immediately before Resend is connected in **Cloud → Emails**).
 
 ## 4. Route Handler & Client
 
