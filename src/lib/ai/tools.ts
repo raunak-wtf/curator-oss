@@ -3,7 +3,7 @@ import { isIP } from "node:net";
 import path from "node:path";
 import type { Sandbox } from "@daytona/sdk";
 import { z } from "zod";
-import { getPreviewHealth, getPreviewUrl, getProjectFsRoot, getProjectRoot, readSandboxRuntimeLogs } from "../daytona";
+import { devServerLogPath, getPreviewHealth, getPreviewUrl, getProjectFsRoot, getProjectRoot, readSandboxRuntimeLogs } from "../daytona";
 import { extractServerErrorsFromLog } from "../preview-console";
 import { appendProjectConsoleLogs, deleteProjectFile, listProjectConsoleLogs, upsertProjectFile, updateProject } from "../store";
 import type { FileChangeSnapshot, Project } from "../types";
@@ -743,10 +743,12 @@ export async function executeAgentTool(
       } catch {
         await sandbox.process.createSession(sessionId);
       }
+      const logFile = devServerLogPath(root);
+      const quotedLog = shellQuote(logFile);
       const response = await sandbox.process.executeSessionCommand(
         sessionId,
         {
-          command: `cd ${shellQuote(remotePath(root, directory))} && ${input.command}`,
+          command: `cd ${shellQuote(remotePath(root, directory))} && COGNIX_HOSTED_PREVIEW=1 CI=1 ${input.command} 2>&1 | tee -a ${quotedLog}`,
           runAsync: true,
           suppressInputEcho: true,
         },

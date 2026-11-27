@@ -359,7 +359,7 @@ export async function runAgent(input: {
   const activeConsoleErrors = !security
     ? selectActionableConsoleErrors(recentConsoleEntries, { afterIso: thirtyMinutesAgoIso }).slice(-4)
     : [];
-  const promptAlreadyContainsErrors = /Fix (?:this|these) runtime errors? detected in the live app preview/i.test(prompt);
+  const promptAlreadyContainsErrors = /Fix (?:this|these) runtime errors? detected in the (?:live app preview|running sandbox)/i.test(prompt);
   const consoleContextNote =
     activeConsoleErrors.length > 0 && !promptAlreadyContainsErrors
       ? `\n\n<recent_preview_console_errors>\nRecent errors captured from the live preview console (use \`read_preview_console\` if relevant to this request):\n${activeConsoleErrors

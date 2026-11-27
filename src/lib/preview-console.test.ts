@@ -31,9 +31,15 @@ describe("redactConsoleSecrets", () => {
 });
 
 describe("extractServerErrorsFromLog", () => {
-  it("extracts Next.js runtime errors, PostgresError stack blocks, and HTTP 500 route failures while ignoring 200/404 noise", () => {
+  it("extracts sandbox runtime errors, PostgresError stack blocks, and HTTP 500s while ignoring Next.js experiment bullets like webpackBuildWorker", () => {
     const serverLog = [
       "▲ Next.js 16.2.10 (Turbopack)",
+      "- Local:        http://localhost:3000",
+      "- Environments: .env.local",
+      "- Experiments (use with caution):",
+      "  ⨯ webpackBuildWorker",
+      "  ✓ serverActions",
+      "",
       "✓ Ready in 620ms",
       " GET / 200 in 140ms",
       " GET /favicon.ico 404 in 12ms",
@@ -45,7 +51,8 @@ describe("extractServerErrorsFromLog", () => {
     ].join("\n");
 
     const extracted = extractServerErrorsFromLog(serverLog);
-    expect(extracted.length).toBeGreaterThanOrEqual(1);
+    expect(extracted.some((item) => item.message.includes("webpackBuildWorker"))).toBe(false);
+    expect(isIgnorableConsoleError({ message: "webpackBuildWorker" })).toBe(true);
     expect(extracted.some((item) => item.message.includes('relation "projects" does not exist'))).toBe(true);
     expect(extracted.some((item) => item.message.includes("POST /api/projects returned HTTP 500"))).toBe(true);
     expect(extracted.some((item) => item.message.includes("favicon.ico"))).toBe(false);
@@ -53,7 +60,7 @@ describe("extractServerErrorsFromLog", () => {
 });
 
 describe("selectActionableConsoleErrors & buildConsoleFixPrompt", () => {
-  it("deduplicates matching fingerprints, respects baseline/dismissed filters, and formats a structured fix prompt", () => {
+  it("deduplicates matching fingerprints, filters stale experiment-flag noise, and formats a structured fix prompt", () => {
     const fp = computeConsoleFingerprint({
       source: "network",
       level: "error",
@@ -61,6 +68,19 @@ describe("selectActionableConsoleErrors & buildConsoleFixPrompt", () => {
       statusCode: 500,
     });
     const entries: PreviewConsoleEntry[] = [
+      {
+        id: "0",
+        projectId: "proj-1",
+        source: "server",
+        level: "error",
+        message: "webpackBuildWorker",
+        stack: null,
+        route: null,
+        statusCode: null,
+        fingerprint: "server:error::webpackbuildworker",
+        repeatCount: 1,
+        createdAt: "2026-11-27T10:00:00.000Z",
+      },
       {
         id: "1",
         projectId: "proj-1",
@@ -90,6 +110,7 @@ describe("selectActionableConsoleErrors & buildConsoleFixPrompt", () => {
     ];
 
     expect(isIgnorableConsoleError(entries[0])).toBe(true);
+    expect(isIgnorableConsoleError(entries[1])).toBe(true);
     const actionable = selectActionableConsoleErrors(entries);
     expect(actionable).toHaveLength(1);
     expect(actionable[0].statusCode).toBe(500);
@@ -99,7 +120,7 @@ describe("selectActionableConsoleErrors & buildConsoleFixPrompt", () => {
     ).toHaveLength(0);
 
     const fixPrompt = buildConsoleFixPrompt(actionable, 2);
-    expect(fixPrompt).toContain("Fix this runtime error detected in the live app preview");
+    expect(fixPrompt).toContain("Fix this runtime error detected in the running sandbox & preview");
     expect(fixPrompt).toContain("HTTP 500");
     expect(fixPrompt).toContain("route: /sign-up");
     expect(fixPrompt).toContain("read_preview_console");

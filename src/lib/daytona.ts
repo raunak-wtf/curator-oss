@@ -989,26 +989,35 @@ export async function readSandboxRuntimeLogs(
       .catch(() => ({ exitCode: 0, result: "" })),
   ]);
 
-  let combinedLogs = logRead.result?.trim() ?? "";
+  const fileLogs = logRead.result?.trim() ?? "";
 
-  // Fallback for dev servers started before persistent file logging or in custom agent sessions
-  if (!combinedLogs) {
-    const chunks: string[] = [];
-    for (const sessionId of developmentSessionIds(project)) {
-      try {
-        const session = await sandbox.process.getSession(sessionId);
-        const recentCommands = (session.commands ?? []).slice(-2);
-        for (const cmd of recentCommands) {
-          const logs = await sandbox.process.getSessionCommandLogs(sessionId, cmd.id).catch(() => null);
-          const text = [logs?.stdout, logs?.stderr, logs?.output].filter(Boolean).join("\n").trim();
-          if (text) chunks.push(text);
+  // Also inspect active Daytona process sessions (`cognix-*` and `cognix-preview-*`) so processes started
+  // directly by the agent or before `.cognix-dev-server.log` existed always appear in the Sandbox Console.
+  const sessionChunks: string[] = [];
+  try {
+    const sessions = await sandbox.process.listSessions();
+    for (const session of sessions) {
+      if (session.sessionId === publishedSessionId(project)) continue;
+      const fullSession = await sandbox.process.getSession(session.sessionId).catch(() => session);
+      const recentCommands = (fullSession.commands ?? []).slice(-3);
+      for (const cmd of recentCommands) {
+        const logs = await sandbox.process.getSessionCommandLogs(session.sessionId, cmd.id).catch(() => null);
+        const text = [logs?.stdout, logs?.stderr, logs?.output].filter(Boolean).join("\n").trim();
+        if (text && (!fileLogs || !fileLogs.includes(text.slice(-160)))) {
+          sessionChunks.push(text);
         }
-      } catch {
-        // Session not present
       }
     }
-    combinedLogs = chunks.join("\n").split("\n").slice(-maxLines).join("\n");
+  } catch {
+    // Fallback to fileLogs when session listing is unavailable
   }
+
+  const combinedLogs = [fileLogs, ...sessionChunks]
+    .filter(Boolean)
+    .join("\n")
+    .split("\n")
+    .slice(-maxLines)
+    .join("\n");
 
   const secretValues = Object.values(secrets);
   return {

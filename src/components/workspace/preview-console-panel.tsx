@@ -39,12 +39,12 @@ type PreviewConsolePanelProps = {
 };
 
 const FILTER_OPTIONS: { id: ConsoleFilter; label: string }[] = [
-  { id: "all", label: "All" },
+  { id: "server", label: "Sandbox server" },
+  { id: "all", label: "Events" },
   { id: "errors", label: "Errors" },
   { id: "warnings", label: "Warnings" },
   { id: "browser", label: "Browser" },
   { id: "network", label: "API" },
-  { id: "server", label: "Server output" },
 ];
 
 function formatLogTime(iso: string) {
@@ -60,7 +60,7 @@ function formatLogTime(iso: string) {
 
 function sourceBadgeLabel(source: PreviewConsoleEntry["source"]) {
   if (source === "network") return "API";
-  if (source === "server") return "Server";
+  if (source === "server") return "Sandbox";
   return "Browser";
 }
 
@@ -78,7 +78,7 @@ export function PreviewConsolePanel({
   onToggleExpand,
   onCloseDrawer,
 }: PreviewConsolePanelProps) {
-  const [filter, setFilter] = useState<ConsoleFilter>("all");
+  const [filter, setFilter] = useState<ConsoleFilter>("server");
   const [query, setQuery] = useState("");
   const [copied, setCopied] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -163,7 +163,7 @@ export function PreviewConsolePanel({
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
           <span className="inline-flex items-center gap-1.5 pr-1 text-[12px] font-semibold text-white/90">
             <SquareTerminal className="size-3.5 text-white/65" aria-hidden="true" />
-            Console
+            Sandbox Console
           </span>
           <nav aria-label="Console filters" className="flex flex-wrap items-center gap-1">
             {FILTER_OPTIONS.map((option) => {

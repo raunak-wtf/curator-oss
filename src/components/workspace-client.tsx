@@ -2411,7 +2411,7 @@ export function WorkspaceClient({
                     <button
                       type="button"
                       className={cn(
-                        "visual-edit-button toolbar-expandable ml-auto gap-1.5",
+                        "visual-edit-button ml-auto gap-1.5 px-2.5",
                         consoleDrawerOpen && "is-active",
                         consoleErrorCount > 0 && !consoleDrawerOpen && "border-rose-500/40 bg-rose-500/10 text-rose-200 hover:border-rose-400/60 hover:bg-rose-500/15",
                       )}
@@ -2426,13 +2426,13 @@ export function WorkspaceClient({
                       aria-controls="preview-console-drawer"
                       aria-label={
                         consoleErrorCount > 0
-                          ? `Toggle preview console (${consoleErrorCount} ${consoleErrorCount === 1 ? "error" : "errors"})`
-                          : "Toggle preview console"
+                          ? `Toggle sandbox console (${consoleErrorCount} ${consoleErrorCount === 1 ? "error" : "errors"})`
+                          : "Toggle sandbox console"
                       }
-                      title="Toggle preview console"
+                      title="Open live sandbox & preview console"
                     >
                       <SquareTerminal className="size-3.5" aria-hidden="true" />
-                      <span className="toolbar-control-label">Console</span>
+                      <span className="hidden sm:inline text-[11px] font-medium">Console</span>
                       {consoleErrorCount > 0 ? (
                         <span className="rounded-full bg-rose-500/30 px-1.5 py-0.5 text-[9.5px] font-semibold text-rose-100 tabular-nums leading-none">
                           {consoleErrorCount}
@@ -2558,7 +2558,19 @@ export function WorkspaceClient({
                 {/* Open tool tabs stay mounted so unsaved code edits and terminal scroll survive tab switches. */}
                 {openTabs.includes("terminal") ? (
                   <div role="tabpanel" id="workspace-panel-terminal" aria-labelledby="workspace-tab-terminal" hidden={activeTab !== "terminal"} className="h-full">
-                    <TerminalPanel entries={terminalEntries} isBuilding={isBuilding} />
+                    <TerminalPanel
+                      entries={terminalEntries}
+                      isBuilding={isBuilding}
+                      {...(security
+                        ? {}
+                        : {
+                            serverLogs,
+                            serverErrors: actionableConsoleErrors,
+                            loadingServerLogs: consoleLoading,
+                            onRefreshServerLogs: () => void loadConsoleSnapshot({ wake: true }),
+                            onFixServerErrors: handleFixConsoleErrors,
+                          })}
+                    />
                   </div>
                 ) : null}
                 {openTabs.includes("code") ? (

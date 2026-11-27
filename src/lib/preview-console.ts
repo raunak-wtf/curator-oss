@@ -84,21 +84,42 @@ const BENIGN_NOISE_PATTERNS = [
   /\.well-known\/appspecific/i,
   /AbortError:\s*The user aborted a request/i,
   /NEXT_REDIRECT/i,
+  /NEXT_NOT_FOUND/i,
+  // Next.js startup `- Experiments (use with caution): ⨯ webpackBuildWorker` disabled flag bullets
+  /^(?:⨯\s*)?[a-z][a-zA-Z0-9_]*$/,
 ];
 
 /**
- * Filters out harmless browser/HMR/redirect noise so auto-error detection only surfaces
- * genuine application bugs.
+ * Filters out harmless browser/HMR/redirect noise and Next.js startup experiment-flag bullets
+ * so auto-error detection only surfaces genuine application bugs.
  */
 export function isIgnorableConsoleError(input: Pick<PreviewConsoleInput, "message" | "route" | "statusCode">): boolean {
-  const text = `${input.route ?? ""} ${input.message}`;
-  if (BENIGN_NOISE_PATTERNS.some((pattern) => pattern.test(text))) return true;
+  const trimmedMsg = input.message.trim();
+  const text = `${input.route ?? ""} ${trimmedMsg}`.trim();
+  if (BENIGN_NOISE_PATTERNS.some((pattern) => pattern.test(trimmedMsg) || pattern.test(text))) return true;
   if (input.statusCode === 404 && (input.route === "/favicon.ico" || input.route === "/sw.js")) return true;
   return false;
 }
 
-const SERVER_ERROR_START =
-  /^(?:⨯\s+|Error:\s+|TypeError:\s+|ReferenceError:\s+|SyntaxError:\s+|RangeError:\s+|PostgresError:\s+|DrizzleError:\s+|NeonDbError:\s+|Unhandled Runtime Error|Failed to compile|Module not found:|Invalid src prop\b)/i;
+/**
+ * Matches genuine Node.js, Next.js, Drizzle/PostgreSQL, and Better Auth error headlines in sandbox stdout/stderr.
+ * Intentionally excludes bare Next.js startup experiment bullets like `  ⨯ webpackBuildWorker`.
+ */
+const SERVER_ERROR_START = new RegExp(
+  [
+    // Standard JS / Node / DB / Auth Error classes (with optional leading `⨯ ` or `[`)
+    "^(?:⨯\\s+)?\\[?(?:[A-Z][A-Za-z0-9_]*(?:Error|Exception)|Error)\\b\\]?\\s*:",
+    // Uncaught / unhandled runtime headers
+    "^(?:⨯\\s+)?(?:Unhandled Runtime Error|unhandledRejection:|Uncaught Exception:)",
+    // Next.js / Turbopack / Webpack compilation & module resolution failures
+    "^(?:⨯\\s+)?(?:Failed to compile|Module not found:|Syntax error:|Transform failed\\b|Build Error\\b|Invalid src prop\\b)",
+    // File-path compile error lines from Next.js (`⨯ ./src/app/page.tsx:12:4`)
+    "^⨯\\s+\\.?\\/[^\\s:]+\\.(?:[cm]?[jt]sx?|css|json)",
+    // PostgreSQL / pg driver lower-case `error:` lines and Better Auth logger errors
+    "^(?:⨯\\s+)?(?:error:\\s+(?:relation|column|syntax|invalid|duplicate|null value|insert|update|delete|password|database|role|permission|deadlock|could not)\\b|ERROR\\s*\\[Better Auth\\])",
+  ].join("|"),
+  "i",
+);
 
 const SERVER_HTTP_500_LINE =
   /^\s*(GET|POST|PUT|PATCH|DELETE)\s+(\/[^\s]*)\s+(5\d\d)\s+in\s+\d+/;
@@ -107,8 +128,8 @@ const SERVER_AUTH_ERROR_LINE =
   /^\s*(GET|POST)\s+(\/api\/auth\/[^\s]*)\s+(403|5\d\d)\s+in\s+\d+/;
 
 /**
- * Scans Next.js / Node dev-server logs (`npm run dev` output) for genuine runtime exceptions,
- * compilation failures, and HTTP 5xx responses.
+ * Scans sandbox dev-server logs (`npm run dev` output) for genuine runtime exceptions,
+ * compilation failures, database errors, and HTTP 5xx responses.
  */
 export function extractServerErrorsFromLog(rawLog: string, secretValues: readonly string[] = []): PreviewConsoleInput[] {
   const clean = redactConsoleSecrets(rawLog, secretValues);
@@ -117,23 +138,43 @@ export function extractServerErrorsFromLog(rawLog: string, secretValues: readonl
   const lines = clean.split("\n");
   const extracted: PreviewConsoleInput[] = [];
   const seen = new Set<string>();
+  let inExperimentsList = false;
 
   for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index].trim();
-    if (!line) continue;
+    const rawLine = lines[index];
+    const line = rawLine.trim();
+    if (!line) {
+      inExperimentsList = false;
+      continue;
+    }
 
-    const http500 = lines[index].match(SERVER_HTTP_500_LINE) ?? lines[index].match(SERVER_AUTH_ERROR_LINE);
+    // Skip Next.js startup `- Experiments (use with caution):` flag list (`✓ ...` / `⨯ webpackBuildWorker`)
+    if (/^-\s*Experiments\b/i.test(line)) {
+      inExperimentsList = true;
+      continue;
+    }
+    if (inExperimentsList) {
+      if (/^[✓⨯·•-]\s+[A-Za-z0-9_.-]+$/.test(line)) {
+        continue;
+      }
+      inExperimentsList = false;
+    }
+
+    const http500 = rawLine.match(SERVER_HTTP_500_LINE) ?? rawLine.match(SERVER_AUTH_ERROR_LINE);
     if (http500) {
       const [, method, rawRoute, codeStr] = http500;
       const route = rawRoute.split("?")[0].slice(0, 300);
       const statusCode = Number(codeStr);
       if (isIgnorableConsoleError({ message: line, route, statusCode })) continue;
-      // Collect adjacent context lines around the 500 log if an Error preceded/followed it
       const contextLines: string[] = [];
       for (let lookback = Math.max(0, index - 8); lookback < Math.min(lines.length, index + 6); lookback += 1) {
         if (lookback === index) continue;
         const candidate = lines[lookback].trim();
-        if (candidate && !/^\s*(?:GET|POST|PUT|PATCH|DELETE)\s+\/\S+\s+[23]\d\d\b/.test(candidate)) {
+        if (
+          candidate &&
+          !/^\s*(?:GET|POST|PUT|PATCH|DELETE)\s+\/\S+\s+[23]\d\d\b/.test(lines[lookback]) &&
+          !/^(?:▲\s+Next\.js|-\s+(?:Local|Network|Environments|Experiments)|[✓⨯]\s+[A-Za-z0-9_.-]+$)/.test(candidate)
+        ) {
           contextLines.push(lines[lookback]);
         }
       }
@@ -154,10 +195,11 @@ export function extractServerErrorsFromLog(rawLog: string, secretValues: readonl
     }
 
     if (SERVER_ERROR_START.test(line)) {
-      if (isIgnorableConsoleError({ message: line })) continue;
-      const block: string[] = [line.replace(/^⨯\s+/, "")];
+      const cleanedHeadline = line.replace(/^⨯\s+/, "").trim();
+      if (isIgnorableConsoleError({ message: cleanedHeadline })) continue;
+      const block: string[] = [cleanedHeadline];
       let cursor = index + 1;
-      while (cursor < lines.length && block.length < 16) {
+      while (cursor < lines.length && block.length < 18) {
         const nextLine = lines[cursor];
         const trimmedNext = nextLine.trim();
         if (!trimmedNext) {
@@ -241,7 +283,11 @@ export function buildConsoleFixPrompt(
   const unique = errors.slice(-5);
   const formattedBlocks = unique.map((err, idx) => {
     const sourceLabel =
-      err.source === "network" ? "Network / API" : err.source === "server" ? "Server runtime" : "Browser console";
+      err.source === "network"
+        ? "API / Network"
+        : err.source === "server"
+          ? "Sandbox server"
+          : "Browser runtime";
     const meta = [
       sourceLabel,
       err.route ? `route: ${err.route}` : null,
@@ -257,14 +303,14 @@ export function buildConsoleFixPrompt(
 
   const retryGuidance =
     attemptCount >= 2
-      ? "\n\nNote: A previous fix attempt did not clear this runtime error. Do not repeat the same surface patch—call `read_preview_console` to inspect the latest live server and browser logs, trace the full request/data flow end to end (including environment variables, database schema/tables, auth configuration, and API route handlers), and fix the underlying root cause."
+      ? "\n\nNote: A previous fix attempt did not clear this runtime error. Do not repeat the same surface patch—call `read_preview_console` to inspect the latest live sandbox server and browser logs, trace the full request/data flow end to end (including environment variables, database schema/tables, auth configuration, and API route handlers), and fix the underlying root cause."
       : "";
 
   return [
-    `Fix ${unique.length === 1 ? "this runtime error" : "these runtime errors"} detected in the live app preview:`,
+    `Fix ${unique.length === 1 ? "this runtime error" : "these runtime errors"} detected in the running sandbox & preview:`,
     "",
     ...formattedBlocks,
     "",
-    `Inspect the relevant source files and call \`read_preview_console\` if you need fuller server logs. Fix the root cause cleanly, verify any affected database tables or API routes, run the full production build (\`npm run build\`), and confirm the live preview renders and responds without errors.${retryGuidance}`,
+    `Inspect the relevant source files and call \`read_preview_console\` for full sandbox server logs. Fix the root cause cleanly, verify any affected database tables or API routes, run the full production build (\`npm run build\`), and confirm the live preview renders and responds without errors.${retryGuidance}`,
   ].join("\n");
 }
