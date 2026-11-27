@@ -60,7 +60,7 @@ function activityTarget(name: string, input: unknown): string | undefined {
   if (name === "move_file") return pick("destination", "source");
   if (name === "search_files" || name === "web_search") return pick("query")?.slice(0, 200);
   if (name === "fetch_url") return pick("url")?.slice(0, 300);
-  if (name === "neon_database" || name === "resend_email") return pick("action", "name", "sql")?.slice(0, 200);
+  if (name === "neon_database" || name === "resend_email" || name === "cloud_storage") return pick("action", "bucket", "key", "name", "sql")?.slice(0, 200);
   return pick("path", "directory")?.slice(0, 300);
 }
 
@@ -447,6 +447,7 @@ export async function runAgent(input: {
       "run_command",
       "neon_database",
       "resend_email",
+      "cloud_storage",
       GITHUB_TOOL_NAME,
     ]);
 

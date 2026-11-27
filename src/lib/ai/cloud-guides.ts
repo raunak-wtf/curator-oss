@@ -63,22 +63,73 @@ Cognix manages this project's Neon database on the server via \`NEON_API_KEY\`. 
 - Design loading, empty, and error states for data views.
 ${SHARED_RULES}`;
 
-const STORAGE_GUIDE = `# Cognix Cloud: Storage buckets
+const STORAGE_GUIDE = `# Cognix Cloud: Managed S3 Storage & CDN (Bucketline)
 
-Use S3-compatible object storage through ${env("storage")}.
+Use Cognix-managed S3-compatible buckets and CDN delivery through ${env("storage")} (plus optional \`S3_CDN_URL\` and \`S3_ACCESS_MODE\`).
 
-## Setup
+## Managed Storage Tool (\`cloud_storage\`)
 
-1. Install \`@aws-sdk/client-s3\` and \`@aws-sdk/s3-request-presigner\`.
-2. Create \`lib/storage.ts\` (import \`server-only\`) that builds one \`S3Client\` with \`endpoint\`, \`region\`, \`forcePathStyle: true\`, and the access key pair, and exports small helpers: \`createUploadUrl(key, contentType)\`, \`createDownloadUrl(key)\`, and \`deleteObject(key)\`.
-3. Treat buckets as private. Serve files with short-lived signed GET URLs (5-15 minutes) instead of public URLs, unless the user explicitly wants public assets.
+Cognix manages this project's storage buckets on the server via \`BUCKETLINE_API_KEY\`. Never ask the user for S3 credentials when Cognix Cloud is on:
+- If \`S3_BUCKET\` or \`S3_ACCESS_KEY_ID\` is not listed in project secrets yet, call \`cloud_storage\` with \`{ "action": "provision" }\` first (or \`{ "action": "create_bucket", "suffix": "media", "accessMode": "public" }\` when public CDN assets are needed). Cognix creates an isolated bucket, mints bucket-scoped \`AKIA…\` credentials, and syncs \`S3_ENDPOINT\`, \`S3_REGION\`, \`S3_BUCKET\`, \`S3_ACCESS_KEY_ID\`, \`S3_SECRET_ACCESS_KEY\`, \`S3_CDN_URL\`, and \`S3_ACCESS_MODE\` into \`.env.local\` automatically.
+- Use \`cloud_storage\` to inspect/create/delete project buckets, switch the active bucket (\`use_bucket\`), rotate S3 keys (\`rotate_credentials\`), list/copy/delete objects, upload text/JSON seed assets, or mint presigned URLs.
 
-## Uploads
+## Gateway & CDN Contract
 
-- Upload directly from the browser with a signed PUT URL created by a server action or route after checking the user is allowed to upload.
-- Validate content type and maximum size on the server before signing, and generate the object key server-side, for example \`users/{userId}/{uuid}-{safeFileName}\`. Never trust a client-provided key or path.
-- Store the object key (not the signed URL) in the database next to the record that owns it.
-- Show upload progress, a clear error with a retry action, and an image preview when relevant.
+- **S3 Gateway (path-style)**: \`process.env.S3_ENDPOINT\` (e.g. \`https://cloudnest-cdn-vault.lovable.app/api/public/s3\`), \`region: process.env.S3_REGION ?? "auto"\`, \`forcePathStyle: true\`.
+- **Hard object size limit**: **50 MB** maximum per object (enforce \`<= 50 * 1024 * 1024\` in server validation).
+- **Access modes**:
+  - \`private\` (default): Serve files using SigV4 presigned GET URLs (\`@aws-sdk/s3-request-presigner\`, 1 second up to 7 days).
+  - \`public\`: Files are also directly served via \`\${process.env.S3_CDN_URL}/\${objectKey}\` with \`Cache-Control: public, max-age=3600, stale-while-revalidate=86400\` and \`206 Partial Content\` Range support for video/audio. Note: HTML, SVG, XML, and JS are served as \`application/octet-stream\` + \`nosniff\` for XSS safety—use raster images (PNG/JPG/WebP/AVIF) for inline \`<img>\` rendering.
+
+## Application Code Setup
+
+1. Install \`@aws-sdk/client-s3\`, \`@aws-sdk/s3-request-presigner\`, and \`server-only\`.
+2. Create \`lib/storage.ts\`:
+   \`\`\`ts
+   import "server-only";
+   import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+   import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+
+   const bucket = process.env.S3_BUCKET;
+   const endpoint = process.env.S3_ENDPOINT;
+   const accessKeyId = process.env.S3_ACCESS_KEY_ID;
+   const secretAccessKey = process.env.S3_SECRET_ACCESS_KEY;
+
+   export const s3 =
+     bucket && endpoint && accessKeyId && secretAccessKey
+       ? new S3Client({
+           region: process.env.S3_REGION || "auto",
+           endpoint,
+           forcePathStyle: true,
+           credentials: { accessKeyId, secretAccessKey },
+         })
+       : null;
+
+   export async function createUploadUrl(key: string, contentType: string, expiresIn = 900) {
+     if (!s3 || !bucket) throw new Error("S3 storage is not configured. Provision it in Cloud → Storage.");
+     return getSignedUrl(s3, new PutObjectCommand({ Bucket: bucket, Key: key, ContentType: contentType }), { expiresIn });
+   }
+
+   export async function createDownloadUrl(key: string, expiresIn = 3600) {
+     if (process.env.S3_ACCESS_MODE === "public" && process.env.S3_CDN_URL) {
+       return \`\${process.env.S3_CDN_URL.replace(/\\/+$/, "")}/\${key.replace(/^\\/+/, "")}\`;
+     }
+     if (!s3 || !bucket) throw new Error("S3 storage is not configured. Provision it in Cloud → Storage.");
+     return getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: key }), { expiresIn });
+   }
+
+   export async function deleteStoredObject(key: string) {
+     if (!s3 || !bucket) throw new Error("S3 storage is not configured.");
+     await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+   }
+   \`\`\`
+
+## Upload Rules
+
+- Upload from the browser with a server-minted presigned PUT URL (or a server route for small files) after checking user permissions.
+- Validate content type and size (\`<= 50 MB\`) on the server before signing, and generate keys server-side (e.g. \`users/\${userId}/\${crypto.randomUUID()}-\${safeName}\`). Never trust a client-supplied object key or allow \`..\`.
+- Store the object \`key\` (not an expiring presigned URL) in Neon PostgreSQL alongside the record that owns it.
+- Show upload progress, clear recovery actions on errors, and previews where relevant.
 ${SHARED_RULES}`;
 
 const EMAIL_GUIDE = `# Cognix Cloud: Emails with Resend

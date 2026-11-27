@@ -1,5 +1,6 @@
 import { isAgentConfigured } from "@/lib/ai/runner";
 import { isAuthConfigured } from "@/lib/auth0";
+import { isBucketlineConfigured } from "@/lib/cloud/bucketline";
 import { isDatabaseConfigured } from "@/lib/db";
 import { isDaytonaConfigured } from "@/lib/daytona";
 import { isStorageConfigured } from "@/lib/storage";
@@ -13,6 +14,7 @@ export async function GET() {
       daytona: isDaytonaConfigured,
       model: isAgentConfigured,
       googleStorage: isStorageConfigured,
+      cloudStorage: isBucketlineConfigured(),
     },
   });
 }

@@ -72,10 +72,27 @@ import {
   updateResendWebhook,
   verifyResendDomain,
 } from "@/lib/cloud/resend";
+import {
+  buildPublicCdnUrl,
+  copyBucketObject,
+  createPresignedStorageUrl,
+  createProjectBucket,
+  deleteBucketObject,
+  deleteProjectBucket,
+  ensureProjectStorageBucket,
+  getBucketlineS3GatewayEndpoint,
+  getCredentialsForProjectBucket,
+  headBucketObject,
+  isBucketlineConfigured,
+  listBucketObjects,
+  listProjectBuckets,
+  putBucketObject,
+  scrubStorageSecrets,
+} from "@/lib/cloud/bucketline";
 import { getDecryptedSecrets, getProjectCloud, upsertSecret } from "@/lib/store";
 import type { Project } from "@/lib/types";
 
-export const CLOUD_PROVIDER_TOOL_NAMES = ["neon_database", "resend_email"] as const;
+export const CLOUD_PROVIDER_TOOL_NAMES = ["neon_database", "resend_email", "cloud_storage"] as const;
 export type CloudProviderToolName = (typeof CLOUD_PROVIDER_TOOL_NAMES)[number];
 
 export function isCloudProviderTool(name: string): name is CloudProviderToolName {
@@ -152,6 +169,22 @@ const RESEND_ACTIONS = [
   "update_webhook",
   "delete_webhook",
   "list_api_keys",
+] as const;
+
+const STORAGE_ACTIONS = [
+  "status",
+  "provision",
+  "list_buckets",
+  "create_bucket",
+  "use_bucket",
+  "rotate_credentials",
+  "delete_bucket",
+  "list_objects",
+  "put_text_object",
+  "head_object",
+  "copy_object",
+  "delete_object",
+  "presign_url",
 ] as const;
 
 export const cloudProviderTools = [
@@ -247,6 +280,35 @@ export const cloudProviderTools = [
       },
     },
   },
+  {
+    type: "function" as const,
+    function: {
+      name: "cloud_storage",
+      description:
+        "Manage this project's Cognix-managed S3-compatible storage buckets and CDN delivery (Bucketline). Supports provisioning isolated private or public CDN buckets, syncing S3_* secrets into .env.local automatically, rotating bucket-scoped S3 keys, listing/copying/deleting objects, uploading text/JSON seed objects, and generating presigned GET/PUT URLs.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: [...STORAGE_ACTIONS] },
+          bucket: { type: "string", description: "Target project bucket name (defaults to the active S3_BUCKET)." },
+          suffix: { type: "string", description: "Short bucket suffix for create_bucket (e.g. 'avatars', 'public-media')." },
+          accessMode: { type: "string", enum: ["private", "public"], description: "Bucket access mode ('private' or 'public' CDN)." },
+          makeActive: { type: "boolean", description: "Set the bucket as the project's active S3_BUCKET in .env.local (default true)." },
+          force: { type: "boolean", description: "Force-delete non-empty bucket on delete_bucket." },
+          prefix: { type: "string", description: "Folder prefix for list_objects (e.g. 'avatars/')." },
+          key: { type: "string", description: "Object key path (e.g. 'config/welcome.json' or 'photos/banner.png')." },
+          sourceKey: { type: "string", description: "Source object key for copy_object." },
+          destinationKey: { type: "string", description: "Destination object key for copy_object." },
+          content: { type: "string", description: "UTF-8 text content for put_text_object (up to 500 KB)." },
+          contentType: { type: "string", description: "MIME type for put_text_object (e.g. 'application/json')." },
+          method: { type: "string", enum: ["GET", "PUT"], description: "HTTP method for presign_url (default GET)." },
+          expiresInSeconds: { type: "integer", minimum: 60, maximum: 604800, description: "Presigned URL lifetime in seconds (60 to 604800)." },
+        },
+        required: ["action"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 const neonInputSchema = z.object({
@@ -310,6 +372,23 @@ const resendInputSchema = z.object({
   endpoint: z.string().url().max(1000).optional(),
   events: z.array(z.string().trim().min(1).max(80)).max(25).optional(),
   webhookStatus: z.enum(["enabled", "disabled"]).optional(),
+});
+
+const storageInputSchema = z.object({
+  action: z.enum(STORAGE_ACTIONS),
+  bucket: z.string().trim().min(3).max(63).optional(),
+  suffix: z.string().trim().min(1).max(48).optional(),
+  accessMode: z.enum(["private", "public"]).optional(),
+  makeActive: z.boolean().optional().default(true),
+  force: z.boolean().optional().default(false),
+  prefix: z.string().trim().max(400).optional(),
+  key: z.string().trim().min(1).max(800).optional(),
+  sourceKey: z.string().trim().min(1).max(800).optional(),
+  destinationKey: z.string().trim().min(1).max(800).optional(),
+  content: z.string().max(500_000).optional(),
+  contentType: z.string().trim().max(160).optional(),
+  method: z.enum(["GET", "PUT"]).optional().default("GET"),
+  expiresInSeconds: z.number().int().min(60).max(604_800).optional().default(3600),
 });
 
 export type CloudToolResult = {
@@ -634,6 +713,205 @@ export async function executeCloudProviderTool(
           output: JSON.stringify({ ok: true, activeConnection: synced, envSynced: ["DATABASE_URL", "DIRECT_URL"] }),
           summary: `Synced Neon branch ${synced.branchName} (${synced.databaseName}) to .env.local`,
           secretsUpdated: true,
+        };
+      }
+    }
+  }
+
+  if (name === "cloud_storage") {
+    const input = storageInputSchema.parse(rawInput);
+    const secrets = await getDecryptedSecrets(project.id).catch(() => ({} as Record<string, string>));
+
+    if (!isBucketlineConfigured()) {
+      return {
+        output: JSON.stringify({
+          configured: false,
+          activeBucket: secrets.S3_BUCKET ?? null,
+          error:
+            "Managed Cloud Storage (BUCKETLINE_API_KEY) is not configured on the Cognix server yet. Still write `lib/storage.ts` reading S3_ENDPOINT, S3_REGION, S3_BUCKET, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY from process.env.",
+        }),
+        summary: "Managed Cloud Storage key not set on server",
+      };
+    }
+
+    if (input.action === "status" || input.action === "list_buckets") {
+      const buckets = await listProjectBuckets(project.id);
+      return {
+        output: scrubStorageSecrets(
+          JSON.stringify({
+            configured: true,
+            s3Endpoint: getBucketlineS3GatewayEndpoint(),
+            s3Region: "auto",
+            activeBucket: secrets.S3_BUCKET ?? null,
+            activeCdnUrl: secrets.S3_CDN_URL ?? null,
+            activeAccessMode: secrets.S3_ACCESS_MODE ?? null,
+            buckets,
+          }),
+        ),
+        summary: `Listed ${buckets.length} project storage ${buckets.length === 1 ? "bucket" : "buckets"}`,
+      };
+    }
+
+    if (input.action === "provision") {
+      const provisioned = await ensureProjectStorageBucket(project, { accessMode: input.accessMode });
+      return {
+        output: scrubStorageSecrets(
+          JSON.stringify({
+            provisioned: true,
+            created: provisioned.created,
+            bucket: provisioned.bucket,
+            envSynced: [
+              "S3_ENDPOINT",
+              "S3_REGION",
+              "S3_BUCKET",
+              "S3_ACCESS_KEY_ID",
+              "S3_SECRET_ACCESS_KEY",
+              "S3_CDN_URL",
+              "S3_ACCESS_MODE",
+            ],
+          }),
+        ),
+        summary: provisioned.created
+          ? `Provisioned ${provisioned.bucket.accessMode} storage bucket ${provisioned.bucket.name}`
+          : `Verified storage bucket ${provisioned.bucket.name}`,
+        secretsUpdated: true,
+      };
+    }
+
+    if (input.action === "create_bucket") {
+      const created = await createProjectBucket(project.id, {
+        suffix: input.suffix || "storage",
+        accessMode: input.accessMode ?? "private",
+      });
+      await getCredentialsForProjectBucket(project, created, { makeActive: input.makeActive });
+      return {
+        output: scrubStorageSecrets(
+          JSON.stringify({
+            bucket: created,
+            activeInEnv: input.makeActive,
+          }),
+        ),
+        summary: `Created ${created.accessMode} bucket ${created.name}`,
+        secretsUpdated: true,
+      };
+    }
+
+    const buckets = await listProjectBuckets(project.id);
+    const targetName = input.bucket || secrets.S3_BUCKET || buckets[0]?.name;
+    const targetBucket = targetName ? buckets.find((b) => b.name === targetName) : undefined;
+    if (!targetBucket) {
+      throw new Error(
+        targetName
+          ? `Bucket "${targetName}" was not found in this project.`
+          : "No storage bucket exists yet. Call cloud_storage with action=\"provision\" first.",
+      );
+    }
+
+    if (input.action === "use_bucket") {
+      await getCredentialsForProjectBucket(project, targetBucket, { makeActive: true });
+      return {
+        output: scrubStorageSecrets(JSON.stringify({ activeBucket: targetBucket.name, bucket: targetBucket })),
+        summary: `Switched active S3_BUCKET to ${targetBucket.name}`,
+        secretsUpdated: true,
+      };
+    }
+
+    if (input.action === "rotate_credentials") {
+      const makeActive = !secrets.S3_BUCKET || secrets.S3_BUCKET === targetBucket.name;
+      await getCredentialsForProjectBucket(project, targetBucket, {
+        forceRotate: true,
+        makeActive,
+      });
+      return {
+        output: JSON.stringify({ rotated: true, bucket: targetBucket.name, activeUpdated: makeActive }),
+        summary: `Rotated S3 credentials for ${targetBucket.name}`,
+        secretsUpdated: true,
+      };
+    }
+
+    if (input.action === "delete_bucket") {
+      const deleted = await deleteProjectBucket(project.id, targetBucket.name, { force: input.force });
+      const remaining = buckets.filter((b) => b.name !== targetBucket.name);
+      if (remaining[0]) {
+        await getCredentialsForProjectBucket(project, remaining[0], { makeActive: true }).catch(() => undefined);
+      }
+      return {
+        output: JSON.stringify(deleted),
+        summary: `Deleted bucket ${targetBucket.name}`,
+        secretsUpdated: true,
+      };
+    }
+
+    const creds = await getCredentialsForProjectBucket(project, targetBucket, { makeActive: false });
+
+    switch (input.action) {
+      case "list_objects": {
+        const listing = await listBucketObjects(creds, { prefix: input.prefix ?? "", delimiter: "/" });
+        return {
+          output: JSON.stringify({ bucket: targetBucket.name, ...listing }),
+          summary: `Listed ${listing.objects.length} objects in ${targetBucket.name}`,
+        };
+      }
+      case "put_text_object": {
+        if (!input.key || input.content === undefined) {
+          throw new Error("Provide `key` and `content` for put_text_object.");
+        }
+        const uploaded = await putBucketObject(creds, {
+          key: input.key,
+          body: Buffer.from(input.content, "utf8"),
+          contentType: input.contentType || "text/plain; charset=utf-8",
+        });
+        return {
+          output: JSON.stringify({ bucket: targetBucket.name, ...uploaded }),
+          summary: `Uploaded ${uploaded.key} to ${targetBucket.name}`,
+        };
+      }
+      case "head_object": {
+        if (!input.key) throw new Error("Provide `key` for head_object.");
+        const meta = await headBucketObject(creds, input.key);
+        return {
+          output: JSON.stringify({ bucket: targetBucket.name, ...meta }),
+          summary: `Inspected ${meta.key} in ${targetBucket.name}`,
+        };
+      }
+      case "copy_object": {
+        if (!input.sourceKey || !input.destinationKey) {
+          throw new Error("Provide `sourceKey` and `destinationKey` for copy_object.");
+        }
+        const copied = await copyBucketObject(creds, input.sourceKey, input.destinationKey);
+        return {
+          output: JSON.stringify({ bucket: targetBucket.name, ...copied }),
+          summary: `Copied ${copied.sourceKey} -> ${copied.destinationKey}`,
+        };
+      }
+      case "delete_object": {
+        if (!input.key) throw new Error("Provide `key` for delete_object.");
+        const deleted = await deleteBucketObject(creds, input.key);
+        return {
+          output: JSON.stringify({ bucket: targetBucket.name, ...deleted }),
+          summary: `Deleted ${deleted.key} from ${targetBucket.name}`,
+        };
+      }
+      case "presign_url": {
+        if (!input.key) throw new Error("Provide `key` for presign_url.");
+        const presigned = createPresignedStorageUrl(creds, {
+          method: input.method,
+          key: input.key,
+          expiresInSeconds: input.expiresInSeconds,
+        });
+        const publicUrl =
+          input.method === "GET" && targetBucket.accessMode === "public"
+            ? buildPublicCdnUrl(targetBucket.cdnEndpoint, input.key)
+            : null;
+        return {
+          output: JSON.stringify({
+            bucket: targetBucket.name,
+            url: publicUrl ?? presigned.url,
+            presignedUrl: presigned.url,
+            publicCdnUrl: publicUrl,
+            expiresInSeconds: presigned.expiresInSeconds,
+          }),
+          summary: `Generated ${input.method} URL for ${input.key}`,
         };
       }
     }

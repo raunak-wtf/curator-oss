@@ -176,6 +176,8 @@ const COGNIX_CLOUD_ENV_RULES: readonly { name: string; label: string; feature: C
   { name: "S3_BUCKET", label: "S3_BUCKET", feature: "storage" },
   { name: "S3_ACCESS_KEY_ID", label: "S3_ACCESS_KEY_ID", feature: "storage" },
   { name: "S3_SECRET_ACCESS_KEY", label: "S3_SECRET_ACCESS_KEY", feature: "storage" },
+  { name: "S3_CDN_URL", label: "S3_CDN_URL", feature: "storage" },
+  { name: "S3_ACCESS_MODE", label: "S3_ACCESS_MODE", feature: "storage" },
 ];
 
 function matchRule<T extends { pattern: string; prefix?: boolean }>(pkg: string, rules: readonly T[]): T | null {

@@ -1272,6 +1272,7 @@ export function WorkspaceClient({
       SHELL_TOOLS.has(item.name) ||
       item.name === "neon_database" ||
       item.name === "resend_email" ||
+      item.name === "cloud_storage" ||
       item.name === "propose_pull_request"
     );
   }
@@ -1280,7 +1281,7 @@ export function WorkspaceClient({
     if (FILE_TOOLS.has(item.name) && item.target && files.some((file) => file.path === item.target)) openFile(item.target);
     else if (FILE_TOOLS.has(item.name) || BROWSE_TOOLS.has(item.name)) openTab("code");
     else if (SHELL_TOOLS.has(item.name)) openTab("terminal");
-    else if (item.name === "neon_database" || item.name === "resend_email") openTab("cloud");
+    else if (item.name === "neon_database" || item.name === "resend_email" || item.name === "cloud_storage") openTab("cloud");
     else if (item.name === "propose_pull_request") openTab("git");
   }
 

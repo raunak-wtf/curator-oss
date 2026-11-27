@@ -2,7 +2,6 @@
 
 import {
   BarChart3,
-  Check,
   Cloud,
   Database,
   Globe2,
@@ -13,8 +12,6 @@ import {
   Rocket,
   Settings,
   ShieldCheck,
-  Sparkles,
-  TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
@@ -28,6 +25,7 @@ import { CloudAnalyticsPanel } from "./cloud-analytics-panel";
 import { CloudAuthPanel } from "./cloud-auth-panel";
 import { CloudDatabasePanel } from "./cloud-database-panel";
 import { CloudEmailsPanel } from "./cloud-emails-panel";
+import { CloudStoragePanel } from "./cloud-storage-panel";
 import { ProjectSettings } from "./project-settings";
 import { PublishSection } from "./publish-section";
 
@@ -95,7 +93,6 @@ export function CloudPanel(props: CloudPanelProps) {
   const [section, setSection] = useState<CloudSection>("publish");
   const [handledFocus, setHandledFocus] = useState(focusRequest);
   const [secretNames, setSecretNames] = useState<string[] | null>(null);
-  const [secretsError, setSecretsError] = useState(false);
 
   // Opening from the toolbar rocket always lands on Publish.
   if (focusRequest !== handledFocus) {
@@ -109,9 +106,8 @@ export function CloudPanel(props: CloudPanelProps) {
       if (!response.ok) throw new Error("Could not load secrets");
       const payload = (await response.json()) as { secrets?: { name: string }[] };
       setSecretNames((payload.secrets ?? []).map((secret) => secret.name));
-      setSecretsError(false);
     } catch {
-      setSecretsError(true);
+      // Keep last known secret list on transient error.
     }
   }, [project.id]);
 
@@ -126,9 +122,8 @@ export function CloudPanel(props: CloudPanelProps) {
         const payload = (await response.json()) as { secrets?: { name: string }[] };
         if (cancelled) return;
         setSecretNames((payload.secrets ?? []).map((secret) => secret.name));
-        setSecretsError(false);
       })
-      .catch(() => !cancelled && setSecretsError(true));
+      .catch(() => undefined);
     return () => {
       cancelled = true;
     };
@@ -181,12 +176,10 @@ export function CloudPanel(props: CloudPanelProps) {
     }
 
     return (
-      <StorageFeaturePage
-        secretNames={secretNames}
-        secretsError={secretsError}
-        onRetrySecrets={() => void loadSecretNames()}
-        onOpenSecrets={() => setSection("secrets")}
+      <CloudStoragePanel
+        projectId={project.id}
         onAskAgent={onAskAgent}
+        onSecretsChanged={() => void loadSecretNames()}
       />
     );
   }
@@ -327,55 +320,9 @@ function CloudGate({
         <EnableButton busy={busy} onClick={onEnable} />
       </div>
       <p className="mt-3 max-w-sm text-[12px] leading-5 text-white/40">
-        Turning on Cognix Cloud unlocks Managed Neon PostgreSQL, Storage, Resend Emails, and Better Auth for this app.
+        Turning on Cognix Cloud unlocks Managed Neon PostgreSQL, Bucketline S3 Storage, Resend Emails, and Better Auth for this app.
       </p>
     </div>
-  );
-}
-
-function VariableList({
-  names,
-  secretNames,
-  error,
-  onRetry,
-}: {
-  names: string[];
-  secretNames: string[] | null;
-  error: boolean;
-  onRetry: () => void;
-}) {
-  if (error) {
-    return (
-      <p className="text-[12px] text-white/50">
-        Could not check your secrets.{" "}
-        <button type="button" onClick={onRetry} className="font-medium text-white/80 hover:text-white">
-          Try again
-        </button>
-      </p>
-    );
-  }
-  return (
-    <ul className="divide-y divide-white/[0.06]">
-      {names.map((name) => {
-        const set = secretNames?.includes(name);
-        return (
-          <li key={name} className="flex items-center justify-between gap-3 py-2">
-            <code className="font-mono text-[12.5px] text-white/80">{name}</code>
-            {secretNames === null ? (
-              <PixelLoader className="text-white/40" />
-            ) : set ? (
-              <span className="inline-flex items-center gap-1 text-[12px] text-emerald-300">
-                <Check className="size-3.5" aria-hidden="true" /> Set
-              </span>
-            ) : (
-              <span className="inline-flex items-center gap-1 text-[12px] text-amber-300">
-                <TriangleAlert className="size-3.5" aria-hidden="true" /> Missing
-              </span>
-            )}
-          </li>
-        );
-      })}
-    </ul>
   );
 }
 
@@ -397,7 +344,7 @@ function CloudOverview({
       <CloudGate
         icon={Cloud}
         title="Turn on Cognix Cloud"
-        description="Provision managed Neon PostgreSQL, Better Auth on Postgres, Resend email management, and file storage."
+        description="Provision managed Neon PostgreSQL, Bucketline S3 storage & CDN, Better Auth on Postgres, and Resend email management."
         busy={busy}
         onEnable={() => onSetEnabled(true)}
       />
@@ -409,6 +356,7 @@ function CloudOverview({
     const meta = CLOUD_FEATURES[feature];
     const missing = meta.env.filter((name) => !secretNames.includes(name)).length;
     if (feature === "database") return missing === 0 ? "Managed Neon · Ready" : "Click to provision Neon";
+    if (feature === "storage") return missing === 0 ? "Managed Bucketline · Ready" : "Click to provision bucket";
     if (feature === "email") return secretNames.includes("RESEND_API_KEY") ? "Resend connected" : "Connect Resend API key";
     if (feature === "auth") return missing === 0 ? "Better Auth · Ready" : "Needs database setup";
     return missing === 0 ? "Ready" : `${missing} ${missing === 1 ? "variable" : "variables"} missing`;
@@ -422,7 +370,7 @@ function CloudOverview({
             Cognix Cloud
           </h2>
           <p className="mt-1 flex items-center gap-2 text-[13px] text-white/55">
-            <span className="size-2 rounded-full bg-emerald-400" aria-hidden="true" /> On · Managed Neon PostgreSQL, Resend, and Better Auth unlocked.
+            <span className="size-2 rounded-full bg-emerald-400" aria-hidden="true" /> On · Managed Neon PostgreSQL, Bucketline Storage, Resend, and Better Auth unlocked.
           </p>
         </div>
         <button
@@ -431,7 +379,7 @@ function CloudOverview({
           onClick={() => {
             if (
               window.confirm(
-                "Turn off Cognix Cloud? Existing code, database, and secrets stay intact, and Cognix will ask again before adding new Cloud services.",
+                "Turn off Cognix Cloud? Existing code, database, buckets, and secrets stay intact, and Cognix will ask again before adding new Cloud services.",
               )
             ) {
               onSetEnabled(false);
@@ -465,70 +413,6 @@ function CloudOverview({
           );
         })}
       </ul>
-    </section>
-  );
-}
-
-function StorageFeaturePage({
-  secretNames,
-  secretsError,
-  onRetrySecrets,
-  onOpenSecrets,
-  onAskAgent,
-}: {
-  secretNames: string[] | null;
-  secretsError: boolean;
-  onRetrySecrets: () => void;
-  onOpenSecrets: () => void;
-  onAskAgent: (prompt: string) => void;
-}) {
-  const meta = CLOUD_FEATURES.storage;
-  const missing = secretNames ? meta.env.filter((name) => !secretNames.includes(name)) : [];
-  return (
-    <section aria-labelledby="cloud-storage-heading">
-      <h2 id="cloud-storage-heading" className="text-lg font-semibold tracking-tight text-white">
-        {meta.label}
-      </h2>
-      <p className="mt-1 text-[13px] text-white/55">{meta.description}</p>
-
-      <div className="mt-5 rounded-lg border border-white/10 bg-white/[0.02] p-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-[13px] font-medium text-white">Connection</h3>
-          <button
-            type="button"
-            onClick={onOpenSecrets}
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 px-2.5 text-[12px] font-medium text-white/75 hover:bg-white/[0.06] hover:text-white focus-visible:outline-2 focus-visible:outline-[#9f94ff] [@media(pointer:coarse)]:h-11"
-          >
-            <KeyRound className="size-3.5" aria-hidden="true" /> Open Secrets
-          </button>
-        </div>
-        <p className="mt-1 text-[12px] leading-5 text-white/45">
-          Your app reads these server-side variables.{" "}
-          {missing.length ? "Add the missing ones in Secrets." : secretNames ? "Everything needed is set." : ""}
-        </p>
-        <div className="mt-2">
-          <VariableList names={meta.env} secretNames={secretNames} error={secretsError} onRetry={onRetrySecrets} />
-        </div>
-      </div>
-
-      <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.02] p-4">
-        <h3 className="text-[13px] font-medium text-white">Ask Cognix to build it</h3>
-        <p className="mt-1 text-[12px] text-white/45">
-          Pick a starting point. It goes into the chat box so you can edit it before sending.
-        </p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {meta.examples.map((example) => (
-            <button
-              key={example}
-              type="button"
-              onClick={() => onAskAgent(example)}
-              className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1 text-left text-[12.5px] text-white/75 hover:bg-white/[0.07] hover:text-white focus-visible:outline-2 focus-visible:outline-[#9f94ff] [@media(pointer:coarse)]:min-h-11"
-            >
-              <Sparkles className="size-3.5 shrink-0" aria-hidden="true" /> {example}
-            </button>
-          ))}
-        </div>
-      </div>
     </section>
   );
 }

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { requireViewer } from "@/lib/auth0";
+import { ensureProjectStorageBucket, isBucketlineConfigured } from "@/lib/cloud/bucketline";
 import { ensureProjectNeonDatabase, isNeonApiConfigured } from "@/lib/cloud/neon";
 import { syncProjectEnv } from "@/lib/daytona";
 import { errorResponse, notFound } from "@/lib/http";
@@ -30,6 +31,7 @@ export async function GET(_request: Request, context: Context) {
         enabled: cloud?.status === "ready",
         enabledAt: cloud?.status === "ready" ? cloud.updatedAt : null,
         neonApiConfigured: isNeonApiConfigured(),
+        storageApiConfigured: isBucketlineConfigured(),
         neonProjectId: cloud?.neonProjectId ?? null,
         neonRegion: cloud?.neonRegion ?? null,
         lastError: cloud?.lastError ?? null,
@@ -86,6 +88,25 @@ export async function PUT(request: Request, context: Context) {
             "Cognix Cloud is on. Add NEON_API_KEY to your server .env so Cognix can auto-provision managed Neon PostgreSQL databases.";
         }
 
+        if (isBucketlineConfigured()) {
+          try {
+            const storageResult = await ensureProjectStorageBucket(project);
+            if (storageResult.created) {
+              provisioned.push(
+                "S3_ENDPOINT",
+                "S3_REGION",
+                "S3_BUCKET",
+                "S3_ACCESS_KEY_ID",
+                "S3_SECRET_ACCESS_KEY",
+                "S3_CDN_URL",
+              );
+            }
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : "Could not provision Cloud Storage bucket.";
+            warning = warning ? `${warning} ${detail}` : `Cognix Cloud is on, but automatic Storage provisioning failed: ${detail}`;
+          }
+        }
+
         if (project.sandboxId) await syncProjectEnv(project).catch(() => undefined);
       }
     }
@@ -95,6 +116,7 @@ export async function PUT(request: Request, context: Context) {
         enabled: cloud.status === "ready",
         enabledAt: cloud.status === "ready" ? cloud.updatedAt : null,
         neonApiConfigured: isNeonApiConfigured(),
+        storageApiConfigured: isBucketlineConfigured(),
         neonProjectId: cloud.neonProjectId,
         neonRegion: cloud.neonRegion,
         provisioned,

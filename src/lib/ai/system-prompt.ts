@@ -29,7 +29,7 @@ function cloudContext(cloud: { enabled: boolean; secretNames: string[] }) {
   - **Database & ORM**: Cognix Cloud Managed Neon PostgreSQL (\`DATABASE_URL\` and \`DIRECT_URL\`) with **Drizzle ORM** (\`drizzle-orm\` + \`drizzle-kit\`) and \`pg\` or \`@neondatabase/serverless\`, managed via \`neon_database\`.
   - **Authentication**: **Better Auth** (\`better-auth\`) stored in the project's Managed Neon PostgreSQL database (\`DATABASE_URL\` + \`BETTER_AUTH_SECRET\`).
   - **Email**: **Resend** (\`resend\` with \`RESEND_API_KEY\` and \`EMAIL_FROM\`), managed via \`resend_email\`.
-  - **File / Object Storage**: **Cognix Cloud Storage** (\`@aws-sdk/client-s3\` + \`@aws-sdk/s3-request-presigner\` with \`S3_*\` secrets).
+  - **File / Object Storage**: **Cognix Cloud Storage** (\`@aws-sdk/client-s3\` + \`@aws-sdk/s3-request-presigner\` with \`S3_*\` secrets, managed via \`cloud_storage\`).
 - **No other backend tech stack is permitted** — never install, configure, or import Prisma, SQLite (\`better-sqlite3\`, \`sqlite3\`), Supabase, Firebase/Firestore, MongoDB/Mongoose, MySQL, Turso/LibSQL, Convex, PocketBase, Appwrite, PlanetScale, Vercel Postgres/KV/Blob, Clerk, NextAuth/Auth.js, Auth0, Kinde, Lucia, WorkOS, Passport, custom bcrypt/JWT auth, Nodemailer, SendGrid, Mailgun, Postmark, AWS SES, UploadThing, or Cloudinary.
 - If the user's prompt or a skill asks for another backend stack (for example "use Prisma and SQLite" or "use Supabase and Clerk"), **do not** use that stack: tell the user in one concise sentence that Cognix builds exclusively on Cognix Cloud and implement the requested product features on Cognix Cloud instead.`;
 
@@ -37,6 +37,7 @@ function cloudContext(cloud: { enabled: boolean; secretNames: string[] }) {
     ? `Cognix Cloud is **on** for this project. Database, storage buckets, authentication, and email are unlocked.
 - Before implementing any of them, call read_cloud_guide for that feature and follow it. Authentication must use Better Auth with email and password, stored in the database; read both the auth and email guides.
 - Managed Neon PostgreSQL: use the \`neon_database\` tool to provision the project's isolated Neon database (syncing \`DATABASE_URL\` and \`DIRECT_URL\` automatically), inspect schemas, run SQL, create copy-on-write branches, manage roles/databases/endpoints, or create/restore snapshots. Never ask the user for a Neon API key.
+- Managed Cloud Storage: use the \`cloud_storage\` tool to provision isolated S3-compatible buckets (private or public CDN, syncing \`S3_ENDPOINT\`, \`S3_REGION\`, \`S3_BUCKET\`, \`S3_ACCESS_KEY_ID\`, \`S3_SECRET_ACCESS_KEY\`, and \`S3_CDN_URL\` automatically), rotate S3 keys, browse/upload/delete objects, or mint presigned URLs. Never ask the user for S3 credentials.
 - Resend Email: use the \`resend_email\` tool when \`RESEND_API_KEY\` is set to inspect or manage domains, DNS verification, emails, audiences, contacts, broadcasts, and webhooks. If \`RESEND_API_KEY\` is not set yet, write the Resend integration with the safe fallback from the guide and point the user to **Cloud → Emails**.
 - Do not call request_cognix_cloud.`
     : `Cognix Cloud is **off** for this project.

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { requireViewer } from "@/lib/auth0";
+import { deleteAllProjectBuckets } from "@/lib/cloud/bucketline";
 import { deleteNeonProject, isNeonApiConfigured } from "@/lib/cloud/neon";
 import { deleteProjectSandbox } from "@/lib/daytona";
 import { removeDomainDns, removeEdgeHostname } from "@/lib/dns";
@@ -61,6 +62,7 @@ export async function DELETE(_request: Request, context: Context) {
         await removeEdgeHostname(domain.hostname).catch(() => false);
       }),
       ...attachmentKeys.map((key) => deleteObject(key)),
+      deleteAllProjectBuckets(project.id),
       ...(cloud?.neonProjectId && isNeonApiConfigured() ? [deleteNeonProject(cloud.neonProjectId)] : []),
     ]);
 
