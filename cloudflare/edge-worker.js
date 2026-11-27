@@ -215,11 +215,13 @@ async function proxyToDaytona(request, env, incoming, target) {
   }
 
   if (isWebSocket || response.status === 101) return response;
-  // Daytona answers 502/504 when nothing listens on the production port, for example after a sandbox restart.
-  if ((response.status === 502 || response.status === 504) && ["GET", "HEAD"].includes(request.method)) {
-    await response.body?.cancel();
+  // Daytona answers 502/504 when nothing listens on the port, for example after a sandbox restart.
+  if (response.status === 502 || response.status === 504) {
     markStale(incoming.hostname);
-    return restartingPage(incoming);
+    if (["GET", "HEAD"].includes(request.method)) {
+      await response.body?.cancel();
+      return restartingPage(incoming);
+    }
   }
   return withBadge(keepRedirectOnDomain(response, upstream, incoming), target.badge, env);
 }

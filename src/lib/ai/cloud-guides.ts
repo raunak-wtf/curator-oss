@@ -33,10 +33,10 @@ Cognix manages this project's PostgreSQL database on the server. Never ask the u
   - \`create_branch\`, \`restore_branch\`, \`set_default_branch\`, \`delete_branch\`: create instant copy-on-write branches (before destructive migrations on live user tables) or point-in-time restores.
   - \`create_database\`, \`create_role\`, \`reset_role_password\`, \`create_snapshot\`, \`restore_snapshot\`, \`use_connection\`.
 
-## 2. Application Code & Migration Setup
+## 2. Application Code & Migration Setup (v0 Dual-Track Pattern)
 
 1. Install \`drizzle-orm\`, \`pg\`, \`server-only\`, \`zod\`, and dev dependencies \`drizzle-kit\` and \`@types/pg\` in a single \`npm install --no-audit --no-fund\`. Add scripts \`"db:generate": "drizzle-kit generate"\` and \`"db:push": "drizzle-kit push --force"\` to \`package.json\`.
-2. Create \`src/lib/db.ts\` (or \`lib/db.ts\` matching \`@/*\` in \`tsconfig.json\`):
+2. Create \`src/lib/db.ts\` (or \`lib/db.ts\` matching \`@/*\` in \`tsconfig.json\`) with serverless-safe pool timeouts so suspended PostgreSQL compute wakes cleanly AND interactive transactions (required by \`better-auth\`) work reliably:
    \`\`\`ts
    import "server-only";
    import { drizzle } from "drizzle-orm/node-postgres";
@@ -54,7 +54,9 @@ Cognix manages this project's PostgreSQL database on the server. Never ask the u
      new Pool({
        connectionString,
        max: 5,
-       connectionTimeoutMillis: 10_000,
+       idleTimeoutMillis: 20_000,
+       connectionTimeoutMillis: 15_000,
+       allowExitOnIdle: true,
      });
 
    pool.on("error", (err) => {
@@ -65,7 +67,9 @@ Cognix manages this project's PostgreSQL database on the server. Never ask the u
 
    export const db = drizzle(pool, { schema });
    \`\`\`
+   *(Never use \`drizzle-orm/neon-http\` when \`better-auth\` is enabled, because \`better-auth\` requires interactive SQL transactions that \`neon-http\` does not support.)*
 3. Define tables in \`src/lib/schema.ts\` with \`pgTable\`.
+   - **Critical rule for \`schema.ts\`**: Keep \`schema.ts\` strictly pure Drizzle table definitions — **never** add \`import "server-only"\` or \`@/\` path aliases inside \`schema.ts\`, because \`drizzle-kit\` loads \`schema.ts\` directly in Node outside Next.js!
    - **Important**: If the app also uses authentication, include the 4 authentication tables (\`user\`, \`session\`, \`account\`, \`verification\`) in this exact same \`schema.ts\` file (see the \`auth\` guide) so \`drizzle-kit push --force\` manages all tables together without dropping auth tables!
    - Use \`uuid("id").defaultRandom().primaryKey()\` (or \`text("id")\`), \`timestamp("created_at", { withTimezone: true }).defaultNow().notNull()\`, foreign keys with \`onDelete: "cascade"\`, and \`index(...)\` on \`userId\`, status, token, and sort columns.
 4. Create \`drizzle.config.ts\` at the project root — **always load \`.env.local\` explicitly** because \`drizzle-kit\` only loads \`.env\` by default while Cognix writes secrets to \`.env.local\`:
@@ -84,9 +88,10 @@ Cognix manages this project's PostgreSQL database on the server. Never ask the u
      },
    });
    \`\`\`
-5. Every time you create or update \`schema.ts\`, generate SQL migration tracking files AND push the schema non-interactively:
+5. Every time you create or update \`schema.ts\`, push the schema non-interactively:
    \`npx drizzle-kit generate && npx drizzle-kit push --force\`
-   Then call \`neon_database({ action: "inspect_schema" })\` to confirm every table and column is live in PostgreSQL.
+   - **Direct SQL fallback & seeding**: \`neon_database({ action: "run_sql", sql: "..." })\` supports multi-statement SQL scripts (\`CREATE TABLE IF NOT EXISTS ...\`, \`ALTER TABLE ...\`, \`CREATE INDEX IF NOT EXISTS ...\`, \`INSERT INTO ...\`). If \`drizzle-kit push\` ever hits an interactive rename/enum prompt or CLI issue, immediately apply idempotent DDL directly via \`neon_database({ action: "run_sql" })\` so tables are guaranteed live!
+   - Always call \`neon_database({ action: "inspect_schema" })\` afterward to confirm every table and column exists in PostgreSQL.
 
 ## 3. Query & Mutation Rules
 
@@ -169,6 +174,11 @@ Cognix manages this project's storage buckets on the server. Never ask the user 
      return { key: input.key, size: input.body.byteLength };
    }
 
+   export function getAppFileUrl(key: string) {
+     const cleanKey = key.replace(/^\\/+/, "");
+     return \`/api/storage/file/\${cleanKey.split("/").map(encodeURIComponent).join("/")}\`;
+   }
+
    export async function resolveObjectUrl(key: string, expiresIn = 3600) {
      const cleanKey = key.replace(/^\\/+/, "");
      if (process.env.S3_ACCESS_MODE === "public" && process.env.S3_CDN_URL) {
@@ -180,16 +190,25 @@ Cognix manages this project's storage buckets on the server. Never ask the user 
      return getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: cleanKey }), { expiresIn });
    }
 
+   export async function getStoredObject(key: string) {
+     if (!s3 || !bucket) {
+       throw new Error("Cloud Storage is not configured.");
+     }
+     return s3.send(new GetObjectCommand({ Bucket: bucket, Key: key.replace(/^\\/+/, "") }));
+   }
+
    export async function deleteStoredObject(key: string) {
      if (!s3 || !bucket || !key) return;
      await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key.replace(/^\\/+/, "") }));
    }
    \`\`\`
-3. Create \`src/app/api/storage/upload/route.ts\` (verifying \`auth.api.getSession\` when auth is used, checking \`file instanceof File\`, MIME type, and \`file.size <= MAX_UPLOAD_BYTES\`, calling \`uploadObject\`, persisting \`fileKey\` + metadata in PostgreSQL, and returning \`{ key, url: await resolveObjectUrl(key), size: file.size, contentType: file.type, name: file.name }\`).
+3. Create **two** same-origin Storage Route Handlers so uploads AND inline \`<img>\` / PDF previews work reliably across private buckets, public buckets, preview iframes, and public share pages without expiring URLs or CORS errors:
+   - \`src/app/api/storage/upload/route.ts\`: verifies \`auth.api.getSession\` (when auth is used), checks \`file instanceof File\`, MIME type, and \`file.size <= MAX_UPLOAD_BYTES\`, calls \`uploadObject\`, and returns \`{ key, url: getAppFileUrl(key), size: file.size, contentType: file.type, name: file.name }\`.
+   - \`src/app/api/storage/file/[...key]/route.ts\`: \`GET\` handler that reconstructs \`const objectKey = (await params).key.map(decodeURIComponent).join("/")\`, calls \`getStoredObject(objectKey)\` (after any required ownership or public-share check), and returns \`new Response(obj.Body?.transformToWebStream() ?? null, { headers: { "Content-Type": obj.ContentType || "application/octet-stream", "Cache-Control": "private, max-age=3600" } })\`.
 
 ## 4. Storage Rules
 
-- Store the durable object \`key\` (never an expiring presigned URL) in PostgreSQL alongside the record that owns it, and resolve \`url\` via \`resolveObjectUrl(key)\` when loading records on the server (including on public share routes).
+- Store the durable object \`key\` (never an expiring presigned URL) in PostgreSQL alongside the record that owns it, and render \`getAppFileUrl(row.fileKey)\` (or \`resolveObjectUrl(row.fileKey)\`) in UI components and public share views.
 - When deleting a database record that owns a stored file, verify ownership first and delete both the PostgreSQL row and the stored object (\`deleteStoredObject(row.fileKey)\`).
 - Show upload progress/pending state, file size & type hints, inline image thumbnails for \`image/*\`, download links, and actionable error messages.
 ${SHARED_RULES}`;
@@ -357,6 +376,7 @@ const isHostedHttps =
   process.env.CI === "1";
 
 export const auth = betterAuth({
+  baseURL: process.env.BETTER_AUTH_URL || "http://localhost:3000",
   database: drizzleAdapter(db, {
     provider: "pg",
     schema,
@@ -365,10 +385,13 @@ export const auth = betterAuth({
   trustedOrigins: (request) => {
     const origins = new Set<string>([
       "http://localhost:3000",
+      "http://127.0.0.1:3000",
       "https://*.daytona.work",
+      "https://*.daytona.works",
       "https://*.curatorsite.in",
       "https://*.curator.codes",
     ]);
+    if (process.env.BETTER_AUTH_URL) origins.add(process.env.BETTER_AUTH_URL);
     const origin = request?.headers.get("origin");
     const host = request?.headers.get("x-forwarded-host") ?? request?.headers.get("host");
     const proto = request?.headers.get("x-forwarded-proto") ?? "https";

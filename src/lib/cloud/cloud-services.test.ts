@@ -46,6 +46,7 @@ import {
   deleteNeonBranch,
   ensureProjectNeonDatabase,
   scrubConnectionCredentials,
+  splitSqlStatements,
 } from "@/lib/cloud/neon";
 import { scrubResendKey, validateResendApiKeyFormat } from "@/lib/cloud/resend";
 
@@ -229,5 +230,32 @@ describe("Cognix Cloud services & AI tools", () => {
     );
     expect(sent.summary).toContain("em_98765");
     expect(sent.output).not.toContain("re_validtestkey12345");
+  });
+
+  it("splits multi-statement SQL scripts safely across quotes, comments, and $$ blocks", () => {
+    const sqlScript = `
+      -- Initialize schema
+      CREATE TABLE IF NOT EXISTS "user" (
+        id text PRIMARY KEY,
+        bio text DEFAULT 'hello; world'
+      );
+      /* Multi-line
+         comment with ; inside */
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'project_status') THEN
+          CREATE TYPE project_status AS ENUM ('active', 'approved');
+        END IF;
+      END
+      $$;
+      INSERT INTO "user" (id, bio) VALUES ('u1', 'studio;owner');
+    `;
+
+    const statements = splitSqlStatements(sqlScript);
+    expect(statements).toHaveLength(3);
+    expect(statements[0]).toContain('CREATE TABLE IF NOT EXISTS "user"');
+    expect(statements[0]).toContain("'hello; world'");
+    expect(statements[1]).toContain("CREATE TYPE project_status");
+    expect(statements[2]).toContain("INSERT INTO \"user\"");
   });
 });

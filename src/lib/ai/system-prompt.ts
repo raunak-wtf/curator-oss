@@ -6,6 +6,7 @@ import { frontendTasteContext } from "./frontend-taste";
 export type PromptCloudState = {
   enabled: boolean;
   secretNames: string[];
+  canAutoEnableCloud?: boolean;
   liveDatabaseSummary?: string;
   liveStorageSummary?: string;
 };
@@ -61,7 +62,11 @@ function cloudContext(cloud: PromptCloudState) {
 - Keep every turn fast and reliable: write **at most 3–4 files per turn** rather than trying to emit an entire multi-file codebase in one response.
 - When wiring Cognix Cloud into an existing app, inspect its current data, auth, upload, and email flows and migrate any mock, in-memory, browser-only, or legacy non-Cognix-Cloud code (such as Prisma or SQLite) cleanly onto the Cognix Cloud stack, removing unused legacy packages.
 - Do not call request_cognix_cloud.`
-    : `Cognix Cloud is **off** for this project.
+    : cloud.canAutoEnableCloud
+      ? `Cognix Cloud is **off** right now, and **instant server auto-provisioning is active**.
+- Whenever the app needs a persistent database, server-side data storage, file/object uploads, user accounts/authentication, or transactional email, call \`request_cognix_cloud\` first with a concise one-sentence \`reason\` and **all** required \`features\` together (for example \`["database", "auth", "storage"]\`). Cognix provisions the database, storage bucket, and auth secrets immediately in the same run and returns the implementation guides so you can build the complete app without pausing.
+- Never install non-Cognix-Cloud backend packages or build a fake localStorage/in-memory/SQLite substitute.`
+      : `Cognix Cloud is **off** for this project.
 - **Mandatory user consent**: Whenever the app needs a persistent database, server-side data storage, file/object uploads, user accounts/authentication, or transactional/marketing email, you **must** call \`request_cognix_cloud\` first on your very first turn with a clear one-sentence \`reason\` and **all** required \`features\` together (for example \`["database", "auth", "storage", "email"]\`), then stop calling mutating tools in that turn.
 - Do not scaffold throwaway mock/in-memory code before calling \`request_cognix_cloud\`, and never install backend/cloud packages, write database/auth/storage/email code, or substitute a local SQLite/JSON-file/in-memory/localStorage fake backend to avoid requesting Cognix Cloud.
 - Only request Cognix Cloud when the prompt genuinely needs one of these backend features (pure client-side calculators, games, or static landing pages do not need Cognix Cloud). If the user explicitly declines Cognix Cloud ("Not now"), build the frontend-only portion without backend persistence/auth/storage/email and state briefly what was left out.

@@ -700,6 +700,134 @@ export function isNeonHttpCompatibleUrl(databaseUrl: string | undefined) {
   }
 }
 
+/**
+ * Splits a SQL script into individual top-level statements while respecting single quotes,
+ * double-quoted identifiers, PostgreSQL dollar-quoted blocks (`$$...$$` / `$tag$...$tag$`),
+ * `--` line comments, and `/* ... *\/` block comments.
+ */
+export function splitSqlStatements(sqlText: string): string[] {
+  const statements: string[] = [];
+  let current = "";
+  let i = 0;
+  const len = sqlText.length;
+
+  while (i < len) {
+    const ch = sqlText[i];
+    const next = sqlText[i + 1];
+
+    // Single-line comment
+    if (ch === "-" && next === "-") {
+      const start = i;
+      i += 2;
+      while (i < len && sqlText[i] !== "\n") i += 1;
+      current += sqlText.slice(start, i);
+      continue;
+    }
+
+    // Block comment (supports nested PostgreSQL /* ... */ comments)
+    if (ch === "/" && next === "*") {
+      const start = i;
+      let depth = 1;
+      i += 2;
+      while (i < len && depth > 0) {
+        if (sqlText[i] === "/" && sqlText[i + 1] === "*") {
+          depth += 1;
+          i += 2;
+        } else if (sqlText[i] === "*" && sqlText[i + 1] === "/") {
+          depth -= 1;
+          i += 2;
+        } else {
+          i += 1;
+        }
+      }
+      current += sqlText.slice(start, i);
+      continue;
+    }
+
+    // Single-quoted string literal
+    if (ch === "'") {
+      const start = i;
+      i += 1;
+      while (i < len) {
+        if (sqlText[i] === "'" && sqlText[i + 1] === "'") {
+          i += 2;
+          continue;
+        }
+        if (sqlText[i] === "'") {
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      current += sqlText.slice(start, i);
+      continue;
+    }
+
+    // Double-quoted identifier
+    if (ch === '"') {
+      const start = i;
+      i += 1;
+      while (i < len) {
+        if (sqlText[i] === '"' && sqlText[i + 1] === '"') {
+          i += 2;
+          continue;
+        }
+        if (sqlText[i] === '"') {
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      current += sqlText.slice(start, i);
+      continue;
+    }
+
+    // Dollar-quoted PostgreSQL string (`$$` or `$tag$`)
+    if (ch === "$") {
+      const tagMatch = sqlText.slice(i).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/);
+      if (tagMatch) {
+        const tag = tagMatch[0];
+        const endIdx = sqlText.indexOf(tag, i + tag.length);
+        if (endIdx !== -1) {
+          current += sqlText.slice(i, endIdx + tag.length);
+          i = endIdx + tag.length;
+          continue;
+        }
+      }
+    }
+
+    // Top-level statement terminator
+    if (ch === ";") {
+      const cleaned = current.trim();
+      if (hasExecutableSqlContent(cleaned)) {
+        statements.push(cleaned);
+      }
+      current = "";
+      i += 1;
+      continue;
+    }
+
+    current += ch;
+    i += 1;
+  }
+
+  const remainder = current.trim();
+  if (hasExecutableSqlContent(remainder)) {
+    statements.push(remainder);
+  }
+
+  return statements;
+}
+
+function hasExecutableSqlContent(fragment: string): boolean {
+  if (!fragment) return false;
+  const withoutComments = fragment
+    .replace(/--[^\n]*/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .trim();
+  return withoutComments.length > 0;
+}
+
 export async function executeProjectSql(
   connectionUrl: string,
   queryText: string,
@@ -714,24 +842,43 @@ export async function executeProjectSql(
     );
   }
 
+  type RawQueryResult = {
+    rows?: Record<string, unknown>[];
+    rowCount?: number | null;
+    fields?: { name: string }[];
+    command?: string;
+  };
+
   try {
     const sql = neon(connectionUrl, {
       fullResults: true,
       fetchOptions: { cache: "no-store", signal: AbortSignal.timeout(SQL_TIMEOUT_MS) },
     });
-    const raw = (await sql.query(trimmed, params)) as {
-      rows?: Record<string, unknown>[];
-      rowCount?: number | null;
-      fields?: { name: string }[];
-      command?: string;
-    };
-    const allRows = Array.isArray(raw.rows) ? raw.rows : [];
+
+    const statements = params.length === 0 ? splitSqlStatements(trimmed) : [trimmed];
+    if (statements.length === 0) {
+      throw new NeonApiError("Enter a SQL statement to execute.", 400);
+    }
+
+    let lastRaw: RawQueryResult = {};
+    let totalRowCount = 0;
+    const executedCommands: string[] = [];
+
+    for (const stmt of statements) {
+      lastRaw = (await sql.query(stmt, params)) as RawQueryResult;
+      const stmtRows = Array.isArray(lastRaw.rows) ? lastRaw.rows : [];
+      totalRowCount += typeof lastRaw.rowCount === "number" ? lastRaw.rowCount : stmtRows.length;
+      if (lastRaw.command) executedCommands.push(lastRaw.command);
+    }
+
+    const allRows = Array.isArray(lastRaw.rows) ? lastRaw.rows : [];
     const truncated = allRows.length > MAX_SQL_ROWS;
     const rows = truncated ? allRows.slice(0, MAX_SQL_ROWS) : allRows;
-    const columns = raw.fields?.map((field) => field.name) ?? (rows[0] ? Object.keys(rows[0]) : []);
+    const columns = lastRaw.fields?.map((field) => field.name) ?? (rows[0] ? Object.keys(rows[0]) : []);
     return {
-      command: raw.command ?? null,
-      rowCount: typeof raw.rowCount === "number" ? raw.rowCount : allRows.length,
+      command: statements.length > 1 ? executedCommands.join(", ") || lastRaw.command || null : (lastRaw.command ?? null),
+      statementsExecuted: statements.length,
+      rowCount: statements.length > 1 ? totalRowCount : (typeof lastRaw.rowCount === "number" ? lastRaw.rowCount : allRows.length),
       columns,
       rows,
       truncated,

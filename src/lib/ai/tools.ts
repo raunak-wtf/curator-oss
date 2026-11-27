@@ -3,7 +3,7 @@ import { isIP } from "node:net";
 import path from "node:path";
 import type { Sandbox } from "@daytona/sdk";
 import { z } from "zod";
-import { devServerLogPath, getPreviewHealth, getPreviewUrl, getProjectFsRoot, getProjectRoot, readSandboxRuntimeLogs } from "../daytona";
+import { devServerLogPath, getPreviewHealth, getPreviewUrl, getProjectFsRoot, getProjectRoot, readSandboxRuntimeLogs, runtimeLimitsPath } from "../daytona";
 import { extractServerErrorsFromLog } from "../preview-console";
 import { appendProjectConsoleLogs, deleteProjectFile, listProjectConsoleLogs, upsertProjectFile, updateProject } from "../store";
 import type { FileChangeSnapshot, Project } from "../types";
@@ -736,6 +736,12 @@ export async function executeAgentTool(
       assertBuildModeCommandAllowed(input.command, cloudEnabled);
     }
     const directory = projectRelativePath(root, input.directory);
+    const limitsFile = runtimeLimitsPath(root);
+    const limitsScript = `const os=require("node:os"),c=os.cpus.bind(os);os.cpus=()=>c().slice(0,2);if(os.availableParallelism)os.availableParallelism=()=>2;`;
+    await sandbox.process
+      .executeCommand(`if [ ! -f ${shellQuote(limitsFile)} ]; then printf '%s\\n' ${shellQuote(limitsScript)} > ${shellQuote(limitsFile)}; fi`, root, undefined, 10)
+      .catch(() => undefined);
+    const boundedNodeOptions = `--max-old-space-size=1024 --require=${limitsFile}`;
     if (input.background) {
       const sessionId = `cognix-${project.id.slice(0, 12)}`;
       try {
@@ -748,7 +754,7 @@ export async function executeAgentTool(
       const response = await sandbox.process.executeSessionCommand(
         sessionId,
         {
-          command: `cd ${shellQuote(remotePath(root, directory))} && COGNIX_HOSTED_PREVIEW=1 CI=1 ${input.command} 2>&1 | tee -a ${quotedLog}`,
+          command: `cd ${shellQuote(remotePath(root, directory))} && NODE_OPTIONS=${shellQuote(boundedNodeOptions)} COGNIX_HOSTED_PREVIEW=1 CI=1 NEXT_TELEMETRY_DISABLED=1 ${input.command} 2>&1 | tee -a ${quotedLog}`,
           runAsync: true,
           suppressInputEcho: true,
         },
@@ -762,7 +768,7 @@ export async function executeAgentTool(
     const response = await sandbox.process.executeCommand(
       input.command,
       remotePath(root, directory),
-      undefined,
+      { CI: "1", NEXT_TELEMETRY_DISABLED: "1", NODE_OPTIONS: boundedNodeOptions },
       input.timeoutSeconds,
     );
     return {

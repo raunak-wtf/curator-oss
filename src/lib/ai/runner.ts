@@ -12,6 +12,7 @@ import {
   getProjectFsRoot,
   getProjectRoot,
   readSandboxRuntimeLogs,
+  restartDevelopmentPreview,
   syncProjectEnv,
 } from "../daytona";
 import { extractServerErrorsFromLog, selectActionableConsoleErrors } from "../preview-console";
@@ -54,6 +55,7 @@ import { ensureVisualEditBridge } from "../visual-edit-bridge";
 import { isProductionBuildCommand, resolveAgentMaxTurns, shouldRefreshAgentContext } from "./agent-policy";
 import type { CloudFeature } from "../cloud-features";
 import { CLOUD_GUIDES } from "./cloud-guides";
+import { inferPromptCloudFeatures } from "./cloud-intent";
 import { streamModelTurnWithRetry } from "./model-stream";
 import { buildPlanSystemPrompt, buildSystemPrompt, type PromptCloudState } from "./system-prompt";
 import { buildMultimodalUserContent, hasNativeFileParts } from "./multimodal";
@@ -250,7 +252,28 @@ export async function runAgent(input: {
     isSecretsEncryptionConfigured &&
     (isNeonApiConfigured() || isBucketlineConfigured());
 
-  const cloudState: PromptCloudState = { enabled: cloud?.status === "ready", secretNames };
+  const cloudState: PromptCloudState = {
+    enabled: cloud?.status === "ready",
+    secretNames,
+    canAutoEnableCloud,
+  };
+  // v0-style Turn-0 readiness: if automatic Cloud provisioning is active and the prompt clearly needs
+  // Database, Auth, Storage, or Email, enable and provision Cognix Cloud *before* Turn 0 so the agent
+  // builds the entire full-stack app in one uninterrupted pass without wasting a turn on `request_cognix_cloud`.
+  if (canAutoEnableCloud && !cloudState.enabled) {
+    const inferredFeatures = inferPromptCloudFeatures(prompt);
+    if (inferredFeatures.length > 0) {
+      await emit({ type: "status", label: "Provisioning Cognix Cloud" });
+      await updateProjectCloud(project.id, {
+        status: "ready",
+        storageEnabled: true,
+        authEnabled: true,
+        lastError: null,
+      }).catch(() => undefined);
+      cloudState.enabled = true;
+      await emit({ type: "cloud_status", enabled: true });
+    }
+  }
   if (!security && cloudState.enabled && isSecretsEncryptionConfigured) {
     let autoProvisioned = false;
     if (!cloudState.secretNames.includes("BETTER_AUTH_SECRET")) {
@@ -445,6 +468,7 @@ export async function runAgent(input: {
 
   let previewReady = false;
   let productionBuildPassed = false;
+  let devServerFreshSinceLastBuild = false;
   let runtimeVerifiedClean = false;
   let completionNudges = 0;
   const maxAgentTurns = resolveAgentMaxTurns();
@@ -543,8 +567,84 @@ export async function runAgent(input: {
     await terminal.end(pushEntry, { exitCode: pushRes.exitCode, output: pushRes.result, failed: pushRes.exitCode !== 0 });
 
     if (pushRes.exitCode !== 0) {
-      return `\`npx drizzle-kit push --force\` failed while syncing tables (${missingTables.join(", ")}):\n${pushRes.result.slice(-3000)}\nFix the schema or \`drizzle.config.ts\` (ensure \`if (existsSync(".env.local")) process.loadEnvFile(".env.local");\` is present) and push the schema again.`;
+      return `\`npx drizzle-kit push --force\` failed while syncing tables (${missingTables.join(", ")}):\n${pushRes.result.slice(-3000)}\nFix the schema or \`drizzle.config.ts\` (ensure \`if (existsSync(".env.local")) process.loadEnvFile(".env.local");\` is present and \`schema.ts\` has no \`import "server-only"\`), or execute idempotent \`CREATE TABLE IF NOT EXISTS\` SQL via \`neon_database({ action: "run_sql" })\` and verify with \`neon_database({ action: "inspect_schema" })\`.`;
     }
+    return null;
+  }
+
+  /**
+   * Ensures a fresh dev server is running against the post-build `.next` & `.env.local`, then probes
+   * `/` plus critical auth/app routes (`/api/auth/get-session`, `/sign-in`, `/sign-up` when present)
+   * and checks dev-server logs so broken API/SSR routes self-heal inside the same single prompt.
+   */
+  async function verifyFullStackRuntime(): Promise<string | null> {
+    if (changedPaths.size > 0 && !devServerFreshSinceLastBuild) {
+      await emit({ type: "status", label: "Restarting preview server cleanly" });
+      await restartDevelopmentPreview(sandbox, project, projectRoot).catch(() => undefined);
+      devServerFreshSinceLastBuild = true;
+      previewReady = true;
+    }
+
+    const discoverCmd = [
+      "routes='/'",
+      "if [ -f src/app/api/auth/\\[...all\\]/route.ts ] || [ -f app/api/auth/\\[...all\\]/route.ts ]; then routes=\"$routes /api/auth/get-session\"; fi",
+      "if [ -f src/app/sign-in/page.tsx ] || [ -f app/sign-in/page.tsx ] || [ -f 'src/app/(auth)/sign-in/page.tsx' ] || [ -f 'app/(auth)/sign-in/page.tsx' ]; then routes=\"$routes /sign-in\"; fi",
+      "if [ -f src/app/sign-up/page.tsx ] || [ -f app/sign-up/page.tsx ] || [ -f 'src/app/(auth)/sign-up/page.tsx' ] || [ -f 'app/(auth)/sign-up/page.tsx' ]; then routes=\"$routes /sign-up\"; fi",
+      "printf '%s' \"$routes\"",
+    ].join("; ");
+
+    const discovered = await sandbox.process
+      .executeCommand(discoverCmd, projectRoot, undefined, 10)
+      .catch(() => ({ exitCode: 0, result: "/" }));
+    const probeRoutes = (discovered.result || "/")
+      .trim()
+      .split(/\s+/)
+      .filter((r) => r.startsWith("/"));
+
+    const failedRoutes: string[] = [];
+    for (const route of probeRoutes) {
+      const probeRes = await sandbox.process
+        .executeCommand(
+          `code=$(curl -sS -o /tmp/.cognix-probe-body -w '%{http_code}' --max-time 10 'http://127.0.0.1:3000${route}' || printf '000'); printf 'STATUS=%s\\n' "$code"; head -c 600 /tmp/.cognix-probe-body 2>/dev/null || true`,
+          projectRoot,
+          undefined,
+          15,
+        )
+        .catch(() => ({ exitCode: 1, result: "STATUS=000\nProbe timed out" }));
+
+      const statusMatch = probeRes.result.match(/^STATUS=(\d{3})/m);
+      const status = Number(statusMatch?.[1] ?? "000");
+      const bodySnippet = probeRes.result.replace(/^STATUS=\d{3}\r?\n?/, "").trim().slice(0, 400);
+      if (status === 0 || status >= 500) {
+        failedRoutes.push(
+          `- \`GET ${route}\` returned HTTP ${status === 0 ? "000 (server unreachable / crashed)" : status}${bodySnippet ? `\n  Response: ${bodySnippet}` : ""}`,
+        );
+      }
+    }
+
+    const runtimeSnapshot = await readSandboxRuntimeLogs(project, { maxLines: 70 });
+    const recentServerTail = runtimeSnapshot.serverLogs.split("\n").slice(-55).join("\n");
+    const detectedRuntimeErrors = extractServerErrorsFromLog(recentServerTail);
+
+    if (failedRoutes.length > 0 || detectedRuntimeErrors.length > 0) {
+      const details: string[] = [];
+      if (failedRoutes.length > 0) {
+        details.push(`Failing live routes:\n${failedRoutes.join("\n")}`);
+      }
+      if (detectedRuntimeErrors.length > 0) {
+        details.push(
+          `Server runtime errors:\n${detectedRuntimeErrors
+            .slice(-3)
+            .map((err) => `- ${err.message}${err.stack ? `\n${err.stack.slice(0, 900)}` : ""}`)
+            .join("\n\n")}`,
+        );
+      } else if (recentServerTail.trim()) {
+        details.push(`Recent server output:\n\`\`\`\n${recentServerTail.slice(-1500)}\n\`\`\``);
+      }
+
+      return `The production build passed, and live smoke verification detected runtime issues:\n\n${details.join("\n\n")}\n\nDiagnose and fix the root cause (check database connection/schema, Better Auth adapter/secrets, or SSR code), run \`npm run build\`, restart/verify the dev server on \`0.0.0.0:3000\`, confirm with \`read_preview_console\`, and call \`get_preview_url\`.`;
+    }
+
     return null;
   }
 
@@ -662,25 +762,17 @@ export async function runAgent(input: {
           }
         }
 
-        // Self-heal live preview runtime exceptions caught in dev server logs
-        if (previewReady && !runtimeVerifiedClean && completionNudges < 2) {
-          await sandbox.process
-            .executeCommand("curl -sS -o /dev/null --max-time 8 http://127.0.0.1:3000/ || true", projectRoot, undefined, 10)
-            .catch(() => undefined);
-          const runtimeSnapshot = await readSandboxRuntimeLogs(project, { maxLines: 60 });
-          const recentServerTail = runtimeSnapshot.serverLogs.split("\n").slice(-50).join("\n");
-          const detectedRuntimeErrors = extractServerErrorsFromLog(recentServerTail);
-          if (detectedRuntimeErrors.length > 0) {
+        // Self-heal live preview routes & runtime exceptions caught in dev server logs
+        if (previewReady && !runtimeVerifiedClean && completionNudges < 3) {
+          const runtimeIssue = await verifyFullStackRuntime();
+          if (runtimeIssue) {
             completionNudges += 1;
             previewReady = false;
             productionBuildPassed = false;
-            const formatted = detectedRuntimeErrors
-              .slice(-3)
-              .map((err) => `- ${err.message}${err.stack ? `\n${err.stack.slice(0, 900)}` : ""}`)
-              .join("\n\n");
+            devServerFreshSinceLastBuild = false;
             messages.push({
               role: "user",
-              content: `The production build passed, but the live development server logged runtime errors when rendering:\n\n${formatted}\n\nDiagnose and fix these runtime errors, rerun \`npm run build\`, verify with \`read_preview_console\`, and call \`get_preview_url\`.`,
+              content: runtimeIssue,
             });
             continue;
           }
@@ -1016,18 +1108,26 @@ export async function runAgent(input: {
         }
         if (["write_file", "edit_file", "move_file", "delete_file"].includes(call.function.name)) {
           productionBuildPassed = false;
+          devServerFreshSinceLastBuild = false;
         }
         if (call.function.name === "run_command") {
           const command = typeof toolInput === "object" && toolInput && "command" in toolInput
             ? String(toolInput.command)
             : "";
           if (isProductionBuildCommand(command)) {
+            devServerFreshSinceLastBuild = false;
             try {
               const commandResult = JSON.parse(result.output) as { exitCode?: number };
               productionBuildPassed = commandResult.exitCode === 0;
             } catch {
               productionBuildPassed = false;
             }
+          } else if (
+            commandInput?.background === true &&
+            productionBuildPassed &&
+            /\b(?:next\s+dev|npm\s+run\s+dev|pnpm\s+(?:run\s+)?dev|yarn\s+dev|bun\s+(?:run\s+)?dev)\b/i.test(command)
+          ) {
+            devServerFreshSinceLastBuild = true;
           }
         }
         toolOutput = result.output;
@@ -1171,9 +1271,14 @@ export async function runAgent(input: {
   await ensureVisualEditBridge(sandbox, projectRoot, projectFsRoot).catch(() => null);
   if (cloudState.secretNames.length > 0) {
     await syncProjectEnv(project).catch(() => undefined);
+    devServerFreshSinceLastBuild = true;
   }
   if (cloudState.enabled) {
     await verifyCloudDatabaseMigrations().catch(() => null);
+  }
+  if (changedPaths.size > 0 && !devServerFreshSinceLastBuild) {
+    await restartDevelopmentPreview(sandbox, project, projectRoot).catch(() => undefined);
+    devServerFreshSinceLastBuild = true;
   }
 
   let health = await getPreviewHealth(sandbox, 3000);

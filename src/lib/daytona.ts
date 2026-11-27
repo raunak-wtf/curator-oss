@@ -115,15 +115,24 @@ export function devServerLogPath(root: string) {
   return path.posix.join(path.posix.dirname(root), ".cognix-dev-server.log");
 }
 
-/** Builds a bounded, persistent `npm run dev` command that streams output to both session stdout and `.cognix-dev-server.log`. */
+/** Sandbox worker-cap preload stored outside the project root so Next.js/Turbopack never OOMs on host CPU counts. */
+export function runtimeLimitsPath(root: string) {
+  return path.posix.join(path.posix.dirname(root), ".cognix-runtime-limits.cjs");
+}
+
+/** Builds a bounded, persistent `npm run dev` command that caps worker parallelism/heap and streams output to `.cognix-dev-server.log`. */
 export function buildDevServerCommand(root: string, port = 3000) {
   const logFile = devServerLogPath(root);
+  const limitsFile = runtimeLimitsPath(root);
   const quotedLog = shellQuote(logFile);
   const quotedTmp = shellQuote(`${logFile}.tmp`);
+  const quotedLimits = shellQuote(limitsFile);
+  const limitsScript = `const os=require("node:os"),c=os.cpus.bind(os);os.cpus=()=>c().slice(0,2);if(os.availableParallelism)os.availableParallelism=()=>2;`;
   return [
     `cd ${shellQuote(root)}`,
+    `printf '%s\\n' ${shellQuote(limitsScript)} > ${quotedLimits}`,
     `if [ -f ${quotedLog} ] && [ "$(wc -c < ${quotedLog} 2>/dev/null || echo 0)" -gt 524288 ]; then tail -c 200000 ${quotedLog} > ${quotedTmp} && mv ${quotedTmp} ${quotedLog}; fi`,
-    `COGNIX_HOSTED_PREVIEW=1 CI=1 npm run dev -- --hostname 0.0.0.0 --port ${port} 2>&1 | tee -a ${quotedLog}`,
+    `NODE_OPTIONS="--max-old-space-size=1024 --require=${limitsFile}" COGNIX_HOSTED_PREVIEW=1 CI=1 NEXT_TELEMETRY_DISABLED=1 npm run dev -- --hostname 0.0.0.0 --port ${port} 2>&1 | tee -a ${quotedLog}`,
   ].join(" && ");
 }
 
@@ -182,8 +191,15 @@ async function writeProjectEnvFiles(sandbox: Sandbox, project: Project, root: st
   const { renderEnvFile } = await import("./env-files");
 
   const secrets = await getDecryptedSecrets(project.id);
-  const secretKeys = Object.keys(secrets);
-  const envContent = renderEnvFile(secrets);
+  const effectiveSecrets = { ...secrets };
+  if (project.mode !== "security" && effectiveSecrets.BETTER_AUTH_SECRET && !effectiveSecrets.BETTER_AUTH_URL) {
+    const previewOrigin = directPreviewUrl(project.id);
+    if (previewOrigin) {
+      effectiveSecrets.BETTER_AUTH_URL = previewOrigin;
+    }
+  }
+  const secretKeys = Object.keys(effectiveSecrets);
+  const envContent = renderEnvFile(effectiveSecrets);
 
   if (project.mode === "security") {
     // Security mode works on the user's own repository: keep secrets outside it, so they never show up as a change
@@ -911,6 +927,12 @@ export async function copyProjectSandbox(source: Project, target: Project) {
   return { project, files: snapshot.files };
 }
 
+export async function restartDevelopmentPreview(sandbox: Sandbox, project: Project, root: string) {
+  await pauseDevelopmentPreview(sandbox, project, root);
+  forgetPreviewProxyTarget(project.id);
+  await resumeDevelopmentPreview(sandbox, project, root);
+}
+
 export async function syncProjectEnv(project: Project) {
   const sandbox = await getSandbox(project);
   if (!sandbox) return;
@@ -920,28 +942,23 @@ export async function syncProjectEnv(project: Project) {
 
   if (project.mode === "security") return;
 
-  // Restart development session if one is currently running so Next.js picks up new `.env.local` values immediately.
-  const sessionId = `cognix-preview-${project.id.slice(0, 12)}`;
+  // Restart any active development session (`cognix-*` or `cognix-preview-*`) so Next.js reloads `.env.local` immediately.
   let hasActiveCommand = false;
-  try {
-    const session = await sandbox.process.getSession(sessionId);
-    hasActiveCommand = session.commands?.some((command) => command.exitCode == null) ?? false;
-  } catch {
-    // Session doesn't exist
+  for (const sessionId of developmentSessionIds(project)) {
+    try {
+      const session = await sandbox.process.getSession(sessionId);
+      if (session.commands?.some((command) => command.exitCode == null)) {
+        hasActiveCommand = true;
+        break;
+      }
+    } catch {
+      // Session doesn't exist
+    }
   }
 
-  if (hasActiveCommand) {
-    const health = await getPreviewHealth(sandbox, 3000);
-    if (health.reachable) {
-      await sandbox.process.executeCommand(
-        "if command -v fuser >/dev/null 2>&1; then fuser -k 3000/tcp >/dev/null 2>&1 || true; fi",
-        root,
-        undefined,
-        20,
-      );
-    }
-    forgetPreviewProxyTarget(project.id);
-    await resumeDevelopmentPreview(sandbox, project, root).catch(() => undefined);
+  const health = await getPreviewHealth(sandbox, 3000);
+  if (hasActiveCommand || health.reachable) {
+    await restartDevelopmentPreview(sandbox, project, root).catch(() => undefined);
   }
 }
 

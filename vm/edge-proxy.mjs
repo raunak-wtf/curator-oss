@@ -343,15 +343,30 @@ function forwardHttpRequest(req, res, upstreamBase, extraHeaders, options) {
     },
     (proxyRes) => {
       const status = proxyRes.statusCode || 502;
-      if (
-        options.onBadGatewayRetry &&
-        (status === 502 || status === 504) &&
-        (req.method === "GET" || req.method === "HEAD")
-      ) {
-        proxyRes.resume();
+      if (options.onBadGatewayRetry && (status === 502 || status === 504)) {
         markStale(options.visitorHost);
-        writeRestartingPage(res, req.url, options.isPreview);
-        return;
+        if (req.method === "GET" || req.method === "HEAD") {
+          proxyRes.resume();
+          writeRestartingPage(res, req.url, options.isPreview);
+          return;
+        }
+        // Non-GET/HEAD (e.g. POST /api/auth/sign-up/email): trigger an async fresh resolve so Cognix wakes/restarts
+        // the sandbox dev server immediately, and return an actionable JSON error for /api/* requests.
+        fetchTarget(options.visitorHost).catch(() => undefined);
+        const reqPath = safeTargetPath(req.url);
+        if (reqPath.startsWith("/api/")) {
+          proxyRes.resume();
+          const body = JSON.stringify({
+            error: "The preview server was waking up or restarting. Please submit again in a moment.",
+          });
+          res.writeHead(502, {
+            "content-type": "application/json; charset=utf-8",
+            "cache-control": "no-store",
+            "content-length": String(Buffer.byteLength(body)),
+          });
+          res.end(body);
+          return;
+        }
       }
 
       const contentType = String(proxyRes.headers["content-type"] || "").toLowerCase();
