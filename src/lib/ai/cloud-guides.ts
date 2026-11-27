@@ -388,6 +388,7 @@ export const auth = betterAuth({
       "http://127.0.0.1:3000",
       "https://*.daytona.work",
       "https://*.daytona.works",
+      "https://*.daytonaproxy01.net",
       "https://*.curatorsite.in",
       "https://*.curator.codes",
     ]);

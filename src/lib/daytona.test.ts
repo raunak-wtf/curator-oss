@@ -102,7 +102,9 @@ describe("direct custom preview proxy configuration", () => {
     expect(devServerLogPath("/home/daytona/app")).toBe("/home/daytona/.cognix-dev-server.log");
     const cmd = buildDevServerCommand("/home/daytona/app", 3000);
     expect(cmd).toContain("COGNIX_HOSTED_PREVIEW=1");
-    expect(cmd).toContain("--max-old-space-size=1024");
+    expect(cmd).toContain("--max-old-space-size=512");
+    expect(cmd).toContain("npm run start");
+    expect(cmd).toContain("npm run dev");
     expect(cmd).toContain(".cognix-runtime-limits.cjs");
     expect(cmd).toContain("tee -a '/home/daytona/.cognix-dev-server.log'");
     expect(cmd).not.toContain("/home/daytona/app/.cognix-dev-server.log");

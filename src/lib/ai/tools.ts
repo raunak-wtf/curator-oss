@@ -3,7 +3,8 @@ import { isIP } from "node:net";
 import path from "node:path";
 import type { Sandbox } from "@daytona/sdk";
 import { z } from "zod";
-import { devServerLogPath, getPreviewHealth, getPreviewUrl, getProjectFsRoot, getProjectRoot, readSandboxRuntimeLogs, runtimeLimitsPath } from "../daytona";
+import { devServerLogPath, getPreviewHealth, getPreviewUrl, getProjectFsRoot, getProjectRoot, readSandboxRuntimeLogs, runtimeLimitsPath, stopDevelopmentPreview } from "../daytona";
+import { isProductionBuildCommand } from "./agent-policy";
 import { extractServerErrorsFromLog } from "../preview-console";
 import { appendProjectConsoleLogs, deleteProjectFile, listProjectConsoleLogs, upsertProjectFile, updateProject } from "../store";
 import type { FileChangeSnapshot, Project } from "../types";
@@ -737,11 +738,11 @@ export async function executeAgentTool(
     }
     const directory = projectRelativePath(root, input.directory);
     const limitsFile = runtimeLimitsPath(root);
-    const limitsScript = `const os=require("node:os"),c=os.cpus.bind(os);os.cpus=()=>c().slice(0,2);if(os.availableParallelism)os.availableParallelism=()=>2;`;
+    const limitsScript = `const os=require("node:os"),c=os.cpus.bind(os);os.cpus=()=>c().slice(0,1);if(os.availableParallelism)os.availableParallelism=()=>1;`;
     await sandbox.process
-      .executeCommand(`if [ ! -f ${shellQuote(limitsFile)} ]; then printf '%s\\n' ${shellQuote(limitsScript)} > ${shellQuote(limitsFile)}; fi`, root, undefined, 10)
+      .executeCommand(`printf '%s\\n' ${shellQuote(limitsScript)} > ${shellQuote(limitsFile)}`, root, undefined, 10)
       .catch(() => undefined);
-    const boundedNodeOptions = `--max-old-space-size=1024 --require=${limitsFile}`;
+    const boundedNodeOptions = `--max-old-space-size=680 --require=${limitsFile}`;
     if (input.background) {
       const sessionId = `cognix-${project.id.slice(0, 12)}`;
       try {
@@ -765,10 +766,14 @@ export async function executeAgentTool(
         summary: `Started background command: ${input.command.slice(0, 60)}`,
       };
     }
+    // Free port-3000 server RAM and prevent `.next` corruption before running a production build inside 1 GiB sandboxes.
+    if (isProductionBuildCommand(input.command)) {
+      await stopDevelopmentPreview(sandbox, project, root).catch(() => undefined);
+    }
     const response = await sandbox.process.executeCommand(
       input.command,
       remotePath(root, directory),
-      { CI: "1", NEXT_TELEMETRY_DISABLED: "1", NODE_OPTIONS: boundedNodeOptions },
+      { CI: "1", COGNIX_HOSTED_PREVIEW: "1", NEXT_TELEMETRY_DISABLED: "1", NODE_OPTIONS: boundedNodeOptions },
       input.timeoutSeconds,
     );
     return {

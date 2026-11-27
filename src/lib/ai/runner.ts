@@ -1125,7 +1125,7 @@ export async function runAgent(input: {
           } else if (
             commandInput?.background === true &&
             productionBuildPassed &&
-            /\b(?:next\s+dev|npm\s+run\s+dev|pnpm\s+(?:run\s+)?dev|yarn\s+dev|bun\s+(?:run\s+)?dev)\b/i.test(command)
+            /\b(?:next\s+(?:dev|start)|npm\s+run\s+(?:dev|start)|pnpm\s+(?:run\s+)?(?:dev|start)|yarn\s+(?:dev|start)|bun\s+(?:run\s+)?(?:dev|start))\b/i.test(command)
           ) {
             devServerFreshSinceLastBuild = true;
           }

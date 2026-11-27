@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { requireViewer } from "@/lib/auth0";
-import { getProjectFsRoot, getSandbox } from "@/lib/daytona";
+import { getProjectFsRoot, getSandbox, rebuildAndRestartPreview } from "@/lib/daytona";
 import { extractThemeTokens, findThemeStylesheet, updateThemeTokensInCss } from "@/lib/direct-visual-edit";
 import { errorResponse, notFound } from "@/lib/http";
 import { getProject, listProjectFiles, upsertProjectFile } from "@/lib/store";
@@ -64,6 +64,7 @@ export async function PUT(request: Request, context: Context) {
       if (sandbox) {
         const fsRoot = getProjectFsRoot();
         await sandbox.fs.uploadFile(Buffer.from(updatedCss, "utf8"), `${fsRoot}/${sheet.path}`);
+        void rebuildAndRestartPreview(project).catch(() => undefined);
       }
     }
     const saved = await upsertProjectFile(project.id, sheet.path, updatedCss);

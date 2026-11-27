@@ -318,7 +318,47 @@ function maybeDecodeBody(buffer, encoding) {
   return null;
 }
 
-function forwardHttpRequest(req, res, upstreamBase, extraHeaders, options) {
+const MAX_BUFFERABLE_BODY_BYTES = 1024 * 1024; // 1 MiB (covers JSON auth, forms, Server Actions)
+
+function canBufferRequestForWakeRetry(req, onBadGatewayRetry) {
+  if (!onBadGatewayRetry) return false;
+  const method = String(req.method || "GET").toUpperCase();
+  if (method === "GET" || method === "HEAD") return false;
+  const contentType = String(req.headers["content-type"] || "").toLowerCase();
+  if (contentType.startsWith("multipart/form-data") || contentType.startsWith("application/octet-stream")) {
+    return false;
+  }
+  const rawLen = req.headers["content-length"];
+  if (rawLen !== undefined) {
+    const parsed = Number(rawLen);
+    return Number.isFinite(parsed) && parsed >= 0 && parsed <= MAX_BUFFERABLE_BODY_BYTES;
+  }
+  return (
+    contentType.startsWith("application/json") ||
+    contentType.startsWith("application/x-www-form-urlencoded") ||
+    contentType.startsWith("text/plain")
+  );
+}
+
+function collectRequestBody(req, maxBytes) {
+  return new Promise((resolve, reject) => {
+    /** @type {Buffer[]} */
+    const chunks = [];
+    let total = 0;
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        reject(new Error("Payload exceeds retry buffer"));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+function sendProxyAttempt(req, res, upstreamBase, extraHeaders, options, bufferedBody, allowWakeRetry) {
   const upstreamUrl = new URL(safeTargetPath(req.url), upstreamBase);
   const isHttps = upstreamUrl.protocol === "https:";
   const transport = isHttps ? https : http;
@@ -329,9 +369,35 @@ function forwardHttpRequest(req, res, upstreamBase, extraHeaders, options) {
     stripCookie: Boolean(options.stripCookie),
   });
   headers.host = upstreamUrl.host;
+  if (bufferedBody) {
+    headers["content-length"] = String(bufferedBody.length);
+  }
   for (const [name, value] of Object.entries(extraHeaders)) {
     headers[name.toLowerCase()] = value;
   }
+
+  const retryAfterWake = async () => {
+    markStale(options.visitorHost);
+    const refreshed = await resolveTarget(options.visitorHost).catch(() => null);
+    if (refreshed && refreshed.kind === "proxy") {
+      sendProxyAttempt(req, res, refreshed.upstream, refreshed.headers, options, bufferedBody, false);
+      return;
+    }
+    const reqPath = safeTargetPath(req.url);
+    if (reqPath.startsWith("/api/")) {
+      const body = JSON.stringify({
+        error: "The preview server is waking up. Please submit again in a moment.",
+      });
+      res.writeHead(502, {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "content-length": String(Buffer.byteLength(body)),
+      });
+      res.end(body);
+      return;
+    }
+    writeRestartingPage(res, req.url, options.isPreview);
+  };
 
   const proxyReq = transport.request(
     upstreamUrl,
@@ -347,12 +413,16 @@ function forwardHttpRequest(req, res, upstreamBase, extraHeaders, options) {
         markStale(options.visitorHost);
         if (req.method === "GET" || req.method === "HEAD") {
           proxyRes.resume();
+          resolveTarget(options.visitorHost).catch(() => undefined);
           writeRestartingPage(res, req.url, options.isPreview);
           return;
         }
-        // Non-GET/HEAD (e.g. POST /api/auth/sign-up/email): trigger an async fresh resolve so Cognix wakes/restarts
-        // the sandbox dev server immediately, and return an actionable JSON error for /api/* requests.
-        fetchTarget(options.visitorHost).catch(() => undefined);
+        if (allowWakeRetry && bufferedBody !== null) {
+          proxyRes.resume();
+          retryAfterWake().catch(() => undefined);
+          return;
+        }
+        resolveTarget(options.visitorHost).catch(() => undefined);
         const reqPath = safeTargetPath(req.url);
         if (reqPath.startsWith("/api/")) {
           proxyRes.resume();
@@ -445,7 +515,12 @@ function forwardHttpRequest(req, res, upstreamBase, extraHeaders, options) {
       return;
     }
     if (options.onBadGatewayRetry) {
+      if (allowWakeRetry && bufferedBody !== null) {
+        retryAfterWake().catch(() => undefined);
+        return;
+      }
       markStale(options.visitorHost);
+      resolveTarget(options.visitorHost).catch(() => undefined);
       writeRestartingPage(res, req.url, options.isPreview);
       return;
     }
@@ -453,7 +528,28 @@ function forwardHttpRequest(req, res, upstreamBase, extraHeaders, options) {
     res.end("Cognix origin is temporarily unreachable. Try again in a moment.");
   });
 
-  req.pipe(proxyReq);
+  if (bufferedBody !== null) {
+    proxyReq.end(bufferedBody);
+  } else {
+    req.pipe(proxyReq);
+  }
+}
+
+function forwardHttpRequest(req, res, upstreamBase, extraHeaders, options) {
+  if (canBufferRequestForWakeRetry(req, options.onBadGatewayRetry)) {
+    collectRequestBody(req, MAX_BUFFERABLE_BODY_BYTES)
+      .then((bufferedBody) => {
+        sendProxyAttempt(req, res, upstreamBase, extraHeaders, options, bufferedBody, true);
+      })
+      .catch(() => {
+        if (!res.headersSent) {
+          res.writeHead(413, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+          res.end(JSON.stringify({ error: "Request body exceeded the expected size." }));
+        }
+      });
+    return;
+  }
+  sendProxyAttempt(req, res, upstreamBase, extraHeaders, options, null, false);
 }
 
 const server = http.createServer(async (req, res) => {

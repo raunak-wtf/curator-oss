@@ -74,19 +74,30 @@ export async function ensureSandbox(project: Project): Promise<{ sandbox: Sandbo
     return { sandbox: existing, project: updated ?? { ...project, status: "building" } };
   }
 
-  const sandbox = await getClient().create(
-    {
-      name: `cognix-${project.id.slice(0, 8)}`,
-      image: "node:22-bookworm",
-      language: CodeLanguage.TYPESCRIPT,
-      public: !isDirectPreviewProxyConfigured(),
-      autoStopInterval: 30,
-      autoArchiveInterval: 1440,
-      labels: { app: "cognix", projectId: project.id },
-      envVars: { CI: "1", NEXT_TELEMETRY_DISABLED: "1", COGNIX_HOSTED_PREVIEW: "1" },
-    },
-    { timeout: 180 },
-  );
+  const baseCreateParams = {
+    name: `cognix-${project.id.slice(0, 8)}`,
+    image: "node:22-bookworm",
+    language: CodeLanguage.TYPESCRIPT,
+    public: !isDirectPreviewProxyConfigured(),
+    autoStopInterval: 30,
+    autoArchiveInterval: 1440,
+    labels: { app: "cognix", projectId: project.id },
+    envVars: { CI: "1", NEXT_TELEMETRY_DISABLED: "1", COGNIX_HOSTED_PREVIEW: "1" },
+  };
+
+  let sandbox: Sandbox;
+  try {
+    sandbox = await getClient().create(
+      {
+        ...baseCreateParams,
+        resources: { cpu: 2, memory: 2, disk: 5 },
+      },
+      { timeout: 180 },
+    );
+  } catch {
+    // Fall back cleanly if the Daytona organization/runner enforces default 1 CPU / 1 GiB tier limits.
+    sandbox = await getClient().create(baseCreateParams, { timeout: 180 });
+  }
 
   const updated = await updateProject(project.id, project.ownerId, {
     sandboxId: sandbox.id,
@@ -120,19 +131,33 @@ export function runtimeLimitsPath(root: string) {
   return path.posix.join(path.posix.dirname(root), ".cognix-runtime-limits.cjs");
 }
 
-/** Builds a bounded, persistent `npm run dev` command that caps worker parallelism/heap and streams output to `.cognix-dev-server.log`. */
+/**
+ * Builds a bounded, auto-restarting preview server command on `port` (default 3000).
+ * When `.next/BUILD_ID` exists (after `npm run build`), serves `npm run start` (~280 MB RAM, instant SSR/API
+ * with zero compilation OOMs even on 1 GiB sandboxes); otherwise falls back to bounded `npm run dev`.
+ */
 export function buildDevServerCommand(root: string, port = 3000) {
   const logFile = devServerLogPath(root);
   const limitsFile = runtimeLimitsPath(root);
   const quotedLog = shellQuote(logFile);
   const quotedTmp = shellQuote(`${logFile}.tmp`);
   const quotedLimits = shellQuote(limitsFile);
-  const limitsScript = `const os=require("node:os"),c=os.cpus.bind(os);os.cpus=()=>c().slice(0,2);if(os.availableParallelism)os.availableParallelism=()=>2;`;
+  const limitsScript = `const os=require("node:os"),c=os.cpus.bind(os);os.cpus=()=>c().slice(0,1);if(os.availableParallelism)os.availableParallelism=()=>1;`;
+  const runLoop = [
+    `while true; do`,
+    `if [ -f .next/BUILD_ID ] && node -e 'const p=require("./package.json");process.exit(p.scripts&&p.scripts.start?0:1)' 2>/dev/null; then`,
+    `NODE_OPTIONS="--max-old-space-size=512 --require=${limitsFile}" COGNIX_HOSTED_PREVIEW=1 CI=1 NEXT_TELEMETRY_DISABLED=1 PORT=${port} HOSTNAME=0.0.0.0 npm run start -- --hostname 0.0.0.0 --port ${port};`,
+    `else`,
+    `NODE_OPTIONS="--max-old-space-size=600 --require=${limitsFile}" COGNIX_HOSTED_PREVIEW=1 CI=1 NEXT_TELEMETRY_DISABLED=1 npm run dev -- --hostname 0.0.0.0 --port ${port};`,
+    `fi;`,
+    `sleep 1;`,
+    `done`,
+  ].join(" ");
   return [
     `cd ${shellQuote(root)}`,
     `printf '%s\\n' ${shellQuote(limitsScript)} > ${quotedLimits}`,
     `if [ -f ${quotedLog} ] && [ "$(wc -c < ${quotedLog} 2>/dev/null || echo 0)" -gt 524288 ]; then tail -c 200000 ${quotedLog} > ${quotedTmp} && mv ${quotedTmp} ${quotedLog}; fi`,
-    `NODE_OPTIONS="--max-old-space-size=1024 --require=${limitsFile}" COGNIX_HOSTED_PREVIEW=1 CI=1 NEXT_TELEMETRY_DISABLED=1 npm run dev -- --hostname 0.0.0.0 --port ${port} 2>&1 | tee -a ${quotedLog}`,
+    `(${runLoop}) 2>&1 | tee -a ${quotedLog}`,
   ].join(" && ");
 }
 
@@ -927,8 +952,48 @@ export async function copyProjectSandbox(source: Project, target: Project) {
   return { project, files: snapshot.files };
 }
 
+export async function stopDevelopmentPreview(sandbox: Sandbox, project: Project, root: string) {
+  await pauseDevelopmentPreview(sandbox, project, root);
+  forgetPreviewProxyTarget(project.id);
+}
+
 export async function restartDevelopmentPreview(sandbox: Sandbox, project: Project, root: string) {
   await pauseDevelopmentPreview(sandbox, project, root);
+  forgetPreviewProxyTarget(project.id);
+  await resumeDevelopmentPreview(sandbox, project, root);
+}
+
+/** Rebuilds `.next` and restarts the port-3000 preview server after direct visual/theme file edits. */
+export async function rebuildAndRestartPreview(project: Project) {
+  if (!project.sandboxId || !isDaytonaConfigured) return;
+  const sandbox = await getSandbox(project);
+  if (!sandbox) return;
+  const root = await getProjectRoot(sandbox);
+  const hasNextBuild = await sandbox.process.executeCommand("test -f .next/BUILD_ID", root, undefined, 10);
+  if (hasNextBuild.exitCode !== 0) return;
+
+  const limitsFile = runtimeLimitsPath(root);
+  const limitsScript = `const os=require("node:os"),c=os.cpus.bind(os);os.cpus=()=>c().slice(0,1);if(os.availableParallelism)os.availableParallelism=()=>1;`;
+  await sandbox.process
+    .executeCommand(`printf '%s\\n' ${shellQuote(limitsScript)} > ${shellQuote(limitsFile)}`, root, undefined, 10)
+    .catch(() => undefined);
+
+  await pauseDevelopmentPreview(sandbox, project, root);
+  const build = await sandbox.process.executeCommand(
+    "npm run build",
+    root,
+    {
+      CI: "1",
+      COGNIX_HOSTED_PREVIEW: "1",
+      NEXT_TELEMETRY_DISABLED: "1",
+      NODE_OPTIONS: `--max-old-space-size=680 --require=${limitsFile}`,
+    },
+    240,
+  );
+  if (build.exitCode !== 0) {
+    // Remove stale BUILD_ID so `resumeDevelopmentPreview` falls back to `npm run dev` cleanly.
+    await sandbox.process.executeCommand("rm -f .next/BUILD_ID", root, undefined, 10).catch(() => undefined);
+  }
   forgetPreviewProxyTarget(project.id);
   await resumeDevelopmentPreview(sandbox, project, root);
 }
