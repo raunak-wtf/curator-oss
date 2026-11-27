@@ -34,7 +34,7 @@ export const CLOUD_FEATURES: Record<
   auth: {
     label: "Authentication",
     title: "Let people sign in",
-    description: "Email and password accounts with verification and password reset, powered by Better Auth.",
+    description: "Email and password accounts with sessions, verification, and password reset.",
     env: ["BETTER_AUTH_SECRET", "DATABASE_URL"],
     examples: ["Add sign-up and sign-in with email", "Protect the dashboard so only signed-in users see it"],
   },

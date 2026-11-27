@@ -401,7 +401,7 @@ async function resolveDefaultBranchId(neonProjectId: string, explicitBranchId?: 
   if (explicitBranchId) return explicitBranchId;
   const branches = await listNeonBranches(neonProjectId);
   const primary = branches.find((b) => b.default || b.primary) ?? branches[0];
-  if (!primary) throw new Error("No branches exist on this Neon project.");
+  if (!primary) throw new Error("No branches exist on this database project.");
   return primary.id;
 }
 
@@ -428,8 +428,8 @@ export async function executeCloudProviderTool(
       return {
         output: JSON.stringify(overview),
         summary: overview.provisioned
-          ? `Checked Neon database (${overview.tables.length} ${overview.tables.length === 1 ? "table" : "tables"})`
-          : "Checked Neon database status",
+          ? `Checked Cloud Database (${overview.tables.length} ${overview.tables.length === 1 ? "table" : "tables"})`
+          : "Checked Cloud Database status",
       };
     }
 
@@ -437,9 +437,9 @@ export async function executeCloudProviderTool(
       return {
         output: JSON.stringify({
           error:
-            "NEON_API_KEY is not configured on the Cognix server yet. Ask the operator/user to add NEON_API_KEY to the server .env, or set DATABASE_URL in Cloud → Secrets.",
+            "Automatic Cloud Database provisioning is not configured on the Cognix server yet. Set DATABASE_URL in Cloud → Secrets or configure database provisioning on the server.",
         }),
-        summary: "Needs attention: NEON_API_KEY not set on server",
+        summary: "Needs attention: Cloud Database provisioning not configured",
       };
     }
 
@@ -452,8 +452,8 @@ export async function executeCloudProviderTool(
           envSynced: ["DATABASE_URL", "DIRECT_URL"],
         }),
         summary: result.created
-          ? `Provisioned Neon database (${result.neonRegion})`
-          : `Verified Neon database (${result.neonRegion})`,
+          ? `Provisioned Cloud Database (${result.neonRegion})`
+          : `Verified Cloud Database (${result.neonRegion})`,
         secretsUpdated: true,
       };
     }
@@ -488,13 +488,13 @@ export async function executeCloudProviderTool(
       const res = await executeProjectSql(connectionUrl, input.sql, input.params ?? []);
       return {
         output: scrubConnectionCredentials(JSON.stringify(res)),
-        summary: `Ran SQL on Neon (${res.command ?? "query"}, ${res.rowCount} rows)`,
+        summary: `Ran SQL on Cloud Database (${res.command ?? "query"}, ${res.rowCount} rows)`,
       };
     }
 
     const neonProjectId = cloud?.neonProjectId;
     if (!neonProjectId) {
-      throw new Error("No managed Neon database is provisioned for this project yet. Call action='provision' first.");
+      throw new Error("No Cloud Database is provisioned for this project yet. Call action='provision' first.");
     }
 
     switch (input.action) {
@@ -504,7 +504,7 @@ export async function executeCloudProviderTool(
         const overview = await getProjectNeonOverview(project);
         return {
           output: JSON.stringify({ branchId, tables: overview.tables, ddl }),
-          summary: `Inspected Neon schema (${overview.tables.length} tables)`,
+          summary: `Inspected Cloud Database schema (${overview.tables.length} tables)`,
         };
       }
       case "compare_schema": {
@@ -516,12 +516,12 @@ export async function executeCloudProviderTool(
         });
         return {
           output: JSON.stringify({ branchId, baseBranchId: input.baseBranchId, diff }),
-          summary: "Compared Neon branch schemas",
+          summary: "Compared database branch schemas",
         };
       }
       case "list_branches": {
         const branches = await listNeonBranches(neonProjectId);
-        return { output: JSON.stringify({ branches }), summary: `Listed ${branches.length} Neon branches` };
+        return { output: JSON.stringify({ branches }), summary: `Listed ${branches.length} database branches` };
       }
       case "create_branch": {
         if (!input.name) throw new Error("Provide `name` for create_branch.");
@@ -532,12 +532,12 @@ export async function executeCloudProviderTool(
           parentLsn: input.lsn,
           endpointType: input.endpointType,
         });
-        return { output: JSON.stringify(res), summary: `Created Neon branch ${res.branch.name}` };
+        return { output: JSON.stringify(res), summary: `Created database branch ${res.branch.name}` };
       }
       case "rename_branch": {
         if (!input.branchId || !input.name) throw new Error("Provide `branchId` and `name` for rename_branch.");
         const branch = await renameNeonBranch(neonProjectId, input.branchId, input.name);
-        return { output: JSON.stringify({ branch }), summary: `Renamed Neon branch to ${branch.name}` };
+        return { output: JSON.stringify({ branch }), summary: `Renamed database branch to ${branch.name}` };
       }
       case "set_default_branch": {
         if (!input.branchId) throw new Error("Provide `branchId` for set_default_branch.");
@@ -545,7 +545,7 @@ export async function executeCloudProviderTool(
         const synced = await syncNeonConnectionSecrets(project, neonProjectId, { branchId: branch.id });
         return {
           output: JSON.stringify({ branch, activeConnection: synced }),
-          summary: `Set ${branch.name} as default Neon branch`,
+          summary: `Set ${branch.name} as default database branch`,
           secretsUpdated: true,
         };
       }
@@ -559,17 +559,17 @@ export async function executeCloudProviderTool(
           sourceLsn: input.lsn,
           preserveUnderName: input.name,
         });
-        return { output: JSON.stringify({ branch }), summary: `Restored Neon branch ${branch.name}` };
+        return { output: JSON.stringify({ branch }), summary: `Restored database branch ${branch.name}` };
       }
       case "delete_branch": {
         if (!input.branchId) throw new Error("Provide `branchId` for delete_branch.");
         const res = await deleteNeonBranch(neonProjectId, input.branchId);
-        return { output: JSON.stringify(res), summary: "Deleted Neon branch" };
+        return { output: JSON.stringify(res), summary: "Deleted database branch" };
       }
       case "list_databases": {
         const branchId = await resolveDefaultBranchId(neonProjectId, input.branchId);
         const databases = await listNeonDatabases(neonProjectId, branchId);
-        return { output: JSON.stringify({ branchId, databases }), summary: `Listed ${databases.length} Neon databases` };
+        return { output: JSON.stringify({ branchId, databases }), summary: `Listed ${databases.length} PostgreSQL databases` };
       }
       case "create_database": {
         if (!input.name) throw new Error("Provide `name` for create_database.");
@@ -672,12 +672,12 @@ export async function executeCloudProviderTool(
       }
       case "list_snapshots": {
         const snapshots = await listNeonSnapshots(neonProjectId);
-        return { output: JSON.stringify({ snapshots }), summary: `Listed ${snapshots.length} Neon snapshots` };
+        return { output: JSON.stringify({ snapshots }), summary: `Listed ${snapshots.length} database snapshots` };
       }
       case "create_snapshot": {
         const branchId = await resolveDefaultBranchId(neonProjectId, input.branchId);
         const snapshot = await createNeonSnapshot(neonProjectId, branchId, { name: input.name });
-        return { output: JSON.stringify({ snapshot }), summary: `Created Neon snapshot ${snapshot.name || snapshot.id}` };
+        return { output: JSON.stringify({ snapshot }), summary: `Created database snapshot ${snapshot.name || snapshot.id}` };
       }
       case "restore_snapshot": {
         if (!input.snapshotId) throw new Error("Provide `snapshotId` for restore_snapshot.");
@@ -686,12 +686,12 @@ export async function executeCloudProviderTool(
           targetBranchId: input.branchId,
           finalizeRestore: true,
         });
-        return { output: JSON.stringify(res), summary: `Restored Neon snapshot ${input.snapshotId}` };
+        return { output: JSON.stringify(res), summary: `Restored database snapshot ${input.snapshotId}` };
       }
       case "delete_snapshot": {
         if (!input.snapshotId) throw new Error("Provide `snapshotId` for delete_snapshot.");
         const res = await deleteNeonSnapshot(neonProjectId, input.snapshotId);
-        return { output: JSON.stringify(res), summary: `Deleted Neon snapshot ${input.snapshotId}` };
+        return { output: JSON.stringify(res), summary: `Deleted database snapshot ${input.snapshotId}` };
       }
       case "update_project_settings": {
         const updated = await updateNeonProject(neonProjectId, {
@@ -701,7 +701,7 @@ export async function executeCloudProviderTool(
           maxCu: input.maxCu,
           suspendTimeoutSeconds: input.suspendTimeoutSeconds,
         });
-        return { output: JSON.stringify({ project: updated }), summary: "Updated Neon project settings" };
+        return { output: JSON.stringify({ project: updated }), summary: "Updated Cloud Database settings" };
       }
       case "use_connection": {
         const synced = await syncNeonConnectionSecrets(project, neonProjectId, {
@@ -711,7 +711,7 @@ export async function executeCloudProviderTool(
         });
         return {
           output: JSON.stringify({ ok: true, activeConnection: synced, envSynced: ["DATABASE_URL", "DIRECT_URL"] }),
-          summary: `Synced Neon branch ${synced.branchName} (${synced.databaseName}) to .env.local`,
+          summary: `Synced database branch ${synced.branchName} (${synced.databaseName}) to .env.local`,
           secretsUpdated: true,
         };
       }
@@ -728,9 +728,9 @@ export async function executeCloudProviderTool(
           configured: false,
           activeBucket: secrets.S3_BUCKET ?? null,
           error:
-            "Managed Cloud Storage (BUCKETLINE_API_KEY) is not configured on the Cognix server yet. Still write `lib/storage.ts` reading S3_ENDPOINT, S3_REGION, S3_BUCKET, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY from process.env.",
+            "Cognix Cloud Storage provisioning is not configured on the server yet. Still write `lib/storage.ts` reading S3_ENDPOINT, S3_REGION, S3_BUCKET, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY from process.env.",
         }),
-        summary: "Managed Cloud Storage key not set on server",
+        summary: "Cloud Storage provisioning not configured on server",
       };
     }
 
@@ -929,9 +929,9 @@ export async function executeCloudProviderTool(
         connected: false,
         emailFrom: currentFrom,
         error:
-          "Resend is not connected yet. Ask the user to connect their Resend API key in Cloud → Emails (or write code against process.env.RESEND_API_KEY and process.env.EMAIL_FROM with a graceful fallback).",
+          "Email service is not connected yet. Ask the user to connect their email API key in Cloud → Emails (or write code against process.env.RESEND_API_KEY and process.env.EMAIL_FROM with a graceful fallback).",
       }),
-      summary: "Resend API key not connected yet",
+      summary: "Cloud Email API key not connected yet",
     };
   }
 
@@ -954,7 +954,7 @@ export async function executeCloudProviderTool(
             apiKeysCount: apiKeys.length,
           }),
         ),
-        summary: `Checked Resend account (${domains.length} ${domains.length === 1 ? "domain" : "domains"})`,
+        summary: `Checked Cloud Emails (${domains.length} ${domains.length === 1 ? "domain" : "domains"})`,
       };
     }
     case "set_default_from": {
@@ -969,22 +969,22 @@ export async function executeCloudProviderTool(
     }
     case "list_domains": {
       const domains = await listResendDomains(apiKey);
-      return { output: JSON.stringify({ domains }), summary: `Listed ${domains.length} Resend domains` };
+      return { output: JSON.stringify({ domains }), summary: `Listed ${domains.length} sending domains` };
     }
     case "get_domain": {
       if (!input.domainId) throw new Error("Provide `domainId` for get_domain.");
       const domain = await getResendDomain(apiKey, input.domainId);
-      return { output: JSON.stringify({ domain }), summary: `Read Resend domain ${domain.name}` };
+      return { output: JSON.stringify({ domain }), summary: `Read sending domain ${domain.name}` };
     }
     case "create_domain": {
       if (!input.name) throw new Error("Provide `name` for create_domain.");
       const domain = await createResendDomain(apiKey, { name: input.name, region: input.region });
-      return { output: JSON.stringify({ domain }), summary: `Added Resend domain ${domain.name}` };
+      return { output: JSON.stringify({ domain }), summary: `Added sending domain ${domain.name}` };
     }
     case "verify_domain": {
       if (!input.domainId) throw new Error("Provide `domainId` for verify_domain.");
       const res = await verifyResendDomain(apiKey, input.domainId);
-      return { output: JSON.stringify(res), summary: "Triggered Resend domain verification" };
+      return { output: JSON.stringify(res), summary: "Triggered domain DNS verification" };
     }
     case "update_domain": {
       if (!input.domainId) throw new Error("Provide `domainId` for update_domain.");
@@ -993,12 +993,12 @@ export async function executeCloudProviderTool(
         clickTracking: input.clickTracking,
         tls: input.tls,
       });
-      return { output: JSON.stringify(res), summary: "Updated Resend domain settings" };
+      return { output: JSON.stringify(res), summary: "Updated sending domain settings" };
     }
     case "delete_domain": {
       if (!input.domainId) throw new Error("Provide `domainId` for delete_domain.");
       const res = await deleteResendDomain(apiKey, input.domainId);
-      return { output: JSON.stringify(res), summary: "Removed Resend domain" };
+      return { output: JSON.stringify(res), summary: "Removed sending domain" };
     }
     case "send_email": {
       const from = input.from ?? currentFrom;
@@ -1015,21 +1015,21 @@ export async function executeCloudProviderTool(
         replyTo: input.replyTo,
         scheduledAt: input.scheduledAt,
       });
-      return { output: JSON.stringify(res), summary: `Sent email via Resend (${res.id})` };
+      return { output: JSON.stringify(res), summary: `Sent email (${res.id})` };
     }
     case "send_batch_emails": {
       if (!input.emails?.length) throw new Error("Provide `emails` array for send_batch_emails.");
       const res = await sendResendBatchEmails(apiKey, input.emails);
-      return { output: JSON.stringify(res), summary: `Sent ${input.emails.length} batch emails via Resend` };
+      return { output: JSON.stringify(res), summary: `Sent ${input.emails.length} batch emails` };
     }
     case "list_emails": {
       const emails = await listResendEmails(apiKey);
-      return { output: JSON.stringify({ emails }), summary: `Listed ${emails.length} recent Resend emails` };
+      return { output: JSON.stringify({ emails }), summary: `Listed ${emails.length} recent emails` };
     }
     case "get_email": {
       if (!input.emailId) throw new Error("Provide `emailId` for get_email.");
       const email = await getResendEmail(apiKey, input.emailId);
-      return { output: JSON.stringify({ email }), summary: `Checked Resend email ${email.id}` };
+      return { output: JSON.stringify({ email }), summary: `Checked email ${email.id}` };
     }
     case "update_email": {
       if (!input.emailId || !input.scheduledAt) {
@@ -1045,22 +1045,22 @@ export async function executeCloudProviderTool(
     }
     case "list_audiences": {
       const audiences = await listResendAudiences(apiKey);
-      return { output: JSON.stringify({ audiences }), summary: `Listed ${audiences.length} Resend audiences` };
+      return { output: JSON.stringify({ audiences }), summary: `Listed ${audiences.length} email audiences` };
     }
     case "get_audience": {
       if (!input.audienceId) throw new Error("Provide `audienceId` for get_audience.");
       const audience = await getResendAudience(apiKey, input.audienceId);
-      return { output: JSON.stringify({ audience }), summary: `Read Resend audience ${audience.name}` };
+      return { output: JSON.stringify({ audience }), summary: `Read audience ${audience.name}` };
     }
     case "create_audience": {
       if (!input.name) throw new Error("Provide `name` for create_audience.");
       const audience = await createResendAudience(apiKey, input.name);
-      return { output: JSON.stringify({ audience }), summary: `Created Resend audience ${audience.name}` };
+      return { output: JSON.stringify({ audience }), summary: `Created audience ${audience.name}` };
     }
     case "delete_audience": {
       if (!input.audienceId) throw new Error("Provide `audienceId` for delete_audience.");
       const res = await deleteResendAudience(apiKey, input.audienceId);
-      return { output: JSON.stringify(res), summary: "Deleted Resend audience" };
+      return { output: JSON.stringify(res), summary: "Deleted audience" };
     }
     case "list_contacts": {
       if (!input.audienceId) throw new Error("Provide `audienceId` for list_contacts.");
@@ -1084,7 +1084,7 @@ export async function executeCloudProviderTool(
         lastName: input.lastName,
         unsubscribed: input.unsubscribed,
       });
-      return { output: JSON.stringify(res), summary: `Added ${input.email} to Resend audience` };
+      return { output: JSON.stringify(res), summary: `Added ${input.email} to audience` };
     }
     case "update_contact": {
       if (!input.audienceId || !input.contactId) {
@@ -1095,23 +1095,23 @@ export async function executeCloudProviderTool(
         lastName: input.lastName,
         unsubscribed: input.unsubscribed,
       });
-      return { output: JSON.stringify(res), summary: "Updated Resend contact" };
+      return { output: JSON.stringify(res), summary: "Updated audience contact" };
     }
     case "delete_contact": {
       if (!input.audienceId || !input.contactId) {
         throw new Error("Provide `audienceId` and `contactId` for delete_contact.");
       }
       const res = await deleteResendContact(apiKey, input.audienceId, input.contactId);
-      return { output: JSON.stringify(res), summary: "Deleted Resend contact" };
+      return { output: JSON.stringify(res), summary: "Deleted audience contact" };
     }
     case "list_broadcasts": {
       const broadcasts = await listResendBroadcasts(apiKey);
-      return { output: JSON.stringify({ broadcasts }), summary: `Listed ${broadcasts.length} Resend broadcasts` };
+      return { output: JSON.stringify({ broadcasts }), summary: `Listed ${broadcasts.length} email broadcasts` };
     }
     case "get_broadcast": {
       if (!input.broadcastId) throw new Error("Provide `broadcastId` for get_broadcast.");
       const broadcast = await getResendBroadcast(apiKey, input.broadcastId);
-      return { output: JSON.stringify({ broadcast }), summary: `Read Resend broadcast ${broadcast.id}` };
+      return { output: JSON.stringify({ broadcast }), summary: `Read broadcast ${broadcast.id}` };
     }
     case "create_broadcast": {
       const from = input.from ?? currentFrom;
@@ -1127,26 +1127,26 @@ export async function executeCloudProviderTool(
         text: input.text,
         replyTo: input.replyTo,
       });
-      return { output: JSON.stringify(res), summary: `Created Resend broadcast (${res.id})` };
+      return { output: JSON.stringify(res), summary: `Created broadcast (${res.id})` };
     }
     case "send_broadcast": {
       if (!input.broadcastId) throw new Error("Provide `broadcastId` for send_broadcast.");
       const res = await sendResendBroadcast(apiKey, input.broadcastId, input.scheduledAt);
-      return { output: JSON.stringify(res), summary: `Scheduled/sent Resend broadcast ${input.broadcastId}` };
+      return { output: JSON.stringify(res), summary: `Scheduled/sent broadcast ${input.broadcastId}` };
     }
     case "delete_broadcast": {
       if (!input.broadcastId) throw new Error("Provide `broadcastId` for delete_broadcast.");
       const res = await deleteResendBroadcast(apiKey, input.broadcastId);
-      return { output: JSON.stringify(res), summary: "Deleted Resend broadcast" };
+      return { output: JSON.stringify(res), summary: "Deleted broadcast" };
     }
     case "list_webhooks": {
       const webhooks = await listResendWebhooks(apiKey);
-      return { output: JSON.stringify({ webhooks }), summary: `Listed ${webhooks.length} Resend webhooks` };
+      return { output: JSON.stringify({ webhooks }), summary: `Listed ${webhooks.length} email webhooks` };
     }
     case "get_webhook": {
       if (!input.webhookId) throw new Error("Provide `webhookId` for get_webhook.");
       const webhook = await getResendWebhook(apiKey, input.webhookId);
-      return { output: JSON.stringify({ webhook }), summary: `Read Resend webhook ${webhook.id}` };
+      return { output: JSON.stringify({ webhook }), summary: `Read email webhook ${webhook.id}` };
     }
     case "create_webhook": {
       if (!input.endpoint || !input.events?.length) {
@@ -1155,7 +1155,7 @@ export async function executeCloudProviderTool(
       const res = await createResendWebhook(apiKey, { endpoint: input.endpoint, events: input.events });
       return {
         output: JSON.stringify({ id: res.id, endpoint: input.endpoint, events: input.events }),
-        summary: `Created Resend webhook for ${input.endpoint}`,
+        summary: `Created email webhook for ${input.endpoint}`,
       };
     }
     case "update_webhook": {
@@ -1165,16 +1165,16 @@ export async function executeCloudProviderTool(
         events: input.events,
         status: input.webhookStatus,
       });
-      return { output: JSON.stringify(res), summary: `Updated Resend webhook ${input.webhookId}` };
+      return { output: JSON.stringify(res), summary: `Updated email webhook ${input.webhookId}` };
     }
     case "delete_webhook": {
       if (!input.webhookId) throw new Error("Provide `webhookId` for delete_webhook.");
       const res = await deleteResendWebhook(apiKey, input.webhookId);
-      return { output: JSON.stringify(res), summary: "Deleted Resend webhook" };
+      return { output: JSON.stringify(res), summary: "Deleted email webhook" };
     }
     case "list_api_keys": {
       const apiKeys = await listResendApiKeys(apiKey);
-      return { output: JSON.stringify({ apiKeys }), summary: `Listed ${apiKeys.length} Resend API keys` };
+      return { output: JSON.stringify({ apiKeys }), summary: `Listed ${apiKeys.length} email API keys` };
     }
   }
 }

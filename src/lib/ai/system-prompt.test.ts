@@ -148,6 +148,7 @@ describe("buildSystemPrompt", () => {
     expect(onPrompt).toContain('<cloud-skill name="bucketline-s3-storage-and-cdn">');
     expect(onPrompt).toContain("never run `npx create-next-app .` directly in the project root");
     expect(onPrompt).toContain("Do not call request_cognix_cloud.");
+    expect(onPrompt).toContain("White-label communication rule");
     expect(offPrompt).toContain("## Built-in Cognix Cloud intelligence");
     expect(offPrompt).toContain('<cloud-skill name="cognix-cloud-auto-detection">');
     expect(offPrompt).not.toContain("## Built-in Cognix Cloud architecture skills");

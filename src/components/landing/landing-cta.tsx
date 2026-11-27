@@ -46,11 +46,11 @@ export function LandingCTA({ isAuthConfigured }: { isAuthConfigured: boolean }) 
             <div className="mt-8 pt-6 border-t border-white/8 flex flex-wrap items-center justify-center gap-6 text-xs text-white/40 font-mono">
               <span className="inline-flex items-center gap-1.5">
                 <span className="size-1.5 rounded-full bg-emerald-400" />
-                Daytona Sandboxes Online
+                Cloud Sandboxes Online
               </span>
               <span className="inline-flex items-center gap-1.5">
                 <span className="size-1.5 rounded-full bg-emerald-400" />
-                Neon Postgres Ready
+                Cognix Cloud DB Ready
               </span>
               <span className="inline-flex items-center gap-1.5">
                 <span className="size-1.5 rounded-full bg-emerald-400" />

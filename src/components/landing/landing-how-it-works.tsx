@@ -8,17 +8,17 @@ const STEPS = [
       "Describe what you want to build in natural language. Attach UI mockups, Figma screenshots, or database schemas directly into the composer.",
     icon: MessageSquareCode,
     badge: "Multimodal Input",
-    codeSnippet: `Prompt: "Build a SaaS billing dashboard with subscription analytics, Stripe tiers, and Neon Postgres."`,
+    codeSnippet: `Prompt: "Build a SaaS billing dashboard with subscription analytics, tiered plans, and PostgreSQL."`,
     details: ["Natural language prompts", "Image & wireframe attachments", "Instant stack synthesis"],
   },
   {
     step: "02",
-    title: "Autonomous Daytona Execution",
+    title: "Autonomous Sandbox Execution",
     description:
-      "Cognix launches an isolated Daytona Linux container, scaffolds Next.js App Router code, installs npm dependencies, and provisions Neon PostgreSQL.",
+      "Cognix launches an isolated Linux container, scaffolds full-stack code, installs dependencies, and provisions Cognix Cloud PostgreSQL.",
     icon: Cpu,
-    badge: "Daytona Sandboxes",
-    codeSnippet: `[daytona] Initializing isolated Linux sandbox\n[daytona] Port 3000 mapped -> live dev server running`,
+    badge: "Cloud Sandboxes",
+    codeSnippet: `[cognix] Initializing isolated Linux sandbox\n[cognix] Port 3000 mapped -> live dev server running`,
     details: ["Real Linux container isolation", "Automated database migrations", "Full Next.js & Node.js runtime"],
   },
   {
@@ -39,7 +39,7 @@ const STEPS = [
     icon: Globe2,
     badge: "Global Edge",
     codeSnippet: `Deployed: https://billing.cognix.app\nExport: ZIP package with full git history`,
-    details: ["Instant custom subdomains", "Zero-lockin code download", "Persistent Neon PostgreSQL data"],
+    details: ["Instant custom subdomains", "Zero-lockin code download", "Persistent Cognix Cloud PostgreSQL"],
   },
 ];
 

@@ -230,10 +230,10 @@ export function CloudStoragePanel({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 id="cloud-storage-heading" className="text-lg font-semibold tracking-tight text-white">
-            Storage
+            Cognix Cloud Storage
           </h2>
           <p className="mt-1 text-[13px] text-white/55">
-            Managed S3-compatible buckets with scoped credentials, 24h signed links, and CDN delivery.
+            Managed object storage buckets with scoped credentials, 24h signed links, and CDN delivery.
           </p>
         </div>
         <button
@@ -263,7 +263,7 @@ export function CloudStoragePanel({
 
       {data && !data.configured ? (
         <div className="rounded-lg border border-amber-400/20 bg-amber-400/[0.05] p-4 text-[12.5px] leading-5 text-amber-200/90">
-          Add <code className="font-mono">BUCKETLINE_API_KEY</code> to the Cognix server environment to enable automatic managed bucket provisioning and the visual file explorer.
+          Automatic Cloud Storage provisioning is not configured on this server yet.
         </div>
       ) : null}
 

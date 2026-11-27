@@ -115,7 +115,7 @@ export function CloudAuthPanel({
   if (loading && !data) {
     return (
       <div className="flex min-h-[320px] items-center justify-center gap-2 text-[13px] text-white/50">
-        <PixelLoader /> Loading Better Auth details…
+        <PixelLoader /> Loading Cloud Authentication…
       </div>
     );
   }
@@ -141,10 +141,10 @@ export function CloudAuthPanel({
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 id="cloud-auth-heading" className="text-lg font-semibold tracking-tight text-white">
-            Authentication · Better Auth
+            Cognix Cloud Authentication
           </h2>
           <p className="mt-1 text-[13px] text-white/55">
-            Email/password, verification, password reset, and OAuth sessions stored directly in your Neon PostgreSQL database.
+            Email/password, verification, password reset, and OAuth sessions stored directly in your Cognix Cloud PostgreSQL database.
           </p>
         </div>
         <button
@@ -190,7 +190,7 @@ export function CloudAuthPanel({
               )}
               aria-hidden="true"
             />
-            {data.codebase.packageInstalled ? `better-auth ${data.codebase.packageVersion ?? ""}` : "Not installed yet"}
+            {data.codebase.packageInstalled ? (data.schemaReady ? "Active · Ready" : "Installed · Pending schema") : "Not configured yet"}
           </p>
           <span className="mt-0.5 block truncate font-mono text-[11px] text-white/40">
             {data.codebase.serverConfigPath ?? "lib/auth.ts pending"}
@@ -204,10 +204,8 @@ export function CloudAuthPanel({
           <div className="flex items-center gap-2.5">
             <KeyRound className="size-4 text-white/60" aria-hidden="true" />
             <div>
-              <p className="text-[13px] font-medium text-white">
-                Signing Secret (<code className="font-mono text-[12px]">BETTER_AUTH_SECRET</code>)
-              </p>
-              <p className="text-[11.5px] text-white/45">Signs cookies, CSRF tokens, and password reset tokens.</p>
+              <p className="text-[13px] font-medium text-white">Session Signing Secret</p>
+              <p className="text-[11.5px] text-white/45">Signs cookies, CSRF tokens, and password reset tokens in .env.local.</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -224,8 +222,8 @@ export function CloudAuthPanel({
               type="button"
               disabled={Boolean(busy)}
               onClick={() => {
-                if (!data.secretSet || window.confirm("Rotate BETTER_AUTH_SECRET? Existing user sessions will sign in again.")) {
-                  void postAction("rotate", { action: "rotate_secret" }, "BETTER_AUTH_SECRET updated and synced.");
+                if (!data.secretSet || window.confirm("Rotate the session signing secret? Existing signed-in app users will sign in again.")) {
+                  void postAction("rotate", { action: "rotate_secret" }, "Session signing secret updated and synced.");
                 }
               }}
               className={btnSecondary}
@@ -245,7 +243,7 @@ export function CloudAuthPanel({
               <p className="text-[11.5px] text-white/45">
                 {data.databaseSet
                   ? "Connected to PostgreSQL for user, session, account, and verification tables."
-                  : "Provision Neon PostgreSQL so Better Auth can persist users and sessions."}
+                  : "Provision Cognix Cloud PostgreSQL so authentication can persist users and sessions."}
               </p>
             </div>
           </div>
@@ -258,14 +256,14 @@ export function CloudAuthPanel({
               <button
                 type="button"
                 disabled={Boolean(busy)}
-                onClick={() => void postAction("prov_db", { action: "provision_database" }, "Neon PostgreSQL provisioned.")}
+                onClick={() => void postAction("prov_db", { action: "provision_database" }, "Cloud PostgreSQL provisioned.")}
                 className={btnPrimary}
               >
-                Provision Neon
+                Provision Database
               </button>
             ) : (
               <button type="button" onClick={() => onOpenSection("database")} className={btnSecondary}>
-                Configure Neon
+                Configure Database
               </button>
             )}
           </div>
@@ -275,22 +273,22 @@ export function CloudAuthPanel({
           <div className="flex items-center gap-2.5">
             <Mail className="size-4 text-white/60" aria-hidden="true" />
             <div>
-              <p className="text-[13px] font-medium text-white">Verification & Reset Emails (Resend)</p>
+              <p className="text-[13px] font-medium text-white">Verification &amp; Reset Emails</p>
               <p className="text-[11.5px] text-white/45">
                 {data.emailConfigured
-                  ? `Sending from ${data.emailFrom ?? "Resend"}`
-                  : "Connect Resend in Emails to deliver live verification and password-reset links."}
+                  ? `Sending from ${data.emailFrom ?? "Cloud Emails"}`
+                  : "Connect an email API key in Emails to deliver live verification and password-reset links."}
               </p>
             </div>
           </div>
           <button type="button" onClick={() => onOpenSection("email")} className={btnSecondary}>
-            {data.emailConfigured ? "Manage Emails" : "Connect Resend"}
+            {data.emailConfigured ? "Manage Emails" : "Configure Emails"}
           </button>
         </div>
 
         <div className="px-4 py-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-[13px] font-medium text-white">Detected Better Auth Configuration</p>
+            <p className="text-[13px] font-medium text-white">Detected Authentication Configuration</p>
             <div className="flex flex-wrap gap-1.5 text-[11px]">
               <span
                 className={cn(
@@ -339,9 +337,9 @@ export function CloudAuthPanel({
       {!data.schemaReady ? (
         <div className="rounded-lg border border-white/10 bg-white/[0.02] p-6 text-center">
           <ShieldCheck className="mx-auto size-6 text-white/50" aria-hidden="true" />
-          <h3 className="mt-2.5 text-[14px] font-medium text-white">Better Auth tables are not in PostgreSQL yet</h3>
+          <h3 className="mt-2.5 text-[14px] font-medium text-white">Authentication tables are not in PostgreSQL yet</h3>
           <p className="mx-auto mt-1 max-w-md text-[12.5px] leading-5 text-white/50">
-            Ask Curator to set up Better Auth with PostgreSQL (<code className="font-mono">user</code>,{" "}
+            Ask Cognix to set up Cognix Cloud Authentication with PostgreSQL (<code className="font-mono">user</code>,{" "}
             <code className="font-mono">session</code>, <code className="font-mono">account</code>, and{" "}
             <code className="font-mono">verification</code> tables), sign-in/sign-up screens, and protected routes.
           </p>
@@ -351,12 +349,12 @@ export function CloudAuthPanel({
               type="button"
               onClick={() =>
                 onAskAgent(
-                  "Set up Better Auth with PostgreSQL (DATABASE_URL and BETTER_AUTH_SECRET), migrate the auth tables, and create sign-up, sign-in, password reset, and protected account views",
+                  "Set up Cognix Cloud Authentication with PostgreSQL, migrate the auth tables, and create sign-up, sign-in, and protected account views",
                 )
               }
               className={btnPrimary}
             >
-              <Sparkles className="size-3.5" aria-hidden="true" /> Set up Better Auth with AI
+              <Sparkles className="size-3.5" aria-hidden="true" /> Set up Authentication with AI
             </button>
           </div>
         </div>

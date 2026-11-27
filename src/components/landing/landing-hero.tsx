@@ -8,7 +8,7 @@ const STARTER_PROMPTS = [
   {
     icon: Flame,
     title: "SaaS Billing Dashboard",
-    prompt: "Create a SaaS revenue dashboard with subscription analytics, MRR churn metrics, and Stripe billing tiers using Next.js and Neon Postgres.",
+    prompt: "Create a SaaS revenue dashboard with subscription analytics, MRR churn metrics, and tiered billing plans backed by PostgreSQL.",
     category: "Full Stack",
   },
   {
@@ -26,7 +26,7 @@ const STARTER_PROMPTS = [
   {
     icon: Database,
     title: "E-Commerce & Inventory",
-    prompt: "Build a modern digital product store with shopping cart, instant search filter, inventory management, and mock checkout flow.",
+    prompt: "Build a modern digital product store with shopping cart, instant search filter, inventory management, and checkout flow.",
     category: "Commerce",
   },
 ];
@@ -34,7 +34,7 @@ const STARTER_PROMPTS = [
 export function LandingHero({ isAuthConfigured }: { isAuthConfigured: boolean }) {
   const router = useRouter();
   const [selectedPrompt, setSelectedPrompt] = useState(
-    "Create a SaaS revenue dashboard with subscription analytics, MRR churn metrics, and Stripe billing tiers using Next.js and Neon Postgres."
+    "Create a SaaS revenue dashboard with subscription analytics, MRR churn metrics, and tiered billing plans backed by PostgreSQL.",
   );
 
   function handleStart(promptText: string) {
@@ -72,7 +72,7 @@ export function LandingHero({ isAuthConfigured }: { isAuthConfigured: boolean })
 
         {/* Subtitle */}
         <p className="mt-6 text-base sm:text-lg lg:text-xl text-white/60 max-w-3xl mx-auto leading-relaxed text-balance">
-          Describe what you want to build. Cognix provisions an isolated Daytona sandbox, writes Next.js and PostgreSQL code, and gives you a live interactive preview with visual click-to-edit.
+          Describe what you want to build. Cognix provisions an isolated cloud sandbox, writes full-stack TypeScript and PostgreSQL code, and gives you a live interactive preview with visual click-to-edit.
         </p>
 
         {/* Interactive Prompt Playground */}
@@ -85,7 +85,7 @@ export function LandingHero({ isAuthConfigured }: { isAuthConfigured: boolean })
               </span>
               <span className="hidden sm:inline-flex items-center gap-1 text-[11px] text-emerald-400 font-mono">
                 <span className="size-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                Daytona Sandboxes Ready
+                Cloud Sandboxes Ready
               </span>
             </div>
 
@@ -96,7 +96,7 @@ export function LandingHero({ isAuthConfigured }: { isAuthConfigured: boolean })
               <textarea
                 id="hero-prompt-input"
                 className="w-full min-h-[96px] bg-transparent text-sm sm:text-base text-white placeholder-white/35 resize-none outline-none leading-relaxed"
-                placeholder="Describe your full-stack app (e.g., Stripe billing dashboard with Neon DB and real-time charts)…"
+                placeholder="Describe your full-stack app (e.g., SaaS billing dashboard with PostgreSQL and real-time charts)…"
                 value={selectedPrompt}
                 onChange={(e) => setSelectedPrompt(e.target.value)}
                 maxLength={4000}
@@ -105,13 +105,13 @@ export function LandingHero({ isAuthConfigured }: { isAuthConfigured: boolean })
               <div className="mt-3 flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-white/8">
                 <div className="flex items-center gap-2 text-xs text-white/45">
                   <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white/5 border border-white/10 text-white/70">
-                    <Code2 className="size-3 text-sky-400" /> Next.js 16
+                    <Code2 className="size-3 text-sky-400" /> Full-Stack App
                   </span>
                   <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white/5 border border-white/10 text-white/70">
-                    <Database className="size-3 text-emerald-400" /> Neon Postgres
+                    <Database className="size-3 text-emerald-400" /> Cognix Cloud DB
                   </span>
                   <span className="hidden sm:inline-flex items-center gap-1 px-2 py-1 rounded bg-white/5 border border-white/10 text-white/70">
-                    <Cpu className="size-3 text-indigo-400" /> Daytona Sandbox
+                    <Cpu className="size-3 text-indigo-400" /> Cloud Sandbox
                   </span>
                 </div>
 
@@ -155,7 +155,7 @@ export function LandingHero({ isAuthConfigured }: { isAuthConfigured: boolean })
         <div className="mt-14 pt-8 border-t border-white/8 grid grid-cols-2 sm:grid-cols-4 gap-6 max-w-4xl mx-auto text-left">
           <div className="landing-metric-box">
             <strong className="font-mono text-2xl sm:text-3xl text-white font-semibold tabular-nums">&lt;3s</strong>
-            <span className="text-xs text-white/50 mt-1 block">Daytona Sandbox Startup</span>
+            <span className="text-xs text-white/50 mt-1 block">Cloud Sandbox Startup</span>
           </div>
           <div className="landing-metric-box">
             <strong className="font-mono text-2xl sm:text-3xl text-white font-semibold tabular-nums">100%</strong>

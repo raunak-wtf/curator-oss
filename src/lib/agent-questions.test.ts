@@ -24,11 +24,10 @@ describe("agent-questions", () => {
     it("creates a holistic Cognix Cloud wire-up prompt when enabled from Overview", () => {
       const prompt = cloudWireUpPromptFor();
       expect(prompt).toContain("turned on Cognix Cloud");
-      expect(prompt).toContain("Neon PostgreSQL");
-      expect(prompt).toContain("Drizzle");
-      expect(prompt).toContain("Better Auth");
-      expect(prompt).toContain("Cognix Cloud Storage");
-      expect(prompt).toContain("Resend");
+      expect(prompt).toContain("Cognix Cloud Database");
+      expect(prompt).toContain("Authentication");
+      expect(prompt).toContain("Storage");
+      expect(prompt).toContain("Emails");
       expect(prompt).toContain("production build");
     });
 
@@ -37,7 +36,7 @@ describe("agent-questions", () => {
       expect(prompt).toContain("Database tab");
       expect(prompt).toContain("read_cloud_guide");
       expect(prompt).toContain("DATABASE_URL");
-      expect(prompt).toContain("Drizzle ORM");
+      expect(prompt).toContain("Cognix Cloud PostgreSQL");
     });
 
     it("tailors the wire-up prompt when enabled from Storage", () => {
@@ -58,7 +57,7 @@ describe("agent-questions", () => {
     it("tailors the wire-up prompt when enabled from Authentication", () => {
       const prompt = cloudWireUpPromptFor("auth");
       expect(prompt).toContain("Authentication tab");
-      expect(prompt).toContain("Better Auth");
+      expect(prompt).toContain("Cognix Cloud Authentication");
       expect(prompt).toContain("BETTER_AUTH_SECRET");
       expect(prompt).toContain("/api/auth/[...all]");
     });

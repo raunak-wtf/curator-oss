@@ -135,14 +135,14 @@ export function extractStreamingActivityLabel(toolName: string, partialArgs: str
   }
   if (toolName === "neon_database") {
     const actionMatch = partialArgs.match(/"action"\s*:\s*"([^"\\]{1,40})"/);
-    return actionMatch ? `Preparing Neon database (${actionMatch[1]})` : "Preparing Neon database";
+    return actionMatch ? `Preparing Cloud Database (${actionMatch[1]})` : "Preparing Cloud Database";
   }
   if (toolName === "cloud_storage") {
     const actionMatch = partialArgs.match(/"action"\s*:\s*"([^"\\]{1,40})"/);
     return actionMatch ? `Preparing Cloud Storage (${actionMatch[1]})` : "Preparing Cloud Storage";
   }
   if (toolName === "resend_email") {
-    return "Preparing Resend email action";
+    return "Preparing Cloud Email action";
   }
   return null;
 }

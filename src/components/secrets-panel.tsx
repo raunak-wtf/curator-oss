@@ -116,7 +116,7 @@ export function SecretsPanel({ projectId }: SecretsPanelProps) {
                 required
                 pattern="^[A-Z][A-Z0-9_]{0,63}$"
                 title="Uppercase letters, numbers, and underscores only"
-                placeholder="OPENAI_API_KEY"
+                placeholder="CUSTOM_API_KEY"
                 value={newName}
                 onChange={(e) => setNewName(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ''))}
                 className="cognix-text-input w-full font-mono text-[13px]"
@@ -128,7 +128,7 @@ export function SecretsPanel({ projectId }: SecretsPanelProps) {
                 id="secret-value"
                 type="password"
                 required
-                placeholder="sk-..."
+                placeholder="••••••••••••"
                 value={newValue}
                 onChange={(e) => setNewValue(e.target.value)}
                 className="cognix-text-input w-full font-mono text-[13px]"

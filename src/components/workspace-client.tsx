@@ -951,9 +951,21 @@ export function WorkspaceClient({
             ]);
           }
           if (event.type === "tool_start") {
+            const friendlyToolName =
+              event.name === "neon_database"
+                ? "Cloud Database"
+                : event.name === "resend_email"
+                  ? "Cloud Emails"
+                  : event.name === "cloud_storage"
+                    ? "Cloud Storage"
+                    : event.name === "read_cloud_guide"
+                      ? "Reading Cloud guide"
+                      : event.name === "request_cognix_cloud"
+                        ? "Cognix Cloud"
+                        : event.name.replaceAll("_", " ");
             setActivities((current) => [
               ...current.map((item) => ({ ...item, status: "done" as const })),
-              { id: event.id, name: event.name, label: event.name.replaceAll("_", " "), status: "running", target: activityTarget(event.name, event.input) },
+              { id: event.id, name: event.name, label: friendlyToolName, status: "running", target: activityTarget(event.name, event.input) },
             ]);
           }
           if (event.type === "approval_request") setPendingApproval(event.approval);
@@ -1233,7 +1245,7 @@ export function WorkspaceClient({
 
   async function unpublishProject() {
     if (isPublishing || !project.publishedAt) return;
-    if (!window.confirm("Unpublish this app? Its public URL will stop working and Daytona auto-stop will be restored.")) return;
+    if (!window.confirm("Unpublish this app? Its public URL will stop working and sandbox auto-stop will be restored.")) return;
     setIsPublishing(true);
     try {
       const response = await fetch(`/api/projects/${project.id}/publish`, { method: "DELETE" });

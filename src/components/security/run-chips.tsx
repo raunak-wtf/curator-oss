@@ -41,6 +41,11 @@ const KIND: Record<string, { kind: Kind; verb: string }> = {
   stop_process: { kind: "run", verb: "Stop process" },
   web_search: { kind: "web", verb: "Web search" },
   fetch_url: { kind: "web", verb: "Fetch" },
+  neon_database: { kind: "run", verb: "Cloud Database" },
+  cloud_storage: { kind: "run", verb: "Cloud Storage" },
+  resend_email: { kind: "run", verb: "Cloud Emails" },
+  read_cloud_guide: { kind: "read", verb: "Read Cloud guide" },
+  request_cognix_cloud: { kind: "ask", verb: "Cognix Cloud" },
   ask_user: { kind: "ask", verb: "Asked you" },
   propose_pull_request: { kind: "ask", verb: "Proposed a PR" },
 };

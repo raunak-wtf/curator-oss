@@ -14,7 +14,7 @@ type Context = { params: Promise<{ projectId: string }> };
 
 function agentErrorMessage(error: unknown) {
   const status = typeof error === "object" && error && "status" in error ? Number(error.status) : undefined;
-  if (status === 401) return "The model provider rejected the API key. Update OPENAI_API_KEY and try again.";
+  if (status === 401) return "The AI model provider rejected the configured API key. Check the server model configuration and try again.";
   if (status === 403) return "The model provider blocked the request. Check the endpoint access policy and try again.";
   if (status === 429) return "The model provider rate limit was reached after automatic retries. Wait a moment, then click Retry or Continue.";
   const message = error instanceof Error ? error.message : "";

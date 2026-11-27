@@ -335,7 +335,7 @@ function CloudGate({
         <EnableButton busy={busy} isBuilding={isBuilding} onClick={onEnable} />
       </div>
       <p className="mt-3 max-w-sm text-[12px] leading-5 text-white/40">
-        Turning on Cognix Cloud provisions Managed Neon PostgreSQL and Bucketline Storage, unlocks Better Auth and Resend Emails, and asks Cognix to wire them into your app.
+        Turning on Cognix Cloud provisions your PostgreSQL database and Cloud Storage, unlocks Authentication and Emails, and asks Cognix to wire them into your app.
       </p>
     </div>
   );
@@ -361,7 +361,7 @@ function CloudOverview({
       <CloudGate
         icon={Cloud}
         title="Turn on Cognix Cloud"
-        description="Provision managed Neon PostgreSQL, Bucketline S3 storage & CDN, Better Auth on Postgres, and Resend email management."
+        description="Provision managed PostgreSQL, Cloud Storage & CDN, Authentication, and transactional Emails."
         busy={busy}
         isBuilding={isBuilding}
         onEnable={() => onSetEnabled(true)}
@@ -373,10 +373,10 @@ function CloudOverview({
     if (secretNames === null) return "Checking variables…";
     const meta = CLOUD_FEATURES[feature];
     const missing = meta.env.filter((name) => !secretNames.includes(name)).length;
-    if (feature === "database") return missing === 0 ? "Managed Neon · Ready" : "Click to provision Neon";
-    if (feature === "storage") return missing === 0 ? "Managed Bucketline · Ready" : "Click to provision bucket";
-    if (feature === "email") return secretNames.includes("RESEND_API_KEY") ? "Resend connected" : "Connect Resend API key";
-    if (feature === "auth") return missing === 0 ? "Better Auth · Ready" : "Needs database setup";
+    if (feature === "database") return missing === 0 ? "Provisioned · Ready" : "Click to provision database";
+    if (feature === "storage") return missing === 0 ? "Provisioned · Ready" : "Click to provision bucket";
+    if (feature === "email") return secretNames.includes("RESEND_API_KEY") ? "Connected · Ready" : "Connect email API key";
+    if (feature === "auth") return missing === 0 ? "Configured · Ready" : "Needs database setup";
     return missing === 0 ? "Ready" : `${missing} ${missing === 1 ? "variable" : "variables"} missing`;
   }
 
@@ -388,7 +388,7 @@ function CloudOverview({
             Cognix Cloud
           </h2>
           <p className="mt-1 flex items-center gap-2 text-[13px] text-white/55">
-            <span className="size-2 rounded-full bg-emerald-400" aria-hidden="true" /> On · Managed Neon PostgreSQL, Bucketline Storage, Resend, and Better Auth unlocked.
+            <span className="size-2 rounded-full bg-emerald-400" aria-hidden="true" /> On · Database, Storage, Emails, and Authentication unlocked.
           </p>
         </div>
         <button

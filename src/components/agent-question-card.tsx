@@ -412,7 +412,7 @@ export function CloudRequestCard({ reason, featureLabels, busy, error, onEnable,
         <p className="mt-1.5 text-[12.5px] leading-5 text-white/65">{reason}</p>
         <p className="mt-2 text-[12px] leading-5 text-white/45">
           Requested: <span className="font-medium text-white/75">{featureLabels.join(", ")}</span>. Approving enables Cognix Cloud
-          (Managed Neon PostgreSQL, Better Auth, Resend Email, and Cloud Storage) for this project.
+          (Database, Authentication, Storage, and Emails) for this project.
         </p>
         {error ? (
           <p role="alert" className="mt-2 rounded-md bg-red-500/10 px-2.5 py-1.5 text-[12px] leading-5 text-red-300">

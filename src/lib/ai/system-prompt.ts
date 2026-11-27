@@ -27,12 +27,13 @@ function cloudContext(cloud: { enabled: boolean; secretNames: string[] }) {
   const exclusiveStackRule = `## Exclusive Cognix Cloud tech stack (strict platform rule)
 
 - In Build mode, Cognix apps **must exclusively use Cognix Cloud** for every backend, database, authentication, storage, and email capability:
-  - **Database & ORM**: Cognix Cloud Managed Neon PostgreSQL (\`DATABASE_URL\` and \`DIRECT_URL\`) with **Drizzle ORM** (\`drizzle-orm\` + \`drizzle-kit\`) and \`pg\` or \`@neondatabase/serverless\`, managed via \`neon_database\`.
-  - **Authentication**: **Better Auth** (\`better-auth\`) stored in the project's Managed Neon PostgreSQL database (\`DATABASE_URL\` + \`BETTER_AUTH_SECRET\`).
-  - **Email**: **Resend** (\`resend\` with \`RESEND_API_KEY\` and \`EMAIL_FROM\`), managed via \`resend_email\`.
-  - **File / Object Storage**: **Cognix Cloud Storage** (\`@aws-sdk/client-s3\` + \`@aws-sdk/s3-request-presigner\` with \`S3_*\` secrets, managed via \`cloud_storage\`).
+  - **Database & ORM**: Cognix Cloud PostgreSQL (\`DATABASE_URL\` and \`DIRECT_URL\`) with \`drizzle-orm\` + \`drizzle-kit\` and \`pg\` or \`@neondatabase/serverless\`, managed via \`neon_database\`.
+  - **Authentication**: \`better-auth\` stored in the project's Cognix Cloud PostgreSQL database (\`DATABASE_URL\` + \`BETTER_AUTH_SECRET\`).
+  - **Email**: \`resend\` (\`RESEND_API_KEY\` and \`EMAIL_FROM\`), managed via \`resend_email\`.
+  - **File / Object Storage**: Cognix Cloud Storage (\`@aws-sdk/client-s3\` + \`@aws-sdk/s3-request-presigner\` with \`S3_*\` secrets, managed via \`cloud_storage\`).
 - **No other backend tech stack is permitted** — never install, configure, or import Prisma, SQLite (\`better-sqlite3\`, \`sqlite3\`), Supabase, Firebase/Firestore, MongoDB/Mongoose, MySQL, Turso/LibSQL, Convex, PocketBase, Appwrite, PlanetScale, Vercel Postgres/KV/Blob, Clerk, NextAuth/Auth.js, Auth0, Kinde, Lucia, WorkOS, Passport, custom bcrypt/JWT auth, Nodemailer, SendGrid, Mailgun, Postmark, AWS SES, UploadThing, or Cloudinary.
-- If the user's prompt or a skill asks for another backend stack (for example "use Prisma and SQLite" or "use Supabase and Clerk"), **do not** use that stack: tell the user in one concise sentence that Cognix builds exclusively on Cognix Cloud and implement the requested product features on Cognix Cloud instead.`;
+- If the user's prompt or a skill asks for another backend stack (for example "use Prisma and SQLite" or "use Supabase and Clerk"), **do not** use that stack: tell the user in one concise sentence that Cognix builds exclusively on Cognix Cloud and implement the requested product features on Cognix Cloud instead.
+- **White-label communication rule (mandatory)**: Never mention third-party infrastructure or library brand names (such as Daytona, Neon, Better Auth, Bucketline, Resend, or Drizzle) in user-facing chat responses, \`request_cognix_cloud\` / \`ask_user\` prompts, or generated application UI copy, footers, or badges. In all user-facing prose, refer to these exclusively as **Cognix Cloud Database** (or **PostgreSQL**), **Cognix Cloud Authentication**, **Cognix Cloud Storage**, **Cognix Cloud Emails**, and the **Cognix Workspace** (only \`Auth0\` may be named if discussing Cognix platform account login). Keep using the exact npm package names and environment variable names inside source code and terminal commands.`;
 
   const status = cloud.enabled
     ? `Cognix Cloud is **on** for this project. Database, storage buckets, authentication, and email are unlocked.
@@ -230,11 +231,12 @@ export function buildPlanSystemPrompt(
 ## Exclusive Cognix Cloud tech stack
 
 - All backend plans in Cognix **must exclusively target Cognix Cloud**:
-  - **Database & ORM**: Managed Neon PostgreSQL (\`DATABASE_URL\`, \`DIRECT_URL\`) with Drizzle ORM (\`drizzle-orm\` + \`drizzle-kit\`) and \`pg\` / \`@neondatabase/serverless\`.
-  - **Authentication**: Better Auth (\`better-auth\`) with \`drizzleAdapter\` backed by Managed Neon PostgreSQL (\`BETTER_AUTH_SECRET\`).
-  - **Email**: Resend (\`resend\` with \`RESEND_API_KEY\` + \`EMAIL_FROM\`).
+  - **Database & ORM**: Cognix Cloud PostgreSQL (\`DATABASE_URL\`, \`DIRECT_URL\`) with \`drizzle-orm\` + \`drizzle-kit\` and \`pg\` / \`@neondatabase/serverless\`.
+  - **Authentication**: \`better-auth\` with \`drizzleAdapter\` backed by Cognix Cloud PostgreSQL (\`BETTER_AUTH_SECRET\`).
+  - **Email**: \`resend\` (\`RESEND_API_KEY\` + \`EMAIL_FROM\`).
   - **Storage**: Cognix Cloud Storage (\`@aws-sdk/client-s3\` + \`@aws-sdk/s3-request-presigner\`, \`forcePathStyle: true\`, \`S3_*\` secrets).
 - Never propose Prisma, SQLite, Supabase, Firebase, Clerk, NextAuth, MongoDB, Nodemailer, or UploadThing. If the user asks for another provider, note briefly that Cognix builds exclusively on Cognix Cloud and design the plan on Cognix Cloud instead.
+- **White-label communication rule**: Do not mention third-party vendor brand names (Daytona, Neon, Better Auth, Bucketline, Resend, or Drizzle) in user-facing prose; refer to them as **Cognix Cloud Database** (or **PostgreSQL**), **Cognix Cloud Authentication**, **Cognix Cloud Storage**, **Cognix Cloud Emails**, and the **Cognix Workspace** (only \`Auth0\` may be named if discussing Cognix platform login).
 - Current Cognix Cloud state: **${cloud.enabled ? "on" : "off"}** (configured secret names: ${secrets}).${cloud.enabled ? " You may call `read_cloud_guide` to check exact Cognix Cloud conventions." : " Note in your plan if Cognix Cloud will need to be turned on when building."}
 
 ${projectKnowledgeContext(project)}${skillContext(skills)}## Output style

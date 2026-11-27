@@ -1,8 +1,12 @@
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
+import { ensureProjectStorageBucket, isBucketlineConfigured } from "../cloud/bucketline";
+import { ensureProjectNeonDatabase, isNeonApiConfigured } from "../cloud/neon";
 import { ensureSandbox, getPreviewHealth, getPreviewUrl, getProjectFsRoot, getProjectRoot, syncProjectEnv } from "../daytona";
-import { createAgentApproval, createMessage, expireAgentApproval, getAgentApprovalDecisions, getDecryptedSecrets, getProjectCloud, getProjectRepository, listSecretNames, updateAttachmentSandboxPath, updateProject } from "../store";
+import { isSecretsEncryptionConfigured } from "../secrets-crypto";
+import { createAgentApproval, createMessage, expireAgentApproval, getAgentApprovalDecisions, getDecryptedSecrets, getProjectCloud, getProjectRepository, listSecretNames, updateAttachmentSandboxPath, updateProject, upsertSecret } from "../store";
 import { createSignedObjectReadUrl, downloadObject } from "../storage";
 import type {
   AgentApprovalDecision,
@@ -92,7 +96,7 @@ export async function runAgent(input: {
   if (!isAgentConfigured) {
     await emit({ type: "status", label: "Waiting for a model connection" });
     const content =
-      "Cognix is ready to build this project, but the model connection is incomplete. Add OPENAI_API_KEY and OPENAI_MODEL (plus OPENAI_BASE_URL for your custom provider), then send this prompt again.";
+      "Cognix is ready to build this project, but the AI model connection is not configured on this server yet.";
     for (const chunk of content.match(/.{1,28}/g) ?? [content]) {
       await emit({ type: "token", value: chunk });
     }
@@ -151,7 +155,40 @@ export async function runAgent(input: {
   // Security reviews never sync or push, even if a repository is linked in Git Control.
   const repository = security ? null : linkedRepository;
   const cloudState = { enabled: cloud?.status === "ready", secretNames };
-  if (!security && secretNames.length > 0) {
+  if (!security && cloudState.enabled && isSecretsEncryptionConfigured) {
+    let autoProvisioned = false;
+    if (!cloudState.secretNames.includes("BETTER_AUTH_SECRET")) {
+      await upsertSecret(project.id, "BETTER_AUTH_SECRET", randomBytes(32).toString("base64url"), "cloud").catch(() => undefined);
+      autoProvisioned = true;
+    }
+    if ((!cloudState.secretNames.includes("DATABASE_URL") || !cloud?.neonProjectId) && isNeonApiConfigured()) {
+      await emit({ type: "status", label: "Provisioning Cloud Database" });
+      try {
+        await ensureProjectNeonDatabase(project);
+        autoProvisioned = true;
+      } catch {
+        // Keep running; the agent can inspect status or retry via cloud tools if needed.
+      }
+    }
+    if (!cloudState.secretNames.includes("S3_BUCKET") && isBucketlineConfigured()) {
+      await emit({ type: "status", label: "Provisioning Cloud Storage" });
+      try {
+        await ensureProjectStorageBucket(project);
+        autoProvisioned = true;
+      } catch {
+        // Keep running; storage tool can report details if needed.
+      }
+    }
+    if (autoProvisioned) {
+      const [freshSecrets, freshNames] = await Promise.all([
+        getDecryptedSecrets(project.id).catch(() => ({} as Record<string, string>)),
+        listSecretNames(project.id).then((items) => items.map((item) => item.name)).catch(() => cloudState.secretNames),
+      ]);
+      terminal.addSecrets(Object.values(freshSecrets));
+      cloudState.secretNames = freshNames;
+    }
+  }
+  if (!security && cloudState.secretNames.length > 0) {
     await syncProjectEnv(project).catch(() => undefined);
   }
   let githubInfo: GitHubCommitInfo | undefined;
@@ -895,7 +932,7 @@ export async function runAgent(input: {
   }
 
   const previewUrl = await getPreviewUrl({ ...project, sandboxId: sandbox.id }, 3000);
-  if (!previewUrl) throw new Error("Daytona could not create a preview URL for port 3000.");
+  if (!previewUrl) throw new Error("Could not create a live preview URL for port 3000.");
   await updateProject(project.id, project.ownerId, { previewUrl, status: "ready" });
   await emit({ type: "preview", url: previewUrl, sandboxId: sandbox.id });
   previewReady = true;

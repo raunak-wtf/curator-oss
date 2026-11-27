@@ -7,12 +7,12 @@ const FAQ_ITEMS = [
   {
     question: "How does Cognix execute and run my generated full-stack code?",
     answer:
-      "Cognix spins up a secure, isolated Linux container via Daytona for every project. The container runs a real Node.js runtime with Next.js App Router, manages an active file system, compiles TypeScript, and exposes a live local development server that is tunneled directly to your browser preview.",
+      "Cognix spins up a secure, isolated Linux container for every project. The container runs a real Node.js runtime, manages an active file system, compiles TypeScript, and exposes a live local development server that is tunneled directly to your browser preview.",
   },
   {
     question: "Can I export the full source code and run it locally?",
     answer:
-      "Yes! You have 100% ownership of everything created in Cognix with zero vendor lock-in. You can download the complete project as a standard Next.js application repository, complete with package.json, Tailwind config, Drizzle ORM schemas, and API routes, and run `npm run dev` on your own machine or deploy to Vercel/AWS.",
+      "Yes! You have 100% ownership of everything created in Cognix with zero vendor lock-in. You can download the complete project as a standard application repository, complete with package.json, styling config, database schemas, and API routes, and run `npm run dev` on your own machine or deploy anywhere.",
   },
   {
     question: "How does the Visual Click-to-Edit feature work?",
@@ -20,14 +20,14 @@ const FAQ_ITEMS = [
       "Cognix injects a lightweight, bidirectional inspection bridge into your preview iframe. When you enable visual edit mode and click any button, card, or navigation element, Cognix extracts its DOM selector, React component hierarchy, and file path, automatically injecting this context into your next prompt.",
   },
   {
-    question: "How does database persistence work with Neon PostgreSQL?",
+    question: "How does database persistence work with Cognix Cloud?",
     answer:
-      "Every project connects directly to a serverless Neon PostgreSQL database. Cognix uses Drizzle ORM to define type-safe database schemas and automatically applies schema migrations (`drizzle-kit push`). Your data persists across reloads, edits, and live user interactions.",
+      "Every project connects directly to a dedicated Cognix Cloud PostgreSQL database. Cognix defines type-safe database schemas and automatically applies schema migrations so your data persists across reloads, edits, and live user interactions.",
   },
   {
     question: "Is my code and uploaded data secure and private?",
     answer:
-      "Yes. Accounts and authentication are secured through Auth0 zero-trust identity. Project files, attachments, and database connections are completely private to your account. Daytona sandboxes are strictly isolated and never share memory, processes, or storage with other users.",
+      "Yes. Accounts and authentication are secured through Auth0 zero-trust identity. Project files, attachments, and database connections are completely private to your account. Cognix sandboxes are strictly isolated and never share memory, processes, or storage with other users.",
   },
   {
     question: "Can I publish my application to a live public URL?",
@@ -52,7 +52,7 @@ export function LandingFAQ() {
             Frequently asked questions.
           </h2>
           <p className="mt-3 text-sm sm:text-base text-white/60">
-            Everything you need to know about Daytona sandboxes, code export, and database persistence.
+            Everything you need to know about Cognix sandboxes, code export, and Cognix Cloud persistence.
           </p>
         </div>
 

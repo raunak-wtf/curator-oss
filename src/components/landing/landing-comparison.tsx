@@ -3,13 +3,13 @@ import { Check, Cpu, Sparkles, X } from "lucide-react";
 const COMPARISON_ROWS = [
   {
     feature: "Code Execution Runtime",
-    cognix: "Isolated Daytona Linux container with Node 20 runtime and port mapping",
+    cognix: "Isolated Cognix Linux container with Node runtime and port mapping",
     others: "Simulated browser iframe or static mockup environment",
     highlight: true,
   },
   {
     feature: "Database & Persistence",
-    cognix: "Serverless Neon PostgreSQL with Drizzle ORM and automatic migrations",
+    cognix: "Managed Cognix Cloud PostgreSQL with type-safe schemas and automatic migrations",
     others: "In-memory fake JSON arrays that wipe on reload",
     highlight: true,
   },

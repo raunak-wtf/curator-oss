@@ -100,7 +100,7 @@ export async function POST(request: Request, context: Context) {
     const databaseUrl = secrets.DATABASE_URL;
     if (!databaseUrl) {
       return Response.json(
-        { error: "Provision the Neon PostgreSQL database first." },
+        { error: "Provision the Cloud PostgreSQL database first." },
         { status: 409, headers: noStore },
       );
     }

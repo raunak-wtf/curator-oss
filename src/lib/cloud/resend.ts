@@ -17,9 +17,9 @@ export function scrubResendKey(text: string) {
 
 export function validateResendApiKeyFormat(raw: string) {
   const trimmed = raw.trim();
-  if (!trimmed) throw new ResendApiError("Enter your Resend API key (starts with re_).", 400);
+  if (!trimmed) throw new ResendApiError("Enter your email API key (starts with re_).", 400);
   if (!/^re_[A-Za-z0-9_-]{10,128}$/.test(trimmed)) {
-    throw new ResendApiError("That does not look like a Resend API key. Copy a key starting with re_ from resend.com/api-keys.", 400);
+    throw new ResendApiError("That does not look like a valid email API key (expected a key starting with re_).", 400);
   }
   return trimmed;
 }
@@ -60,7 +60,7 @@ async function resendRequest<T>(
         ? payload.message
         : typeof payload.error === "string"
           ? payload.error
-          : `Resend rejected the request (HTTP ${response.status}).`;
+          : `Email service rejected the request (HTTP ${response.status}).`;
     throw new ResendApiError(message, response.status);
   }
 

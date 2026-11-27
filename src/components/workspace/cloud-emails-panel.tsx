@@ -101,8 +101,8 @@ export function CloudEmailsPanel({
 
   // Test email
   const [testTo, setTestTo] = useState("");
-  const [testSubject, setTestSubject] = useState("Test email from Curator Cloud");
-  const [testBody, setTestBody] = useState("Your Resend integration is connected and ready.");
+  const [testSubject, setTestSubject] = useState("Test email from Cognix Cloud");
+  const [testBody, setTestBody] = useState("Your Cognix Cloud Email integration is connected and ready.");
 
   // Audiences / Contacts / Broadcasts / Webhooks
   const [audienceName, setAudienceName] = useState("");
@@ -117,7 +117,7 @@ export function CloudEmailsPanel({
       const query = audId ? `?audienceId=${encodeURIComponent(audId)}` : "";
       const response = await fetch(`/api/projects/${projectId}/cloud/resend${query}`, { cache: "no-store" });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error ?? "Could not load Resend status.");
+      if (!response.ok) throw new Error(payload.error ?? "Could not load email service status.");
       return payload as ResendState;
     },
     [projectId],
@@ -136,7 +136,7 @@ export function CloudEmailsPanel({
       try {
         applyResendState(await fetchResendState(audId));
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not load Resend status.");
+        setError(err instanceof Error ? err.message : "Could not load email service status.");
       } finally {
         setLoading(false);
       }
@@ -154,7 +154,7 @@ export function CloudEmailsPanel({
       })
       .catch((err: unknown) => {
         if (!active) return;
-        setError(err instanceof Error ? err.message : "Could not load Resend status.");
+        setError(err instanceof Error ? err.message : "Could not load email service status.");
         setLoading(false);
       });
     return () => {
@@ -172,7 +172,7 @@ export function CloudEmailsPanel({
         body: JSON.stringify(body),
       });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error ?? "Resend request failed.");
+      if (!response.ok) throw new Error(payload.error ?? "Email request failed.");
       if (payload.state) {
         setState(payload.state as ResendState);
         setFromInput((payload.state as ResendState).emailFrom ?? "");
@@ -182,7 +182,7 @@ export function CloudEmailsPanel({
       onSecretsChanged?.();
       return payload;
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Resend request failed.");
+      toast.error(err instanceof Error ? err.message : "Email request failed.");
       return null;
     } finally {
       setBusy(null);
@@ -190,16 +190,16 @@ export function CloudEmailsPanel({
   }
 
   async function disconnectResend() {
-    if (!window.confirm("Disconnect your Resend API key from this project?")) return;
+    if (!window.confirm("Disconnect your email API key from this project?")) return;
     setBusy("disconnect");
     try {
       const response = await fetch(`/api/projects/${projectId}/cloud/resend`, { method: "DELETE" });
-      if (!response.ok) throw new Error("Could not disconnect Resend.");
-      toast.success("Resend disconnected.");
+      if (!response.ok) throw new Error("Could not disconnect email service.");
+      toast.success("Email service disconnected.");
       onSecretsChanged?.();
       await load();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not disconnect Resend.");
+      toast.error(err instanceof Error ? err.message : "Could not disconnect email service.");
     } finally {
       setBusy(null);
     }
@@ -208,7 +208,7 @@ export function CloudEmailsPanel({
   if (loading && !state) {
     return (
       <div className="flex min-h-[320px] items-center justify-center gap-2 text-[13px] text-white/50">
-        <PixelLoader /> Loading Resend integration…
+        <PixelLoader /> Loading Cloud Emails…
       </div>
     );
   }
@@ -232,10 +232,10 @@ export function CloudEmailsPanel({
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 id="cloud-emails-heading" className="text-lg font-semibold tracking-tight text-white">
-            Emails with Resend
+            Cognix Cloud Emails
           </h2>
           <p className="mt-1 text-[13px] text-white/55">
-            Connect your Resend API key to manage sending domains, transactional emails, audiences, broadcasts, and webhooks.
+            Connect your email API key to manage sending domains, transactional emails, audiences, broadcasts, and webhooks.
           </p>
         </div>
         <div className="flex items-center gap-1.5">
@@ -248,8 +248,8 @@ export function CloudEmailsPanel({
             type="button"
             onClick={() => void load(selectedAudienceId)}
             disabled={loading || Boolean(busy)}
-            aria-label="Refresh Resend status"
-            title="Refresh Resend status"
+            aria-label="Refresh email status"
+            title="Refresh email status"
             className={iconBtn}
           >
             {loading ? <PixelLoader /> : <RefreshCw className="size-3.5" aria-hidden="true" />}
@@ -265,7 +265,7 @@ export function CloudEmailsPanel({
             void postAction(
               "connect",
               { action: "connect", apiKey: apiKeyInput.trim(), ...(fromInput.trim() ? { emailFrom: fromInput.trim() } : {}) },
-              "Resend connected and synced to .env.local.",
+              "Email service connected and synced to .env.local.",
             ).then((res) => res && setApiKeyInput(""));
           }}
           className="rounded-lg border border-white/10 bg-white/[0.02] p-5 space-y-4"
@@ -275,9 +275,9 @@ export function CloudEmailsPanel({
               <KeyRound className="size-4" aria-hidden="true" />
             </span>
             <div>
-              <h3 className="text-[14px] font-medium text-white">Connect your Resend account</h3>
+              <h3 className="text-[14px] font-medium text-white">Connect your Email API key</h3>
               <p className="text-[12px] text-white/50">
-                Create a Full Access API key at <span className="font-mono text-white/75">resend.com/api-keys</span> so Curator can manage domains, webhooks, and audiences.
+                Enter a full-access email API key so Cognix Cloud can manage sending domains, webhooks, audiences, and delivery logs.
               </p>
             </div>
           </div>
@@ -285,7 +285,7 @@ export function CloudEmailsPanel({
           <div className="grid gap-3 @[560px]:grid-cols-2">
             <div>
               <label htmlFor="resend-api-key" className="mb-1 block text-[12px] font-medium text-white/75">
-                Resend API Key
+                Email API Key
               </label>
               <input
                 id="resend-api-key"
@@ -316,7 +316,7 @@ export function CloudEmailsPanel({
           <div className="flex justify-end">
             <button type="submit" disabled={!apiKeyInput.trim() || Boolean(busy)} className={btnPrimary}>
               {busy === "connect" ? <PixelLoader className="text-black" /> : <Check className="size-3.5" aria-hidden="true" />}
-              {busy === "connect" ? "Verifying key…" : "Connect Resend"}
+              {busy === "connect" ? "Verifying key…" : "Connect Email Service"}
             </button>
           </div>
         </form>
@@ -349,7 +349,7 @@ export function CloudEmailsPanel({
               </button>
               <button
                 type="button"
-                onClick={() => onAskAgent("Wire transactional emails via Resend in lib/email.ts for sign-up verification, password resets, and notifications")}
+                onClick={() => onAskAgent("Wire Cognix Cloud transactional emails in lib/email.ts for account notifications and updates")}
                 className={btnPrimary}
               >
                 <Sparkles className="size-3.5" aria-hidden="true" /> Add email flows with AI
@@ -359,11 +359,11 @@ export function CloudEmailsPanel({
 
           {state.restrictedKey ? (
             <p className="rounded-lg border border-amber-400/20 bg-amber-400/[0.05] p-3 text-[12px] text-amber-200/85">
-              Your API key is restricted to sending emails only. Use a Full Access Resend key if you also want to manage domains, audiences, broadcasts, and webhooks here.
+              Your API key is restricted to sending emails only. Use a full-access key if you also want to manage domains, audiences, broadcasts, and webhooks here.
             </p>
           ) : null}
 
-          <nav aria-label="Resend features" className="flex gap-1 overflow-x-auto border-b border-white/[0.08] pb-2">
+          <nav aria-label="Email features" className="flex gap-1 overflow-x-auto border-b border-white/[0.08] pb-2">
             {(
               [
                 { id: "domains", label: `Domains (${state.domains.length})`, icon: Globe2 },
@@ -401,7 +401,7 @@ export function CloudEmailsPanel({
                   void postAction(
                     "add_domain",
                     { action: "create_domain", name: newDomain.trim(), region: domainRegion },
-                    `Domain ${newDomain.trim()} added to Resend.`,
+                    `Domain ${newDomain.trim()} added.`,
                   ).then((res) => res && setNewDomain(""));
                 }}
                 className="flex flex-wrap items-end gap-2.5 rounded-lg border border-white/10 bg-white/[0.02] p-4"
@@ -441,7 +441,7 @@ export function CloudEmailsPanel({
 
               {state.domains.length === 0 ? (
                 <p className="rounded-lg border border-white/10 bg-white/[0.02] p-5 text-center text-[12.5px] text-white/45">
-                  No custom sending domains yet. Add one above or test using <code className="font-mono">onboarding@resend.dev</code>.
+                  No custom sending domains yet. Add one above to send from your own address.
                 </p>
               ) : (
                 <ul className="divide-y divide-white/[0.06] rounded-lg border border-white/10 bg-white/[0.02]">
@@ -502,7 +502,7 @@ export function CloudEmailsPanel({
                               aria-label={`Delete domain ${dom.name}`}
                               title={`Delete domain ${dom.name}`}
                               onClick={() => {
-                                if (window.confirm(`Remove ${dom.name} from Resend?`)) {
+                                if (window.confirm(`Remove sending domain ${dom.name}?`)) {
                                   void postAction(`del-dom-${dom.id}`, { action: "delete_domain", domainId: dom.id }, "Domain removed.");
                                 }
                               }}
@@ -881,7 +881,7 @@ export function CloudEmailsPanel({
                       endpoint: webhookUrl.trim(),
                       events: ["email.sent", "email.delivered", "email.bounced", "email.complained"],
                     },
-                    "Webhook registered in Resend.",
+                    "Webhook registered.",
                   ).then((res) => res && setWebhookUrl(""));
                 }}
                 className="flex flex-wrap items-end gap-2 rounded-lg border border-white/10 bg-white/[0.02] p-4"
@@ -895,7 +895,7 @@ export function CloudEmailsPanel({
                     type="url"
                     value={webhookUrl}
                     onChange={(e) => setWebhookUrl(e.target.value)}
-                    placeholder="https://my-app.curatorsite.in/api/webhooks/resend"
+                    placeholder="https://my-app.cognix.app/api/webhooks/email"
                     className={cn(inputClass, "font-mono")}
                   />
                 </div>
@@ -906,7 +906,7 @@ export function CloudEmailsPanel({
 
               {state.webhooks.length === 0 ? (
                 <p className="rounded-lg border border-white/10 bg-white/[0.02] p-5 text-center text-[12.5px] text-white/45">
-                  No Resend webhooks configured yet.
+                  No email webhooks configured yet.
                 </p>
               ) : (
                 <ul className="divide-y divide-white/[0.06] rounded-lg border border-white/10 bg-white/[0.02]">

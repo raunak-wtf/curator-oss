@@ -142,7 +142,7 @@ describe("model-stream resilience & retries", () => {
       "Preparing command: npm install drizzle-orm pg",
     );
     expect(extractStreamingActivityLabel("neon_database", '{"action":"provision"}')).toBe(
-      "Preparing Neon database (provision)",
+      "Preparing Cloud Database (provision)",
     );
     const noop = vi.fn();
     expect(noop).not.toHaveBeenCalled();

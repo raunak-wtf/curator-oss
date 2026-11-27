@@ -43,7 +43,7 @@ function getNeonApiKey() {
   const key = process.env.NEON_API_KEY?.trim();
   if (!key) {
     throw new NeonApiError(
-      "Managed Neon databases require NEON_API_KEY in the Cognix server environment (.env).",
+      "Cognix Cloud Database provisioning is not configured on this server.",
       503,
       "NEON_NOT_CONFIGURED",
     );
@@ -110,7 +110,7 @@ async function neonRequest<T>(
       const message =
         typeof payload.message === "string"
           ? payload.message
-          : `Neon API error (HTTP ${response.status}).`;
+          : `Cloud Database API error (HTTP ${response.status}).`;
       const code = typeof payload.code === "string" ? payload.code : undefined;
       throw new NeonApiError(message, response.status, code);
     }
@@ -118,7 +118,7 @@ async function neonRequest<T>(
     return payload as T;
   }
 
-  throw new NeonApiError("Neon project is busy completing another operation. Try again in a few seconds.", 423);
+  throw new NeonApiError("Cloud Database is busy completing another operation. Try again in a few seconds.", 423);
 }
 
 export type NeonProjectSummary = {

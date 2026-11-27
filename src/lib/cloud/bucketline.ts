@@ -69,7 +69,7 @@ export function isBucketlineConfigured(): boolean {
 function getBucketlineApiKey(): string {
   const key = process.env.BUCKETLINE_API_KEY?.trim();
   if (!key) {
-    throw new Error("Cognix Cloud Storage is not configured on the server (missing BUCKETLINE_API_KEY).");
+    throw new Error("Cognix Cloud Storage provisioning is not configured on this server.");
   }
   return key;
 }

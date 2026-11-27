@@ -11,10 +11,10 @@ const SHOWCASE_PROJECTS = [
     id: "saas-billing",
     title: "Apex Revenue & Subscription Hub",
     category: "saas",
-    description: "Enterprise billing dashboard with MRR trends, churn forecasting, team seat management, and Stripe integration.",
+    description: "Enterprise billing dashboard with MRR trends, churn forecasting, team seat management, and tiered subscription plans.",
     gradient: "from-blue-600/30 to-indigo-600/30",
-    tags: ["Next.js 16", "Neon Postgres", "Drizzle ORM", "Stripe"],
-    prompt: "Build an enterprise SaaS billing and subscription portal with MRR analytics, churn metrics, and Stripe billing tiers.",
+    tags: ["Full-Stack", "Cognix Cloud DB", "TypeScript", "Subscriptions"],
+    prompt: "Build an enterprise SaaS billing and subscription portal with MRR analytics, churn metrics, and tiered billing plans.",
   },
   {
     id: "ai-copilot",
@@ -22,7 +22,7 @@ const SHOWCASE_PROJECTS = [
     category: "ai",
     description: "Intelligent customer service desk with live conversation summarization, semantic knowledge search, and sentiment routing.",
     gradient: "from-violet-600/30 to-purple-600/30",
-    tags: ["Next.js 16", "OpenAI", "Tailwind CSS", "Neon DB"],
+    tags: ["AI Workflows", "Cognix Cloud DB", "TypeScript", "Live Chat"],
     prompt: "Create an AI customer support helpdesk with live chat, automated ticket resolution summaries, and agent analytics.",
   },
   {
@@ -31,7 +31,7 @@ const SHOWCASE_PROJECTS = [
     category: "tools",
     description: "Real-time project tracker with drag-and-drop workflow boards, milestone Gantt views, and team activity audit feeds.",
     gradient: "from-emerald-600/30 to-teal-600/30",
-    tags: ["Next.js 16", "WebSockets", "Auth0", "Daytona"],
+    tags: ["Real-Time", "WebSockets", "Auth0", "Cognix Sandbox"],
     prompt: "Build a collaborative project tracker with drag-and-drop task boards, assignees, activity logs, and real-time status updates.",
   },
   {
@@ -40,8 +40,8 @@ const SHOWCASE_PROJECTS = [
     category: "commerce",
     description: "High-conversion digital goods storefront with faceted filtering, instant checkout drawer, and live inventory sync.",
     gradient: "from-amber-600/30 to-orange-600/30",
-    tags: ["Next.js 16", "Neon DB", "Tailwind CSS", "Daytona"],
-    prompt: "Build a modern digital product store with shopping cart, instant search filter, inventory management, and mock checkout flow.",
+    tags: ["Cognix Cloud DB", "Cloud Storage", "TypeScript", "Commerce"],
+    prompt: "Build a modern digital product store with shopping cart, instant search filter, inventory management, and checkout flow.",
   },
   {
     id: "devops-incident",
@@ -49,16 +49,16 @@ const SHOWCASE_PROJECTS = [
     category: "tools",
     description: "Cloud infrastructure health monitor with uptime SLAs, live alert streaming, and incident runbook automation.",
     gradient: "from-sky-600/30 to-cyan-600/30",
-    tags: ["Next.js 16", "Neon Postgres", "Recharts", "Auth0"],
+    tags: ["Cognix Cloud DB", "Telemetry", "Auth0", "TypeScript"],
     prompt: "Create a DevOps incident monitoring dashboard with live uptime metrics, service alerts, and incident status management.",
   },
   {
     id: "ai-doc-search",
     title: "DocuMind Vector Knowledge Base",
     category: "ai",
-    description: "Developer documentation search platform with AI semantic embeddings, code example extraction, and feedback analytics.",
+    description: "Developer documentation search platform with semantic embeddings, code example extraction, and feedback analytics.",
     gradient: "from-pink-600/30 to-rose-600/30",
-    tags: ["Next.js 16", "OpenAI RAG", "Neon pgvector", "Tailwind"],
+    tags: ["Semantic Search", "PostgreSQL", "Cognix Cloud", "TypeScript"],
     prompt: "Build an AI documentation search portal with semantic search, code snippet highlighting, and user feedback tracking.",
   },
 ];
@@ -76,7 +76,7 @@ export function LandingShowcase({ isAuthConfigured }: { isAuthConfigured: boolea
   const [activeCategory, setActiveCategory] = useState<ProjectCategory>("all");
 
   const filtered = SHOWCASE_PROJECTS.filter(
-    (p) => activeCategory === "all" || p.category === activeCategory
+    (p) => activeCategory === "all" || p.category === activeCategory,
   );
 
   function handleUsePrompt(promptText: string) {
@@ -136,7 +136,7 @@ export function LandingShowcase({ isAuthConfigured }: { isAuthConfigured: boolea
                     {project.title.charAt(0)}
                   </span>
                   <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-black/50 border border-white/10 text-white/80">
-                    Next.js + Postgres
+                    Full-Stack + Postgres
                   </span>
                 </div>
                 <div className="mt-6">

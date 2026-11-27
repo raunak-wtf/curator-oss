@@ -39,7 +39,7 @@ export function LandingWorkspaceDemo() {
             See the Cognix Workspace in action.
           </h2>
           <p className="mt-3 text-sm sm:text-base text-white/60">
-            A full-stack IDE, live hot-reloaded browser preview, and visual click-to-edit inspector—all powered by Daytona Linux sandboxes.
+            A full-stack IDE, live hot-reloaded browser preview, and visual click-to-edit inspector—all powered by isolated Cognix Linux sandboxes.
           </p>
         </div>
 
@@ -142,7 +142,7 @@ export function LandingWorkspaceDemo() {
                     Autonomous Agent
                   </span>
                   <span className="text-[10px] text-emerald-400 font-mono px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20">
-                    Daytona Active
+                    Sandbox Active
                   </span>
                 </div>
 
@@ -151,7 +151,7 @@ export function LandingWorkspaceDemo() {
                   <div className="flex items-start gap-2 text-white/80">
                     <CheckCircle2 className="size-3.5 text-emerald-400 mt-0.5 shrink-0" />
                     <div>
-                      <p className="font-semibold text-white">Initialized Daytona Linux Workspace</p>
+                      <p className="font-semibold text-white">Initialized Cognix Linux Workspace</p>
                       <p className="text-white/40 text-[10px]">Port 3000 mapped • Node.js v20.18</p>
                     </div>
                   </div>
@@ -167,7 +167,7 @@ export function LandingWorkspaceDemo() {
                   <div className="flex items-start gap-2 text-white/80">
                     <CheckCircle2 className="size-3.5 text-emerald-400 mt-0.5 shrink-0" />
                     <div>
-                      <p className="font-semibold text-white">Configured Neon PostgreSQL DB</p>
+                      <p className="font-semibold text-white">Configured Cognix Cloud PostgreSQL</p>
                       <p className="text-white/40 text-[10px]">Schema migrated: users, plans, invoices</p>
                     </div>
                   </div>
@@ -220,7 +220,7 @@ export function LandingWorkspaceDemo() {
                     <div className="flex items-center justify-between pb-4 border-b border-white/8">
                       <div>
                         <h3 className="text-base font-semibold text-white">Revenue & Subscriptions</h3>
-                        <p className="text-xs text-white/50">Real-time metrics from Neon Postgres</p>
+                        <p className="text-xs text-white/50">Real-time metrics from Cognix Cloud PostgreSQL</p>
                       </div>
                       <div className="flex items-center gap-1 bg-white/5 p-1 rounded-md text-xs">
                         {["7d", "30d", "90d"].map((t) => (
@@ -414,7 +414,7 @@ export function LandingWorkspaceDemo() {
                     <div className="flex items-center justify-between px-4 py-2.5 bg-[#0e0e10] border-b border-white/8">
                       <div className="flex items-center gap-2">
                         <GitCommit className="size-3.5 text-indigo-400" />
-                        <span className="font-semibold text-white">Checkpoint #04: Added Stripe Webhook Handler</span>
+                        <span className="font-semibold text-white">Checkpoint #04: Added Billing Webhook Handler</span>
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="text-[10px] text-emerald-400">+18 lines</span>
@@ -431,18 +431,18 @@ export function LandingWorkspaceDemo() {
 
                     <div className="p-4 space-y-1 bg-[#101012] font-mono leading-relaxed">
                       <div className="text-white/40 text-[11px] pb-1 border-b border-white/5">
-                        --- a/src/app/api/webhooks/stripe/route.ts<br />
-                        +++ b/src/app/api/webhooks/stripe/route.ts
+                        --- a/src/app/api/webhooks/billing/route.ts<br />
+                        +++ b/src/app/api/webhooks/billing/route.ts
                       </div>
                       <div className="text-white/50 pl-4">@@ -12,4 +12,18 @@</div>
                       <div className="bg-rose-500/10 text-rose-300 px-2 py-0.5 rounded-sm">
                         - const event = req.body;
                       </div>
                       <div className="bg-emerald-500/15 text-emerald-300 px-2 py-0.5 rounded-sm">
-                        + const signature = headers().get(&quot;stripe-signature&quot;);
+                        + const signature = headers().get(&quot;x-webhook-signature&quot;);
                       </div>
                       <div className="bg-emerald-500/15 text-emerald-300 px-2 py-0.5 rounded-sm">
-                        + const event = stripe.webhooks.constructEvent(body, signature, env.STRIPE_SECRET);
+                        + const event = verifyWebhookEvent(body, signature, env.WEBHOOK_SECRET);
                       </div>
                       <div className="bg-emerald-500/15 text-emerald-300 px-2 py-0.5 rounded-sm">
                         + await db.insert(invoices).values(&#123; amount: event.data.object.amount_paid &#125;);

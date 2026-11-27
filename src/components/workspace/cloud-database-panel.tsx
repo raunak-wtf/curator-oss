@@ -100,11 +100,11 @@ type SqlResult = {
 type DbTab = "tables" | "sql" | "branches" | "compute" | "roles" | "snapshots";
 
 const REGIONS = [
-  { id: "aws-us-east-1", label: "AWS US East (N. Virginia)" },
-  { id: "aws-us-east-2", label: "AWS US East (Ohio)" },
-  { id: "aws-us-west-2", label: "AWS US West (Oregon)" },
-  { id: "aws-eu-central-1", label: "AWS Europe (Frankfurt)" },
-  { id: "aws-ap-southeast-1", label: "AWS Asia Pacific (Singapore)" },
+  { id: "aws-us-east-1", label: "US East (N. Virginia)" },
+  { id: "aws-us-east-2", label: "US East (Ohio)" },
+  { id: "aws-us-west-2", label: "US West (Oregon)" },
+  { id: "aws-eu-central-1", label: "Europe (Frankfurt)" },
+  { id: "aws-ap-southeast-1", label: "Asia Pacific (Singapore)" },
 ];
 
 const btnSecondary =
@@ -245,7 +245,7 @@ export function CloudDatabasePanel({
   if (loading && !data) {
     return (
       <div className="flex min-h-[320px] items-center justify-center gap-2 text-[13px] text-white/50">
-        <PixelLoader /> Loading Neon PostgreSQL…
+        <PixelLoader /> Loading Cloud Database…
       </div>
     );
   }
@@ -272,7 +272,7 @@ export function CloudDatabasePanel({
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 id="cloud-database-heading" className="text-lg font-semibold tracking-tight text-white">
-            Managed Neon PostgreSQL
+            Cognix Cloud Database
           </h2>
           <p className="mt-1 text-[13px] text-white/55">
             Serverless PostgreSQL with instant branching, autoscaling compute, snapshots, and direct AI tool access.
@@ -295,12 +295,9 @@ export function CloudDatabasePanel({
           <div className="flex items-start gap-2.5">
             <TriangleAlert className="mt-0.5 size-4 shrink-0 text-amber-300" aria-hidden="true" />
             <div className="min-w-0 flex-1">
-              <p className="text-[13px] font-medium text-amber-100">Add NEON_API_KEY to enable managed provisioning</p>
+              <p className="text-[13px] font-medium text-amber-100">Automatic database provisioning is not configured</p>
               <p className="mt-1 text-[12px] leading-5 text-amber-200/75">
-                Set <code className="font-mono text-amber-100">NEON_API_KEY</code> (and optional{" "}
-                <code className="font-mono text-amber-100">NEON_ORG_ID</code>) in your Cognix server{" "}
-                <code className="font-mono text-amber-100">.env.local</code> / <code className="font-mono text-amber-100">.env.production</code>,
-                then refresh to provision isolated Neon databases automatically.
+                Configure Cloud Database provisioning in the Cognix server environment, then refresh to provision isolated PostgreSQL databases automatically.
               </p>
             </div>
           </div>
@@ -312,12 +309,12 @@ export function CloudDatabasePanel({
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="max-w-lg">
               <p className="text-[14px] font-medium text-white">
-                {data.databaseUrlSet ? "Custom DATABASE_URL connected" : "No Neon project provisioned yet"}
+                {data.databaseUrlSet ? "Custom DATABASE_URL connected" : "No Cloud Database provisioned yet"}
               </p>
               <p className="mt-1 text-[12.5px] leading-5 text-white/55">
                 {data.neonApiConfigured
-                  ? "Provision a dedicated Neon PostgreSQL 17 instance for this app. Cognix writes pooled DATABASE_URL and unpooled DIRECT_URL to .env.local automatically."
-                  : "Once NEON_API_KEY is added to the server environment, you can provision a dedicated Neon instance in one click."}
+                  ? "Provision a dedicated PostgreSQL 17 instance for this app. Cognix writes pooled DATABASE_URL and unpooled DIRECT_URL to .env.local automatically."
+                  : "Once database provisioning is enabled on the server, you can provision a dedicated PostgreSQL instance in one click."}
               </p>
               {data.lastError ? <p className="mt-2 text-[12px] text-red-300">{data.lastError}</p> : null}
             </div>
@@ -327,7 +324,7 @@ export function CloudDatabasePanel({
                 className="flex flex-wrap items-end gap-2"
                 onSubmit={(e) => {
                   e.preventDefault();
-                  void runAction("provision", { action: "provision", regionId }, "Neon PostgreSQL database provisioned.");
+                  void runAction("provision", { action: "provision", regionId }, "Cloud PostgreSQL database provisioned.");
                 }}
               >
                 <div>
@@ -349,7 +346,7 @@ export function CloudDatabasePanel({
                 </div>
                 <button type="submit" disabled={Boolean(busyAction)} className={btnPrimary}>
                   {busyAction === "provision" ? <PixelLoader className="text-black" /> : <Database className="size-3.5" aria-hidden="true" />}
-                  {busyAction === "provision" ? "Provisioning…" : "Provision Neon Database"}
+                  {busyAction === "provision" ? "Provisioning…" : "Provision Database"}
                 </button>
               </form>
             ) : null}
@@ -424,12 +421,12 @@ export function CloudDatabasePanel({
               <div className="rounded-lg border border-white/10 bg-white/[0.02] p-6 text-center">
                 <p className="text-[13.5px] font-medium text-white">No application tables yet</p>
                 <p className="mx-auto mt-1 max-w-md text-[12.5px] text-white/50">
-                  Your Neon PostgreSQL database is ready. Ask the agent to create a Drizzle or Prisma schema, or run SQL directly in the SQL Runner tab.
+                  Your PostgreSQL database is ready. Ask Cognix to generate your database schema, or run SQL directly in the SQL Runner tab.
                 </p>
                 <div className="mt-4 flex flex-wrap justify-center gap-2">
                   <button
                     type="button"
-                    onClick={() => onAskAgent("Create a PostgreSQL schema in Neon for this app and wire server actions to persist data")}
+                    onClick={() => onAskAgent("Create a PostgreSQL schema in Cognix Cloud Database for this app and wire server actions to persist data")}
                     className={btnPrimary}
                   >
                     <Sparkles className="size-3.5" aria-hidden="true" /> Build schema with AI
@@ -739,7 +736,7 @@ export function CloudDatabasePanel({
                               aria-label={`Delete branch ${branch.name}`}
                               title={`Delete branch ${branch.name}`}
                               onClick={() => {
-                                if (window.confirm(`Delete Neon branch "${branch.name}"?`)) {
+                                if (window.confirm(`Delete database branch "${branch.name}"?`)) {
                                   void runAction(`del-${branch.id}`, { action: "delete_branch", branchId: branch.id }, "Branch deleted.");
                                 }
                               }}

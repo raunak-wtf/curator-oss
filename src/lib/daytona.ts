@@ -47,7 +47,7 @@ function rememberPublishedRuntime(projectId: string, url: string) {
 
 function getClient() {
   if (!process.env.DAYTONA_API_KEY) {
-    throw new Error("Add DAYTONA_API_KEY to start a secure build sandbox.");
+    throw new Error("Sandbox runtime is not configured on this server.");
   }
   if (!client) {
     client = new Daytona({
@@ -387,10 +387,10 @@ async function configurePublishedLifecycle(sandbox: Sandbox) {
   await sandbox.setAutoDeleteInterval(-1);
   await sandbox.refreshData();
   if (sandbox.autoStopInterval !== autoStop) {
-    throw new Error("Daytona did not apply the auto-stop interval for the published sandbox.");
+    throw new Error("Could not apply the auto-stop interval for the published sandbox.");
   }
   if (sandbox.autoDeleteInterval !== -1) {
-    throw new Error("Daytona did not disable auto-delete for the published sandbox.");
+    throw new Error("Could not disable auto-delete for the published sandbox.");
   }
 }
 

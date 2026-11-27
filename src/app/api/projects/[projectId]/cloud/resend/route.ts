@@ -246,7 +246,7 @@ export async function POST(request: Request, context: Context) {
 
     if (!apiKey) {
       return Response.json(
-        { error: "Connect your Resend API key first." },
+        { error: "Connect your email API key first." },
         { status: 409, headers: noStore },
       );
     }

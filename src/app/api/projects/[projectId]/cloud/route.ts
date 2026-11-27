@@ -79,13 +79,13 @@ export async function PUT(request: Request, context: Context) {
             if (neonResult.created) provisioned.push("DATABASE_URL", "DIRECT_URL");
             cloud = (await getProjectCloud(project.id)) ?? cloud;
           } catch (error) {
-            const detail = error instanceof Error ? error.message : "Could not provision Neon database.";
+            const detail = error instanceof Error ? error.message : "Could not provision Cloud Database.";
             cloud = await updateProjectCloud(project.id, { lastError: detail });
-            warning = `Cognix Cloud is on, but automatic Neon provisioning failed: ${detail}`;
+            warning = `Cognix Cloud is on, but automatic database provisioning failed: ${detail}`;
           }
         } else if (!names.has("DATABASE_URL")) {
           warning =
-            "Cognix Cloud is on. Add NEON_API_KEY to your server .env so Cognix can auto-provision managed Neon PostgreSQL databases.";
+            "Cognix Cloud is on, but automatic database provisioning is not configured on this server yet.";
         }
 
         if (isBucketlineConfigured()) {

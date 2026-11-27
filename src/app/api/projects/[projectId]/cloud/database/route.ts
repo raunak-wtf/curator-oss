@@ -163,7 +163,7 @@ const actionSchema = z.discriminatedUnion("action", [
 async function requireNeonProjectId(projectId: string) {
   const cloud = await getProjectCloud(projectId);
   if (!cloud?.neonProjectId) {
-    throw new Error("Provision the managed Neon database first.");
+    throw new Error("Provision the Cloud PostgreSQL database first.");
   }
   return cloud.neonProjectId;
 }
@@ -172,7 +172,7 @@ async function resolveBranchId(neonProjectId: string, branchId?: string) {
   if (branchId) return branchId;
   const branches = await listNeonBranches(neonProjectId);
   const primary = branches.find((b) => b.default || b.primary) ?? branches[0];
-  if (!primary) throw new Error("No branches exist on this Neon project.");
+  if (!primary) throw new Error("No branches exist on this database project.");
   return primary.id;
 }
 
@@ -231,7 +231,7 @@ export async function POST(request: Request, context: Context) {
       }
       if (!connectionUrl) {
         return Response.json(
-          { error: "No DATABASE_URL is configured yet. Provision Neon first." },
+          { error: "No DATABASE_URL is configured yet. Provision the Cloud Database first." },
           { status: 409, headers: noStore },
         );
       }

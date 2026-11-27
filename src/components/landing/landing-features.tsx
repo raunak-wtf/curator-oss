@@ -20,7 +20,7 @@ export function LandingFeatures() {
 
         {/* Bento Grid */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          {/* Card 1 (Large - Daytona Sandboxes) */}
+          {/* Card 1 (Large - Cloud Sandboxes) */}
           <div className="md:col-span-2 landing-bento-card group">
             <div className="flex items-center justify-between">
               <div className="size-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 grid place-items-center text-indigo-400">
@@ -33,21 +33,21 @@ export function LandingFeatures() {
 
             <div className="mt-5">
               <h3 className="text-xl font-semibold text-white tracking-tight">
-                Isolated Daytona Container Sandboxes
+                Isolated Cloud Container Sandboxes
               </h3>
               <p className="mt-2 text-sm text-white/60 leading-relaxed max-w-xl">
-                Every project runs in its own dedicated Daytona container. Cognix executes real terminal commands, installs any npm package, builds Next.js App Router applications, and streams hot-reloaded dev servers securely.
+                Every project runs in its own dedicated Linux container. Cognix executes real terminal commands, installs npm packages, builds full-stack applications, and streams hot-reloaded dev servers securely.
               </p>
             </div>
 
             {/* Interactive Terminal Mockup inside Bento Card */}
             <div className="mt-6 p-4 rounded-xl bg-[#09090b] border border-white/8 font-mono text-xs text-white/70">
               <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/8 text-[11px] text-white/40">
-                <span>daytona-sandbox-ubuntu-24.04</span>
+                <span>cognix-sandbox-ubuntu-24.04</span>
                 <span className="text-emerald-400">● Container Ready</span>
               </div>
-              <p className="text-white/50">$ npm install @stripe/stripe-js recharts drizzle-orm @neondatabase/serverless</p>
-              <p className="text-emerald-400 mt-1">✓ Added 38 packages in 1.1s</p>
+              <p className="text-white/50">$ npm install lucide-react zod pg</p>
+              <p className="text-emerald-400 mt-1">✓ Added 24 packages in 1.1s</p>
               <p className="text-indigo-300 mt-1">✓ Ready on http://localhost:3000 (mapped to secure edge tunnel)</p>
             </div>
           </div>
@@ -76,7 +76,7 @@ export function LandingFeatures() {
             </div>
           </div>
 
-          {/* Card 3 (Neon PostgreSQL) */}
+          {/* Card 3 (Cognix Cloud PostgreSQL) */}
           <div className="landing-bento-card group">
             <div className="size-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 grid place-items-center text-emerald-400">
               <Database className="size-5" />
@@ -84,16 +84,16 @@ export function LandingFeatures() {
 
             <div className="mt-5">
               <h3 className="text-xl font-semibold text-white tracking-tight">
-                Serverless Neon PostgreSQL
+                Cognix Cloud PostgreSQL
               </h3>
               <p className="mt-2 text-sm text-white/60 leading-relaxed">
-                Automatic relational persistence. Cognix writes Drizzle ORM schemas, handles migrations, and stores real application data with zero external database configuration.
+                Automatic relational persistence. Cognix writes type-safe database schemas, handles migrations, and stores real application data with zero external database configuration.
               </p>
             </div>
 
             <div className="mt-6 p-3.5 rounded-xl bg-[#09090b] border border-white/8 text-xs font-mono text-white/70">
-              <span className="text-emerald-400">drizzle-kit push</span>
-              <p className="text-white/40 mt-1 text-[11px]">Created tables: users, sessions, invoices (Postgres 16)</p>
+              <span className="text-emerald-400">Schema synced</span>
+              <p className="text-white/40 mt-1 text-[11px]">Created tables: users, sessions, invoices (PostgreSQL 17)</p>
             </div>
           </div>
 
