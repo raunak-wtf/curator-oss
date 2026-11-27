@@ -1,6 +1,6 @@
 "use client";
 
-import { BookOpen, GitBranch, PencilLine, Sparkles, Wand2 } from "lucide-react";
+import { BookOpen, Cloud, GitBranch, PencilLine, Sparkles, Wand2 } from "lucide-react";
 import { PixelLoader } from "@/components/pixel-loader";
 import type { ComponentType } from "react";
 import type { SkillCommand } from "@/lib/skills";
@@ -9,7 +9,16 @@ import { cn } from "@/lib/utils";
 
 export type SlashMenuItem =
   | { kind: "command"; name: SkillCommand; description: string; argumentHint?: string }
+  | { kind: "builtin"; name: string; description: string }
   | { kind: "skill"; name: string; description: string; skill: Skill };
+
+export const BUILTIN_SKILL_ITEMS: Extract<SlashMenuItem, { kind: "builtin" }>[] = [
+  { kind: "builtin", name: "cloud-fullstack", description: "Full-stack Cognix Cloud blueprint (DB, Auth, Storage, Email)" },
+  { kind: "builtin", name: "cloud-database", description: "Managed Neon PostgreSQL + Drizzle ORM schema & queries" },
+  { kind: "builtin", name: "cloud-auth", description: "Better Auth accounts, sessions & password reset on Postgres" },
+  { kind: "builtin", name: "cloud-storage", description: "Bucketline S3 file uploads, CDN & presigned URLs" },
+  { kind: "builtin", name: "cloud-email", description: "Resend transactional emails & safe fallback templates" },
+];
 
 export const COMMAND_ITEMS: Extract<SlashMenuItem, { kind: "command" }>[] = [
   { kind: "command", name: "create-skill", description: "Ask AI to write a skill", argumentHint: "what it should do" },
@@ -40,6 +49,7 @@ export function optionId(menuId: string, index: number) {
 }
 
 export function SkillCommandMenu({ id, items, activeIndex, skillsStatus, onRetryLoad, onHighlight, onSelect }: SkillCommandMenuProps) {
+  const firstBuiltinIndex = items.findIndex((item) => item.kind === "builtin");
   const firstSkillIndex = items.findIndex((item) => item.kind === "skill");
   const hasCommands = items.some((item) => item.kind === "command");
 
@@ -48,9 +58,14 @@ export function SkillCommandMenu({ id, items, activeIndex, skillsStatus, onRetry
       <div id={id} role="listbox" aria-label="Slash commands and skills" className="max-h-72 overflow-y-auto p-1">
         {hasCommands ? <p className="px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-white/40" aria-hidden="true">Commands</p> : null}
         {items.map((item, index) => {
-          const Icon = item.kind === "command" ? commandIcons[item.name] : Sparkles;
+          const Icon = item.kind === "command" ? commandIcons[item.name] : item.kind === "builtin" ? Cloud : Sparkles;
           return (
             <div key={`${item.kind}-${item.name}`}>
+              {index === firstBuiltinIndex ? (
+                <p className="px-2.5 pb-1 pt-2 text-[11px] font-medium text-white/40" aria-hidden="true">
+                  Cognix Cloud skills
+                </p>
+              ) : null}
               {index === firstSkillIndex ? (
                 <p className="px-2.5 pb-1 pt-2 text-[11px] font-medium text-white/40" aria-hidden="true">
                   Your skills

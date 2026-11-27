@@ -142,7 +142,13 @@ describe("buildSystemPrompt", () => {
     });
     expect(onPrompt).toContain("Cognix Cloud is **on** for this project");
     expect(onPrompt).toContain("## Exclusive Cognix Cloud tech stack");
+    expect(onPrompt).toContain("## Built-in Cognix Cloud architecture skills");
+    expect(onPrompt).toContain('<cloud-skill name="cognix-cloud-orchestration">');
+    expect(onPrompt).toContain('<cloud-skill name="better-auth-fullstack">');
+    expect(onPrompt).toContain('<cloud-skill name="bucketline-s3-storage-and-cdn">');
+    expect(onPrompt).toContain("never run `npx create-next-app .` directly in the project root");
     expect(onPrompt).toContain("Do not call request_cognix_cloud.");
+    expect(offPrompt).not.toContain("## Built-in Cognix Cloud architecture skills");
   });
 
   it("injects escaped Project Knowledge and builds a strictly read-only Plan prompt", () => {

@@ -4,6 +4,15 @@ import { z } from "zod";
 export const SKILL_COMMANDS = ["create-skill", "install-skill", "new-skill", "skills"] as const;
 export type SkillCommand = (typeof SKILL_COMMANDS)[number];
 
+/** Built-in Cognix Cloud slash skills resolved automatically on every prompt. */
+export const BUILTIN_SKILL_NAMES = [
+  "cloud-fullstack",
+  "cloud-database",
+  "cloud-auth",
+  "cloud-storage",
+  "cloud-email",
+] as const;
+
 export const SKILL_NAME_MAX = 48;
 export const SKILL_DESCRIPTION_MAX = 300;
 export const SKILL_BODY_MAX = 20_000;
@@ -30,7 +39,8 @@ export const skillNameSchema = z
   .max(SKILL_NAME_MAX, `Keep the name under ${SKILL_NAME_MAX} characters.`)
   .regex(SKILL_NAME_PATTERN, "Use lowercase letters, numbers, and single hyphens, like api-docs.")
   .refine((name) => !name.includes("--"), "Use single hyphens between words.")
-  .refine((name) => !(SKILL_COMMANDS as readonly string[]).includes(name), "That name is a built-in / command. Choose another.");
+  .refine((name) => !(SKILL_COMMANDS as readonly string[]).includes(name), "That name is a built-in / command. Choose another.")
+  .refine((name) => !(BUILTIN_SKILL_NAMES as readonly string[]).includes(name), "That name is reserved for a built-in Cognix Cloud skill. Choose another.");
 
 export const skillFieldsSchema = z.object({
   name: skillNameSchema,
@@ -57,7 +67,8 @@ export function normalizeSkillName(value: string) {
     .replace(/^-+|-+$/g, "")
     .slice(0, SKILL_NAME_MAX)
     .replace(/-+$/g, "");
-  return (SKILL_COMMANDS as readonly string[]).includes(name) ? `${name}-custom` : name;
+  const reserved = new Set<string>([...SKILL_COMMANDS, ...BUILTIN_SKILL_NAMES]);
+  return reserved.has(name) ? `${name}-custom` : name;
 }
 
 function unquote(value: string) {

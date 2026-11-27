@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { normalizeSkillName, parseSkillCommand } from "@/lib/skills";
 import type { Skill, SkillDraft, SkillSource } from "@/lib/types";
 import { SkillApiError, skillApi } from "./skill-api";
-import { COMMAND_ITEMS, SkillCommandMenu, optionId, type SlashMenuItem } from "./skill-command-menu";
+import { BUILTIN_SKILL_ITEMS, COMMAND_ITEMS, SkillCommandMenu, optionId, type SlashMenuItem } from "./skill-command-menu";
 import { SkillEditorDialog, type SkillEditorState } from "./skill-editor-dialog";
 import { SkillsManagerDialog } from "./skills-manager-dialog";
 
@@ -82,14 +82,22 @@ export function useSkillCommands({ prompt, setPrompt, textareaRef, signedIn }: U
   if (token) {
     const query = token.query;
     const commands = COMMAND_ITEMS.filter((item) => item.name.includes(query));
+    const matchingBuiltins = BUILTIN_SKILL_ITEMS.filter(
+      (item) => item.name.includes(query) || item.description.toLowerCase().includes(query),
+    );
     const matchingSkills = skills
       .filter((skill) => skill.name.includes(query) || skill.description.toLowerCase().includes(query))
       .sort((a, b) => Number(!a.name.startsWith(query)) - Number(!b.name.startsWith(query)))
       .slice(0, MAX_SKILL_ITEMS)
       .map((skill): SlashMenuItem => ({ kind: "skill", name: skill.name, description: skill.description, skill }));
-    // Put an exact skill match first so `/my-skill` + Enter picks the skill, not a command.
-    if (query && matchingSkills.some((item) => item.name === query)) items.push(...matchingSkills, ...commands);
-    else items.push(...commands, ...matchingSkills);
+    // Put an exact skill match first so `/my-skill` or `/cloud-fullstack` + Enter picks the skill, not a command.
+    if (query && matchingBuiltins.some((item) => item.name === query)) {
+      items.push(...matchingBuiltins, ...matchingSkills, ...commands);
+    } else if (query && matchingSkills.some((item) => item.name === query)) {
+      items.push(...matchingSkills, ...matchingBuiltins, ...commands);
+    } else {
+      items.push(...commands, ...matchingBuiltins, ...matchingSkills);
+    }
   }
 
   const showLoadingRow = signedIn && skillsStatus !== "ready" && skillsStatus !== "idle";
@@ -202,7 +210,7 @@ export function useSkillCommands({ prompt, setPrompt, textareaRef, signedIn }: U
   }
 
   function selectItem(item: SlashMenuItem) {
-    if (item.kind === "skill") {
+    if (item.kind === "skill" || item.kind === "builtin") {
       replaceToken(`/${item.name} `);
       return;
     }

@@ -1,10 +1,11 @@
 import { z } from "zod";
 import { requireViewer } from "@/lib/auth0";
+import { resolveBuiltinCloudSkills } from "@/lib/ai/cloud-skills";
 import { runAgent } from "@/lib/ai/runner";
 import { errorResponse, notFound } from "@/lib/http";
 import { SKILLS_PER_PROMPT, skillReferences } from "@/lib/skills";
 import { createMessage, getAttachment, getProject, getSkillsByNames, listMessages, updateProject } from "@/lib/store";
-import type { AgentEvent, Attachment } from "@/lib/types";
+import type { AgentEvent, Attachment, Skill } from "@/lib/types";
 import { visualSelectionsSchema } from "@/lib/visual-edit";
 
 export const runtime = "nodejs";
@@ -50,7 +51,30 @@ export async function POST(request: Request, context: Context) {
       .parse(await request.json());
 
     const history = await listMessages(project.id);
-    const skills = await getSkillsByNames(viewer.id, skillReferences(body.prompt).slice(0, SKILLS_PER_PROMPT));
+    const requestedSkillNames = skillReferences(body.prompt).slice(0, SKILLS_PER_PROMPT);
+    const savedSkills = await getSkillsByNames(viewer.id, requestedSkillNames);
+    const savedByName = new Map(savedSkills.map((skill) => [skill.name, skill]));
+    const builtinByName = new Map(resolveBuiltinCloudSkills(requestedSkillNames).map((skill) => [skill.name, skill]));
+    const nowIso = new Date(0).toISOString();
+    const skills: Skill[] = requestedSkillNames.flatMap((name) => {
+      const saved = savedByName.get(name);
+      if (saved) return [saved];
+      const builtin = builtinByName.get(name);
+      if (!builtin) return [];
+      return [
+        {
+          id: `builtin-${builtin.name}`,
+          ownerId: viewer.id,
+          name: builtin.name,
+          description: builtin.description,
+          body: builtin.body,
+          source: "ai",
+          sourceUrl: null,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        },
+      ];
+    });
     const requestedAttachmentIds = [...new Set(body.attachmentIds)];
     const resolvedAttachments = (
       await Promise.all(requestedAttachmentIds.map((id) => getAttachment(id, viewer.id)))

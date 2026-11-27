@@ -11,7 +11,7 @@ describe("agent execution policy", () => {
   it("uses a larger bounded turn budget", () => {
     expect(resolveAgentMaxTurns()).toBe(DEFAULT_AGENT_MAX_TURNS);
     expect(resolveAgentMaxTurns("5")).toBe(20);
-    expect(resolveAgentMaxTurns("200")).toBe(120);
+    expect(resolveAgentMaxTurns("200")).toBe(140);
     expect(resolveAgentMaxTurns("invalid")).toBe(DEFAULT_AGENT_MAX_TURNS);
   });
 

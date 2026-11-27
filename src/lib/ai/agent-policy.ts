@@ -1,10 +1,10 @@
-export const DEFAULT_AGENT_MAX_TURNS = 80;
+export const DEFAULT_AGENT_MAX_TURNS = 100;
 export const AGENT_CONTEXT_REFRESH_INTERVAL = 28;
 
 export function resolveAgentMaxTurns(value = process.env.AGENT_MAX_TURNS) {
   const parsed = Number.parseInt(value ?? "", 10);
   if (!Number.isFinite(parsed)) return DEFAULT_AGENT_MAX_TURNS;
-  return Math.min(120, Math.max(20, parsed));
+  return Math.min(140, Math.max(20, parsed));
 }
 
 export function shouldRefreshAgentContext(turn: number) {

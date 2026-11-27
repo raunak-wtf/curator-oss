@@ -1,7 +1,7 @@
 import path from "node:path";
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
-import { ensureSandbox, getPreviewHealth, getPreviewUrl, getProjectFsRoot, getProjectRoot } from "../daytona";
+import { ensureSandbox, getPreviewHealth, getPreviewUrl, getProjectFsRoot, getProjectRoot, syncProjectEnv } from "../daytona";
 import { createAgentApproval, createMessage, expireAgentApproval, getAgentApprovalDecisions, getDecryptedSecrets, getProjectCloud, getProjectRepository, listSecretNames, updateAttachmentSandboxPath, updateProject } from "../store";
 import { createSignedObjectReadUrl, downloadObject } from "../storage";
 import type {
@@ -136,6 +136,9 @@ export async function runAgent(input: {
   // Security reviews never sync or push, even if a repository is linked in Git Control.
   const repository = security ? null : linkedRepository;
   const cloudState = { enabled: cloud?.status === "ready", secretNames };
+  if (!security && secretNames.length > 0) {
+    await syncProjectEnv(project).catch(() => undefined);
+  }
   let githubInfo: GitHubCommitInfo | undefined;
 
   // Two-way sync: commits pushed to the linked branch on GitHub come into the project before the agent starts.
