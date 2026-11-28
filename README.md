@@ -19,6 +19,7 @@ Every project runs inside its own isolated Linux container with real terminal ex
 | Feature | Curator / Cognix | Lovable | v0 (Vercel) | How Curator Implements It |
 | :--- | :---: | :---: | :---: | :--- |
 | **Prompt-to-App** | **Yes** | Yes | Yes | Multi-turn streaming agent (`Build`, `Plan`, and `Security` modes) in `src/lib/ai/runner.ts` |
+| **Native Design Intelligence** | **Yes (Automatic)** | Yes | Yes | Contextual design blueprints, six integrated design methods, versioned frontend scaffold, rendered critique/refinement gate, responsive and state-quality checks |
 | **AI Code Editing** | **Yes** | Yes | Yes | Surgical `edit_file`, `write_file`, `delete_file`, regex search, and per-build checkpoint restore |
 | **Terminal Execution** | **Yes (Full Linux VM)** | Limited | Sandbox | Isolated Daytona Linux container per project (`src/lib/daytona.ts`) with persistent shell sessions |
 | **Live Preview** | **Yes + Access Control** | Yes | Yes | Wildcard `<adj>-<noun>-<id8>.<domain>` HTTPS subdomains, Desktop/Tablet/Phone stage, auto-sleep leases |
@@ -55,9 +56,22 @@ Every project runs inside its own isolated Linux container with real terminal ex
 - **Build Checkpoints & 1-Click Restore**:
   - Every build turn snapshots touched file paths, line additions/deletions, unified/split diffs (`@pierre/diffs`), and supports 1-click rollback (`/api/projects/[projectId]/checkpoints/[messageId]/restore`).
 
+### 2. Native Design Intelligence & Golden Frontend Scaffold
+- **Automatic, Contextual Activation**:
+  - Frontend generation and meaningful UI edits automatically receive a compact, domain-specific design blueprint from `src/lib/ai/frontend-design-blueprint.ts`; backend-only work receives no design overhead.
+  - The blueprint classifies the surface and product family, then establishes a visual north star, composition strategy, semantic color roles, typography, responsive intent, interaction states, and only the relevant lazy-loaded design playbooks.
+- **Six Integrated Design Foundations**:
+  - Taste Skill provides primary art direction; Design-to-Code handles visual reference reconstruction; Impeccable drives critique and polish; Anthropic Frontend Design and Theme Factory inform distinctive identity and tokens; Oil UI adds concrete visual directions and fresh-eyes review.
+  - These methods are adapted into Cognix's own internal skill runtime under `src/lib/ai/skills/`; users do not install or manually invoke them, and they are excluded from Security mode.
+- **Versioned Scaffold v1.1**:
+  - Genuinely new projects receive a deterministic Next.js/Tailwind foundation with Geist, Lucide, semantic light/dark design tokens, focus and coarse-pointer accessibility, reduced-motion behavior, and reusable Button, Field/Input, Skeleton, and Empty State primitives.
+  - Database, Better Auth, Storage, and Email remain composable overlays, so frontend-only projects do not pay for unused backend dependencies.
+- **Rendered Completion Gate**:
+  - Substantive frontend work must load an appropriate design guide and inspect the rendered key routes after the last edit. The agent critiques hierarchy, typography, spacing, responsive composition, overflow, states, and generic AI patterns, fixes the highest-impact issues, then completes normal production-build and runtime verification.
+
 ---
 
-### 2. Cognix Cloud — Zero-Config Backend Infrastructure for Generated Apps
+### 3. Cognix Cloud — Zero-Config Backend Infrastructure for Generated Apps
 Users describe apps in plain English without naming ORMs, auth packages, or S3 SDKs. Internal Cloud skills (`src/lib/ai/cloud-skills.ts`) detect backend requirements and provision isolated per-project resources automatically while keeping all provider master keys strictly on the Cognix server:
 
 1. **Cognix Cloud Database (`src/lib/cloud/neon.ts`)**:
@@ -76,7 +90,7 @@ Users describe apps in plain English without naming ORMs, auth packages, or S3 S
 
 ---
 
-### 3. Visual Edit Bridge & Live Theme Studio
+### 4. Visual Edit Bridge & Live Theme Studio
 - **Direct Element Selection (`public/__cognix_visual_edit.js`)**:
   - Click any element inside the live preview iframe to inspect computed styles, bounding boxes, text copy, and React source hints.
   - Apply instant AST-safe edits to text, colors, spacing, typography, and Tailwind classes (`/api/projects/[projectId]/visual-edit/apply`) without waiting for a full LLM turn—or pin multiple elements as visual context chips on your next chat prompt.
@@ -85,7 +99,7 @@ Users describe apps in plain English without naming ORMs, auth packages, or S3 S
 
 ---
 
-### 4. Preview Access Control, Presence Leases & Collaboration
+### 5. Preview Access Control, Presence Leases & Collaboration
 Unpublished development previews are served on random Lovable-style subdomains (`<adjective>-<noun>-<id8>.<COGNIX_APPS_DOMAIN>`, e.g. `golden-delta-60b6e4dc.curatorsite.in`) backed by host-bound HMAC grants (`cg1.<payload>.<sig>` in `src/lib/preview-access.ts`):
 - **Owner-Only (Default)**: Only the signed-in project owner (or verified platform admin) can view the preview; workspace iframe loads automatically via short-lived host-bound owner grants.
 - **Private Email Invites (`/auth?key=<shareKey>`)**: Invite specific collaborators by email. Collaborators authenticate via Auth0 with a **verified** matching email address, receive a versioned preview session cookie, and can be revoked individually or globally in 1 click (bumping `previewAccessVersion` to invalidate existing cookies within seconds).
@@ -95,7 +109,7 @@ Unpublished development previews are served on random Lovable-style subdomains (
 
 ---
 
-### 5. Zero-Downtime Publishing, Custom Domains & Edge Routing
+### 6. Zero-Downtime Publishing, Custom Domains & Edge Routing
 - **Isolated Production Runtime (`port 3001`)**:
   - Publishing builds an optimized production release inside `.cognix-published-<id>/current` and serves it on port `3001`—completely decoupled from ongoing live edits on port `3000`, with atomic rollback to `previous` if a build fails and pre-publish health checks (`/api/projects/[projectId]/publish-check`).
 - **Instant Subdomains & Unlimited Custom Domains**:
@@ -107,7 +121,7 @@ Unpublished development previews are served on random Lovable-style subdomains (
 
 ---
 
-### 6. Dodo Payments Billing, Effort-Based Credits & Admin Console
+### 7. Dodo Payments Billing, Effort-Based Credits & Admin Console
 - **Subscription & Credit Ledger (`src/lib/billing/dodo.ts`, `src/lib/credits.ts`)**:
   - Built-in **$10/month Pro** subscription checkout and customer billing portal via **Dodo Payments**, verified with **Standard Webhooks** signatures and idempotent event claiming.
   - Effort-based credit metering (`90.00` monthly credits stored in integer hundredths, rollover up to `180.00` on renewal), atomic pre-run credit holds (`reserveUserAgentCredits`), exact post-run delta settlement, and automatic refunds on aborted runs.
@@ -117,7 +131,7 @@ Unpublished development previews are served on random Lovable-style subdomains (
 
 ---
 
-### 7. Cookieless Edge Analytics & Runtime Error Console
+### 8. Cookieless Edge Analytics & Runtime Error Console
 - **Cookieless Edge Analytics (`/api/edge/analytics`)**: Privacy-preserving daily visitor hashes (no cookies or raw IP storage) tracking pageviews, unique visitors, top routes, referrers, and desktop/tablet/mobile breakdown per published app.
 - **Live Runtime Console (`/api/projects/[projectId]/console`)**: Captures client exceptions, `console.error`/`warn`, unhandled promise rejections, network failures, and Next.js SSR stack traces—automatically redacting API keys/DSNs and feeding errors to the AI agent for self-healing.
 
@@ -244,6 +258,15 @@ All secrets remain strictly server-side (`AGENTS.md`). Never expose provider key
 | `BUCKETLINE_API_KEY` | For Cloud Storage | Server-only Bucketline management key (`bk_...`) for per-project S3 buckets |
 | `BUCKETLINE_BASE_URL` | Optional | Bucketline service origin — defaults to `https://cloud.curator.codes` |
 
+### Build Performance & Golden Scaffold
+| Variable | Required | Description |
+| :--- | :---: | :--- |
+| `COGNIX_PERF_SCAFFOLD_BOOTSTRAP` | Recommended | Enables deterministic scaffold materialization, one dependency install, and an early live preview before the first model turn |
+| `COGNIX_PERF_BOUNDED_AGENT` | Recommended | Enables task-sized turn budgets, batching guidance, and loop guards instead of the legacy open-ended loop |
+| `COGNIX_PERF_CONTEXT_COMPACTION` | Recommended | Compacts completed tool history while retaining the request, changed files, unresolved errors, and verified checks |
+| `COGNIX_PERF_ONE_BUILD` | Recommended | Prevents redundant production builds when no source file changed after a passing build |
+| `COGNIX_SCAFFOLD_VERSION` | Recommended | Pins the generated-app template manifest; current production template is `1.1.0` |
+
 ### Wildcard Previews, Custom Domains & Edge Routing
 | Variable | Required | Description |
 | :--- | :---: | :--- |
@@ -289,7 +312,7 @@ Curator supports two production edge-proxy deployments with identical preview-ac
 ```bash
 npm run dev          # Start local Next.js development server
 npm run lint         # Run ESLint across the entire repository
-npm test             # Run the Vitest unit & integration suite (39 suites / 230+ tests)
+npm test             # Run the full Vitest unit & integration suite
 npm run build        # Compile & type-check optimized production build
 npm run db:generate  # Generate Drizzle SQL migrations after schema edits
 npm run db:push      # Push schema directly to Neon PostgreSQL

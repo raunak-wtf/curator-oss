@@ -81,6 +81,7 @@ import { materializeProjectScaffold } from "../scaffold/bootstrap";
 import { buildDeterministicCommitMessage } from "./autofix";
 import { compactAgentMessages, shouldCompactContext, truncateCommandOutputDeterministically } from "./context-compaction";
 import { parseBuildDiagnostics } from "./diagnostic-parser";
+import { createFrontendDesignBlueprint, renderFrontendDesignBlueprint } from "./frontend-design-blueprint";
 import { createAgentLoopGuard, resolveAdaptiveTurnBudget } from "./loop-guard";
 import { createRunPerformanceTracker } from "./run-performance";
 import { interactiveTools, isInteractiveTool, runInteractiveTool } from "./interactive-tools";
@@ -442,7 +443,7 @@ export async function runAgent(input: {
       }
       const isBaseOnlyScaffold = bootstrapped.manifest.profiles.length === 1 && bootstrapped.manifest.profiles[0] === "base";
       scaffoldAppliedNote = [
-        `Cognix pre-scaffolded this new project (template v${bootstrapped.manifest.templateVersion}, profiles: ${bootstrapped.manifest.profiles.join(", ")}) with dependencies installed and a live preview running on port 3000. Do NOT rewrite package.json, tsconfig.json, next.config.ts, or postcss.config.mjs unless you need an additional package; build the requested product UI, schema, and routes directly on top of the scaffolded files.`,
+        `Cognix pre-scaffolded this new project (template v${bootstrapped.manifest.templateVersion}, profiles: ${bootstrapped.manifest.profiles.join(", ")}) with dependencies installed and a live preview running on port 3000. Do NOT rewrite package.json, tsconfig.json, next.config.ts, or postcss.config.mjs unless you need an additional package; build the requested product UI, schema, and routes directly on top of the scaffolded files. Extend the semantic tokens in globals.css and reuse the accessible primitives in src/components/ui before inventing one-off controls; adapt their styling to the chosen visual direction instead of treating them as a fixed theme.`,
         ...(isBaseOnlyScaffold
           ? [
               "This project uses the frontend-only `base` scaffold. Do NOT call `request_cognix_cloud`, provision a database, or install ORM/auth packages unless the user explicitly requested server-side persistence, user accounts, or file uploads; implement contact or inquiry forms with client-side validation and clear confirmation states.",
@@ -535,6 +536,17 @@ export async function runAgent(input: {
           .join("\n")}\n</recent_preview_console_errors>`
       : "";
 
+  const isNewProjectRequest = !project.previewUrl && input.history.length === 0;
+  const hasVisualReference = input.visualSelections.length > 0
+    || stagedAttachments.some((item) => item.attachment.contentType.startsWith("image/"));
+  const frontendBlueprint = !security
+    ? createFrontendDesignBlueprint({
+        prompt,
+        isNewProject: isNewProjectRequest,
+        hasVisualReference,
+      })
+    : null;
+  const frontendBlueprintContext = renderFrontendDesignBlueprint(frontendBlueprint);
   const effectivePrompt = `${prompt}${consoleContextNote}`;
 
   const computeSystemPromptContent = () =>
@@ -547,7 +559,7 @@ export async function runAgent(input: {
         })
       : planMode
         ? buildPlanSystemPrompt(project, projectRoot, stagedAttachments.map((item) => item.attachment), input.skills, cloudState)
-        : `${buildSystemPrompt(project, projectRoot, stagedAttachments.map((item) => item.attachment), input.skills, cloudState, repository)}${githubSyncNote ? `\n\n${githubSyncNote}` : ""}${scaffoldAppliedNote ? `\n\n${scaffoldAppliedNote}` : ""}`;
+        : `${buildSystemPrompt(project, projectRoot, stagedAttachments.map((item) => item.attachment), input.skills, cloudState, repository)}${frontendBlueprintContext ? `\n\n${frontendBlueprintContext}` : ""}${githubSyncNote ? `\n\n${githubSyncNote}` : ""}${scaffoldAppliedNote ? `\n\n${scaffoldAppliedNote}` : ""}`;
 
   let messages: ChatCompletionMessageParam[] = [
     {
@@ -692,11 +704,14 @@ export async function runAgent(input: {
   let devServerFreshSinceLastBuild = false;
   let runtimeVerifiedClean = false;
   let completionNudges = 0;
+  let designVerificationNudgeSent = false;
+  let designGuideRead = false;
+  let frontendPreviewInspected = false;
   const boundedAgentEnabled = isBoundedAgentEnabled();
   const contextCompactionEnabled = isContextCompactionEnabled();
   const oneBuildPolicyEnabled = isOneBuildPolicyEnabled();
   const inferredCloudCount = inferPromptCloudFeatures(prompt).length;
-  const isNewProjectBuild = !project.previewUrl && input.history.length === 0;
+  const isNewProjectBuild = isNewProjectRequest;
   const adaptiveBudget = resolveAdaptiveTurnBudget({
     mode: runMode,
     prompt,
@@ -1122,6 +1137,23 @@ export async function runAgent(input: {
           }
           runtimeVerifiedClean = true;
         }
+
+        if (
+          frontendBlueprint?.depth === "deep"
+          && (!designGuideRead || !frontendPreviewInspected)
+          && !designVerificationNudgeSent
+        ) {
+          designVerificationNudgeSent = true;
+          const missing = [
+            ...(!designGuideRead ? ["read the most relevant internal design guide"] : []),
+            ...(!frontendPreviewInspected ? ["inspect the rendered key routes with `inspect_preview`"] : []),
+          ];
+          messages.push({
+            role: "user",
+            content: `[Design completion gate] This substantive frontend task still needs rendered design verification. ${missing.join(" and ")}. Critique hierarchy, spacing, typography, responsive composition, real states, overflow, and generic AI patterns; fix the highest-impact issues before finishing. Do not redesign outside the user's request.`,
+          });
+          continue;
+        }
       }
       finalContent = content.trim();
       completedNaturally = true;
@@ -1365,6 +1397,9 @@ export async function runAgent(input: {
           interactiveSummary = "Needs attention: invalid question";
         }
         await emit({ type: "tool_result", id: activityId, name: call.function.name, summary: interactiveSummary });
+        if (call.function.name === "read_design_guide" && !interactiveSummary.startsWith("Needs attention")) {
+          designGuideRead = true;
+        }
         runActivity.push({
           id: activityId,
           name: call.function.name,
@@ -1484,11 +1519,13 @@ export async function runAgent(input: {
           if (boundedAgentEnabled && previewCheck.warning) {
             result.output = `${result.output}\n\n[Loop guard] ${previewCheck.warning}`;
           }
+          frontendPreviewInspected = true;
         }
         if (["write_file", "edit_file", "batch_edit_files", "move_file", "delete_file"].includes(call.function.name)) {
           for (const touched of result.changedPaths ?? []) {
             loopGuard.invalidateFile(touched);
           }
+          frontendPreviewInspected = false;
         } else if (call.function.name === "run_command") {
           loopGuard.invalidateAllFiles();
         }

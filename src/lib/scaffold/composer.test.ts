@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import ts from "typescript";
 import {
   getPerformanceArchitectureMetadata,
   isBoundedAgentEnabled,
@@ -57,6 +58,18 @@ describe("golden scaffold composer and performance feature flags", () => {
     expect(pkg.dependencies["better-auth"]).toBeUndefined();
     expect(pkg.dependencies["@aws-sdk/client-s3"]).toBeUndefined();
     expect(pkg.dependencies.resend).toBeUndefined();
+
+    const globals = first.files.find((file) => file.path === "src/app/globals.css");
+    expect(globals?.content).toContain("--surface-raised");
+    expect(globals?.content).toContain("--primary-foreground");
+    expect(globals?.content).toContain("prefers-reduced-motion");
+
+    const paths = new Set(first.files.map((file) => file.path));
+    expect(paths.has("src/lib/cn.ts")).toBe(true);
+    expect(paths.has("src/components/ui/button.tsx")).toBe(true);
+    expect(paths.has("src/components/ui/field.tsx")).toBe(true);
+    expect(paths.has("src/components/ui/skeleton.tsx")).toBe(true);
+    expect(paths.has("src/components/ui/empty-state.tsx")).toBe(true);
   });
 
   it("composes database + auth + storage + email overlays without conflicts and keeps schema.ts pure", () => {
@@ -105,5 +118,27 @@ describe("golden scaffold composer and performance feature flags", () => {
         { path: "src/lib/bad.ts", content: "const u = 'postgresql://user:pass@ep-1.neon.tech/db';" },
       ]),
     ).toThrow(/secret-scan failed/);
+  });
+
+  it("keeps every generated TypeScript and TSX scaffold file syntactically valid", () => {
+    const composed = composeScaffold(["auth", "storage", "email"]);
+    const diagnostics = composed.files
+      .filter((file) => /\.tsx?$/.test(file.path))
+      .flatMap((file) => {
+        const result = ts.transpileModule(file.content, {
+          fileName: file.path,
+          reportDiagnostics: true,
+          compilerOptions: {
+            jsx: ts.JsxEmit.Preserve,
+            module: ts.ModuleKind.ESNext,
+            target: ts.ScriptTarget.ES2022,
+          },
+        });
+        return (result.diagnostics ?? [])
+          .filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)
+          .map((diagnostic) => `${file.path}: ${ts.flattenDiagnosticMessageText(diagnostic.messageText, " ")}`);
+      });
+
+    expect(diagnostics).toEqual([]);
   });
 });

@@ -1,6 +1,6 @@
 import type { ScaffoldFile, ScaffoldProfile } from "./types";
 
-export const SCAFFOLD_TEMPLATE_VERSION = "1.0.0";
+export const SCAFFOLD_TEMPLATE_VERSION = "1.1.0";
 
 export const SCAFFOLD_PROFILE_ORDER: readonly ScaffoldProfile[] = [
   "base",
@@ -67,11 +67,23 @@ const BASE_GLOBALS_CSS = `@import "tailwindcss";
 
 :root {
   --background: #ffffff;
-  --foreground: #111111;
-  --muted: #666666;
-  --surface: #f7f7f8;
+  --foreground: #171717;
+  --muted: #66666f;
+  --surface: #fafafa;
+  --surface-raised: #ffffff;
+  --surface-subtle: #f4f4f5;
   --border: #e4e4e7;
-  --accent: #2563eb;
+  --border-strong: #c9c9cf;
+  --primary: #2457d6;
+  --primary-foreground: #ffffff;
+  --ring: #2457d6;
+  --success: #15803d;
+  --warning: #a16207;
+  --danger: #b91c1c;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 0.875rem;
+  --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.05), 0 10px 30px rgb(0 0 0 / 0.04);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -79,9 +91,18 @@ const BASE_GLOBALS_CSS = `@import "tailwindcss";
     --background: #0a0a0b;
     --foreground: #f4f4f5;
     --muted: #a1a1aa;
-    --surface: #141417;
-    --border: rgba(255, 255, 255, 0.12);
-    --accent: #60a5fa;
+    --surface: #111113;
+    --surface-raised: #18181b;
+    --surface-subtle: #202024;
+    --border: rgb(255 255 255 / 0.12);
+    --border-strong: rgb(255 255 255 / 0.22);
+    --primary: #7aa2ff;
+    --primary-foreground: #08132f;
+    --ring: #9bb7ff;
+    --success: #4ade80;
+    --warning: #facc15;
+    --danger: #fb7185;
+    --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.3), 0 16px 40px rgb(0 0 0 / 0.22);
   }
 }
 
@@ -100,13 +121,35 @@ body {
 
 @layer base {
   :where(a, button, input, textarea, select, summary, [tabindex]):focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--ring);
     outline-offset: 2px;
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]) {
+    cursor: pointer;
   }
 }
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+.text-balance {
+  text-wrap: balance;
+}
+
+@media (pointer: coarse) {
+  :where(button, [role="button"], input, select, textarea) {
+    min-height: 44px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -118,6 +161,146 @@ body {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+`;
+
+const BASE_CN_TS = `import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+`;
+
+const BASE_BUTTON_TSX = `import type { ButtonHTMLAttributes } from "react";
+import { cn } from "@/lib/cn";
+
+type ButtonVariant = "primary" | "secondary" | "quiet" | "danger";
+type ButtonSize = "sm" | "md" | "lg" | "icon";
+
+const variants: Record<ButtonVariant, string> = {
+  primary: "bg-[var(--primary)] text-[var(--primary-foreground)] hover:brightness-95",
+  secondary: "border border-[var(--border)] bg-[var(--surface-raised)] text-[var(--foreground)] hover:bg-[var(--surface-subtle)]",
+  quiet: "bg-transparent text-[var(--foreground)] hover:bg-[var(--surface-subtle)]",
+  danger: "bg-[var(--danger)] text-white hover:brightness-95",
+};
+
+const sizes: Record<ButtonSize, string> = {
+  sm: "min-h-9 px-3 text-sm",
+  md: "min-h-10 px-4 text-sm",
+  lg: "min-h-11 px-5 text-sm",
+  icon: "size-10 p-0",
+};
+
+export function Button({
+  className,
+  variant = "primary",
+  size = "md",
+  type = "button",
+  ...props
+}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant; size?: ButtonSize }) {
+  return (
+    <button
+      type={type}
+      className={cn(
+        "inline-flex items-center justify-center gap-2 rounded-[var(--radius-md)] font-medium transition-[background-color,color,border-color,opacity,transform] duration-150 active:translate-y-px disabled:pointer-events-none disabled:opacity-50",
+        variants[variant],
+        sizes[size],
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+`;
+
+const BASE_FIELD_TSX = `import { cloneElement, type InputHTMLAttributes, type ReactElement } from "react";
+import { cn } from "@/lib/cn";
+
+export function Field({
+  label,
+  htmlFor,
+  hint,
+  error,
+  children,
+  className,
+}: {
+  label: string;
+  htmlFor: string;
+  hint?: string;
+  error?: string;
+  children: ReactElement<InputHTMLAttributes<HTMLInputElement>>;
+  className?: string;
+}) {
+  const descriptionId = hint || error ? htmlFor + "-description" : undefined;
+  return (
+    <div className={cn("grid gap-1.5", className)}>
+      <label htmlFor={htmlFor} className="text-sm font-medium">
+        {label}
+      </label>
+      {cloneElement(children, {
+        id: children.props.id || htmlFor,
+        "aria-describedby": children.props["aria-describedby"] || descriptionId,
+        "aria-invalid": error ? true : children.props["aria-invalid"],
+      })}
+      {error || hint ? (
+        <p id={descriptionId} className={cn("text-xs leading-relaxed", error ? "text-[var(--danger)]" : "text-[var(--muted)]")}>
+          {error || hint}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+export function Input({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
+  return (
+    <input
+      className={cn(
+        "min-h-10 w-full rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-sm placeholder:text-[var(--muted)] disabled:cursor-not-allowed disabled:opacity-50",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+`;
+
+const BASE_SKELETON_TSX = `import { cn } from "@/lib/cn";
+
+export function Skeleton({ className }: { className?: string }) {
+  return (
+    <div
+      aria-hidden="true"
+      className={cn("animate-pulse rounded-[var(--radius-sm)] bg-[var(--surface-subtle)] motion-reduce:animate-none", className)}
+    />
+  );
+}
+`;
+
+const BASE_EMPTY_STATE_TSX = `import type { ReactNode } from "react";
+import { cn } from "@/lib/cn";
+
+export function EmptyState({
+  icon,
+  title,
+  description,
+  action,
+  className,
+}: {
+  icon?: ReactNode;
+  title: string;
+  description: string;
+  action?: ReactNode;
+  className?: string;
+}) {
+  return (
+    <section className={cn("mx-auto flex max-w-md flex-col items-center py-16 text-center", className)}>
+      {icon ? <div className="mb-4 text-[var(--muted)]" aria-hidden="true">{icon}</div> : null}
+      <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
+      <p className="mt-2 text-sm leading-relaxed text-[var(--muted)]">{description}</p>
+      {action ? <div className="mt-5">{action}</div> : null}
+    </section>
+  );
 }
 `;
 
@@ -828,6 +1011,11 @@ export const PROFILE_OVERLAYS: Record<ScaffoldProfile, ProfileOverlayDefinition>
       { path: "src/app/error.tsx", content: BASE_ERROR_TSX },
       { path: "src/app/not-found.tsx", content: BASE_NOT_FOUND_TSX },
       { path: "src/app/api/health/route.ts", content: BASE_HEALTH_ROUTE },
+      { path: "src/lib/cn.ts", content: BASE_CN_TS },
+      { path: "src/components/ui/button.tsx", content: BASE_BUTTON_TSX },
+      { path: "src/components/ui/field.tsx", content: BASE_FIELD_TSX },
+      { path: "src/components/ui/skeleton.tsx", content: BASE_SKELETON_TSX },
+      { path: "src/components/ui/empty-state.tsx", content: BASE_EMPTY_STATE_TSX },
     ],
   },
   database: {

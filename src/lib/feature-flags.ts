@@ -9,7 +9,7 @@ function parseBooleanFlag(raw: string | undefined): boolean {
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
-export const DEFAULT_SCAFFOLD_VERSION = "1.0.0";
+export const DEFAULT_SCAFFOLD_VERSION = "1.1.0";
 
 export function isScaffoldBootstrapEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return parseBooleanFlag(env.COGNIX_PERF_SCAFFOLD_BOOTSTRAP);
