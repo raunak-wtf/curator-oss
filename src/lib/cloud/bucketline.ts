@@ -3,7 +3,8 @@ import { syncProjectEnv } from "@/lib/daytona";
 import { getDecryptedSecrets, upsertSecret } from "@/lib/store";
 import type { Project } from "@/lib/types";
 
-const DEFAULT_BUCKETLINE_BASE_URL = "https://cloudnest-cdn-vault.lovable.app";
+const DEFAULT_BUCKETLINE_BASE_URL = "https://cloud.curator.codes";
+const LEGACY_BUCKETLINE_ORIGINS = ["https://cloudnest-cdn-vault.lovable.app"] as const;
 const MAX_OBJECT_BYTES = 50 * 1024 * 1024; // Hard 50 MB Bucketline limit
 const RETRY_DELAYS_MS = [350, 1_000, 2_200] as const;
 
@@ -55,7 +56,32 @@ function sleep(ms: number) {
 }
 
 export function getBucketlineBaseUrl(): string {
-  return (process.env.BUCKETLINE_BASE_URL?.trim() || DEFAULT_BUCKETLINE_BASE_URL).replace(/\/+$/, "");
+  const configured = (process.env.BUCKETLINE_BASE_URL?.trim() || DEFAULT_BUCKETLINE_BASE_URL).replace(/\/+$/, "");
+  for (const legacy of LEGACY_BUCKETLINE_ORIGINS) {
+    if (configured.toLowerCase() === legacy) {
+      return DEFAULT_BUCKETLINE_BASE_URL;
+    }
+  }
+  return configured;
+}
+
+/**
+ * Rewrites legacy Bucketline host URLs (`https://cloudnest-cdn-vault.lovable.app/...`)
+ * to the active Bucketline deployment origin (`https://cloud.curator.codes/...`).
+ */
+export function rewriteLegacyBucketlineUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+  const activeBase = getBucketlineBaseUrl();
+  for (const legacy of LEGACY_BUCKETLINE_ORIGINS) {
+    if (trimmed.toLowerCase().startsWith(legacy)) {
+      const suffix = trimmed.slice(legacy.length);
+      if (!suffix || suffix.startsWith("/") || suffix.startsWith("?")) {
+        return `${activeBase}${suffix}`;
+      }
+    }
+  }
+  return value;
 }
 
 export function getBucketlineS3GatewayEndpoint(): string {
@@ -141,7 +167,7 @@ function normalizeBucket(raw: Record<string, unknown>): BucketlineBucket {
   const namespace = String(raw.namespace ?? "");
   const rawCdn = typeof raw.cdnEndpoint === "string" && raw.cdnEndpoint
     ? raw.cdnEndpoint.startsWith("http")
-      ? raw.cdnEndpoint
+      ? rewriteLegacyBucketlineUrl(raw.cdnEndpoint)
       : `${baseUrl}${raw.cdnEndpoint.startsWith("/") ? "" : "/"}${raw.cdnEndpoint}`
     : `${baseUrl}/api/public/cdn/${namespace}/${name}/`;
 
@@ -296,15 +322,24 @@ export async function getCredentialsForProjectBucket(
       secrets.S3_ACCESS_KEY_ID &&
       secrets.S3_SECRET_ACCESS_KEY
     ) {
-      return {
+      const expectedEndpoint = getBucketlineS3GatewayEndpoint();
+      const creds = {
         bucket: bucket.name,
         accessKeyId: secrets.S3_ACCESS_KEY_ID,
         secretAccessKey: secrets.S3_SECRET_ACCESS_KEY,
-        s3Endpoint: getBucketlineS3GatewayEndpoint(),
+        s3Endpoint: expectedEndpoint,
         s3Region: secrets.S3_REGION || "auto",
         cdnUrl: bucket.cdnEndpoint,
         accessMode: bucket.accessMode,
       };
+      if (
+        options.makeActive ||
+        secrets.S3_ENDPOINT !== expectedEndpoint ||
+        (secrets.S3_CDN_URL && secrets.S3_CDN_URL !== bucket.cdnEndpoint)
+      ) {
+        await saveActiveBucketSecrets(project, bucket, creds);
+      }
+      return creds;
     }
     const savedId = secrets[`${prefix}_KEY_ID`];
     const savedSecret = secrets[`${prefix}_SECRET`];
@@ -368,7 +403,8 @@ export async function ensureProjectStorageBucket(
         secrets.S3_BUCKET !== targetBucket.name ||
         !secrets.S3_ACCESS_KEY_ID ||
         !secrets.S3_SECRET_ACCESS_KEY ||
-        secrets.S3_ENDPOINT !== getBucketlineS3GatewayEndpoint()
+        secrets.S3_ENDPOINT !== getBucketlineS3GatewayEndpoint() ||
+        secrets.S3_CDN_URL !== targetBucket.cdnEndpoint
       ) {
         await getCredentialsForProjectBucket(project, targetBucket, { makeActive: true });
       }

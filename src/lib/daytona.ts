@@ -220,11 +220,19 @@ async function isPreviewUrlHealthy(url: string, timeoutMs = 8_000) {
 }
 
 async function writeProjectEnvFiles(sandbox: Sandbox, project: Project, root: string) {
-  const { getDecryptedSecrets } = await import("./store");
+  const { getDecryptedSecrets, upsertSecret } = await import("./store");
   const { renderEnvFile } = await import("./env-files");
+  const { rewriteLegacyBucketlineUrl } = await import("./cloud/bucketline");
 
   const secrets = await getDecryptedSecrets(project.id);
   const effectiveSecrets = { ...secrets };
+  for (const [key, value] of Object.entries(effectiveSecrets)) {
+    const migrated = rewriteLegacyBucketlineUrl(value);
+    if (migrated !== value) {
+      effectiveSecrets[key] = migrated;
+      void upsertSecret(project.id, key, migrated, "cloud").catch(() => undefined);
+    }
+  }
   if (project.mode !== "security" && effectiveSecrets.BETTER_AUTH_SECRET && !effectiveSecrets.BETTER_AUTH_URL) {
     const previewOrigin = directPreviewUrl(project.id);
     if (previewOrigin) {

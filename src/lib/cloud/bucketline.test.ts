@@ -4,9 +4,11 @@ import {
   buildPublicCdnUrl,
   createPresignedStorageUrl,
   formatProjectBucketName,
+  getBucketlineBaseUrl,
   normalizeObjectKey,
   projectBucketPrefix,
   projectOwnsBucket,
+  rewriteLegacyBucketlineUrl,
   scrubStorageSecrets,
 } from "./bucketline";
 
@@ -58,5 +60,17 @@ describe("Bucketline Cognix Cloud Storage helpers", () => {
     expect(scrubStorageSecrets("Error with key bk_AbCdEfGhIjKlMnOpQrStUvWxYz1234")).toBe(
       "Error with key bk_[REDACTED]",
     );
+  });
+
+  it("defaults to https://cloud.curator.codes and rewrites legacy cloudnest-cdn-vault URLs", () => {
+    expect(getBucketlineBaseUrl()).toBe("https://cloud.curator.codes");
+    expect(rewriteLegacyBucketlineUrl("https://cloudnest-cdn-vault.lovable.app/api/public/s3")).toBe(
+      "https://cloud.curator.codes/api/public/s3",
+    );
+    expect(
+      rewriteLegacyBucketlineUrl(
+        "https://cloudnest-cdn-vault.lovable.app/api/public/cdn/ns1/cx-4be40d88-media",
+      ),
+    ).toBe("https://cloud.curator.codes/api/public/cdn/ns1/cx-4be40d88-media");
   });
 });
