@@ -8,6 +8,7 @@ import {
 import { DESIGN_TO_CODE_SKILLS } from "../design-to-code";
 import { FRONTEND_DESIGN_SKILLS } from "../frontend-design";
 import { IMPECCABLE_SKILLS } from "../impeccable";
+import { OIL_UI_SKILLS } from "../oil-ui";
 import { TASTE_SKILLS } from "../taste-skill";
 import { THEME_FACTORY_SKILLS } from "../theme-factory";
 import { INTERACTIVE_TOOL_NAMES, interactiveTools, runInteractiveTool } from "../../interactive-tools";
@@ -46,7 +47,7 @@ const imageAttachment: Attachment = {
 };
 
 describe("design intelligence guide registry", () => {
-  it("provides all 9 internal design playbooks without external harness leaks", () => {
+  it("provides all 10 internal design playbooks without external harness leaks", () => {
     expect(DESIGN_GUIDE_TOPICS).toEqual([
       "core",
       "art-direction",
@@ -57,6 +58,7 @@ describe("design intelligence guide registry", () => {
       "verification",
       "design-critique",
       "distinctive-identity",
+      "direction-exploration",
     ]);
 
     for (const topic of DESIGN_GUIDE_TOPICS) {
@@ -75,7 +77,7 @@ describe("design intelligence guide registry", () => {
     expect(DESIGN_GUIDES["reference-forensics"]).toContain("Observed");
   });
 
-  it("adds the critique and distinctive-identity playbooks with their source methods", () => {
+  it("adds the critique, distinctive-identity, and direction-exploration playbooks with their source methods", () => {
     expect(DESIGN_GUIDES["design-critique"]).toContain("Render, then judge");
     expect(DESIGN_GUIDES["design-critique"]).toContain("Design | 40%");
     expect(DESIGN_GUIDES["design-critique"]).toContain("`typeset`");
@@ -89,6 +91,14 @@ describe("design intelligence guide registry", () => {
     expect(DESIGN_GUIDES["distinctive-identity"]).toContain("remove one decorative accessory");
     expect(DESIGN_GUIDES["distinctive-identity"]).toContain("Theme curation and tokens");
     expect(DESIGN_GUIDES["distinctive-identity"]).toContain("Copy is design content");
+
+    expect(DESIGN_GUIDES["direction-exploration"]).toContain("visual north star");
+    expect(DESIGN_GUIDES["direction-exploration"]).toContain("Direction cards from concrete anchors");
+    expect(DESIGN_GUIDES["direction-exploration"]).toContain("at most one trait may be shared");
+    expect(DESIGN_GUIDES["direction-exploration"]).toContain("squint test");
+    expect(DESIGN_GUIDES["direction-exploration"]).toContain("Independent review before delivery");
+    expect(DESIGN_GUIDES["direction-exploration"]).toContain("UX walkthrough");
+    expect(DESIGN_GUIDES["direction-exploration"]).toContain("Honest capability boundaries");
   });
 
   it("exposes the read_design_guide tool for every topic even when Cognix Cloud is off", () => {
@@ -110,13 +120,14 @@ describe("design intelligence guide registry", () => {
 });
 
 describe("unified design intelligence context", () => {
-  it("composes all five sources with unique skill names", () => {
+  it("composes all six sources with unique skill names", () => {
     const allSkills = [
       ...TASTE_SKILLS,
       ...DESIGN_TO_CODE_SKILLS,
       ...IMPECCABLE_SKILLS,
       ...FRONTEND_DESIGN_SKILLS,
       ...THEME_FACTORY_SKILLS,
+      ...OIL_UI_SKILLS,
     ];
     const names = allSkills.map((skill) => skill.name);
     expect(new Set(names).size).toBe(names.length);
@@ -164,6 +175,8 @@ describe("unified design intelligence context", () => {
     expect(context).toContain('<identity-skill name="distinctive-visual-identity">');
     expect(context).toContain("### Theme curation skills");
     expect(context).toContain('<theme-skill name="theme-token-curation">');
+    expect(context).toContain("### Direction exploration skills");
+    expect(context).toContain('<direction-skill name="visual-north-star-and-direction-exploration">');
 
     const withImage = designIntelligenceContext({ hasImageAttachments: true });
     expect(withImage).toContain("<image_to_code_priority>");
@@ -171,7 +184,7 @@ describe("unified design intelligence context", () => {
   });
 
   it("keeps the always-on layer compact", () => {
-    expect(designIntelligenceContext({ hasImageAttachments: true }).length).toBeLessThan(24_000);
+    expect(designIntelligenceContext({ hasImageAttachments: true }).length).toBeLessThan(25_000);
   });
 });
 
@@ -193,12 +206,14 @@ describe("automatic activation across prompt modes", () => {
     expect(planPrompt).toContain("reference-forensics");
     expect(planPrompt).toContain("design-critique");
     expect(planPrompt).toContain("distinctive-identity");
+    expect(planPrompt).toContain("direction-exploration");
     expect(planDesignIntelligenceContext({ hasImageAttachments: false })).not.toContain("Visual image attachments are present");
 
     const securityPrompt = buildSecurityPrompt({ ...buildProject, mode: "security" }, "/home/daytona/app");
     expect(securityPrompt).not.toContain("Built-in design intelligence");
     expect(securityPrompt).not.toContain("product-art-direction");
     expect(securityPrompt).not.toContain("design-to-code-dispatch-and-forensics");
+    expect(securityPrompt).not.toContain("visual-north-star-and-direction-exploration");
     expect(securityPrompt).not.toContain("read_design_guide");
   });
 

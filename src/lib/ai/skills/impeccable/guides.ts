@@ -1,9 +1,10 @@
 /**
  * Internal design critique & refinement playbook, read through the `read_design_guide` tool.
- * Method adapted from Impeccable by Paul Bakaus (https://impeccable.style) — reviewer-style
- * critique, focused refinement passes, and slop detection — combined with the look-and-fix
- * loop and Awwwards-weighted rubric of the MIT-licensed taste-skill (https://www.tasteskill.dev).
- * Never exposed in the public skills database. Import only from server code.
+ * Method adapted from Impeccable by Paul Bakaus (https://impeccable.style, Apache-2.0) —
+ * reviewer-style critique, focused refinement passes, and slop detection — combined with the
+ * look-and-fix loop and Awwwards-weighted rubric of the MIT-licensed taste-skill
+ * (https://www.tasteskill.dev). Never exposed in the public skills database.
+ * Import only from server code.
  */
 
 export const DESIGN_CRITIQUE_GUIDE = `# Design Critique & Refinement Playbook

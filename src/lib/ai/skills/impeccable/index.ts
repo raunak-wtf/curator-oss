@@ -2,9 +2,9 @@ import { renderInternalDesignSkill, type InternalDesignSkill } from "../internal
 
 /**
  * First-party critique & refinement vocabulary, adapted from the critique method of
- * Impeccable by Paul Bakaus (https://impeccable.style, https://github.com/pbakaus/impeccable):
- * reviewer-style critique, focused refinement passes, slop detection, and fix-not-report loops.
- * Always active in Build mode; never exposed as a user slash-skill.
+ * Impeccable by Paul Bakaus (https://impeccable.style, https://github.com/pbakaus/impeccable,
+ * Apache-2.0): reviewer-style critique, focused refinement passes, slop detection, and
+ * fix-not-report loops. Always active in Build mode; never exposed as a user slash-skill.
  */
 export const IMPECCABLE_SKILLS: readonly InternalDesignSkill[] = [
   {

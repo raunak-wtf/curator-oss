@@ -26,8 +26,8 @@ export const TASTE_SKILLS = [
     name: "content-first-planning",
     description: "Plan every page from real content and claims, so sections come from the argument instead of a template.",
     instructions: [
-      "Before building a new page or app, inventory what only this product has — real names, facts, numbers, constraints, materials, hours — and derive the page from it: an h1 that names what is sold and for whom, one hard fact on the first screen, sections that each prove one claim, and buttons written as a verb plus an object.",
-      "Classify the work before art-directing it: a marketing page (landing, product site, portfolio, event, venue) is read and scrolled; an app screen (dashboard, inbox, editor, settings, billing) is worked in. Choose visual presence for pages and calm density for app screens — never blend campaign hero furniture into authenticated work surfaces.",
+      "Before building a new page or app, inventory what only this product has — real names, facts, numbers, constraints, materials — and derive the page from it: an h1 naming what is sold and for whom, one hard fact on the first screen, sections that each prove one claim, buttons as a verb plus an object.",
+      "Classify the work before art-directing it: a marketing page is read and scrolled; an app screen (dashboard, inbox, editor, settings) is worked in. Choose visual presence for pages and calm density for app screens — never blend campaign hero furniture into authenticated work surfaces.",
       "For greenfield builds, state the one-sentence idea before styling: something specific to this subject becomes the device the composition serves. If the idea would survive unchanged on the nearest competitor's page, the direction is still generic.",
       "Use real assets in preference order: user-uploaded media first, then fitting licensed or open-collection imagery with credit, then purposeful diagrams, or type and color alone. Never present stock imagery, invented testimonials, fake ratings, or borrowed logos as the client's own.",
     ],
@@ -57,7 +57,7 @@ export const TASTE_SKILLS = [
       "Keep media intrinsically sized or aspect-ratio constrained, tables readable through scrolling or a deliberate stacked view, dialogs within the dynamic viewport, long content wrapping, and fixed controls clear of safe areas and the on-screen keyboard. Avoid fragile 100vh mobile shells.",
       "Make every flow keyboard operable with semantic HTML, visible focus rings, accessible names for icon-only controls, and status cues that do not rely on color alone. Use at least 44 px touch targets on coarse pointers and 32 px on desktop; keep mobile input text at least 16 px. Respect reduced motion and animate transform or opacity only when motion helps comprehension.",
       "For a new public page, add useful title and description metadata and intentional social artwork when assets exist. Keep client-side JavaScript and third-party dependencies proportionate, optimize image loading, and avoid layout shift.",
-      "Before finishing, inspect the affected routes and verify the production build. Check responsive structure, overflow, long and dense content, missing assets, broken destinations, unfinished placeholder copy, runtime errors, and all relevant loading, empty, success, and error paths. Do not claim screenshot-level visual review when only HTML or HTTP inspection is available.",
+      "Before finishing, inspect the affected routes and verify the production build; check responsive structure, overflow, long and dense content, missing assets, dead destinations, placeholder copy, and all loading, empty, success, and error paths.",
     ],
   },
 ] as const satisfies readonly InternalDesignSkill[];
