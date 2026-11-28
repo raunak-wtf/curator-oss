@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   BENCHMARK_SUITE,
@@ -480,5 +484,82 @@ describe("compareBenchmarkBaselines", () => {
     ]);
     const comparison = compareBenchmarkBaselines(baseline, candidate);
     expect(comparison.regressions).toContain("meetsSla");
+  });
+});
+
+describe("scripts/run-benchmarks.mjs CLI", () => {
+  const cliPath = path.resolve(process.cwd(), "scripts/run-benchmarks.mjs");
+
+  it("evaluates nested /api/admin/performance exports with proper units and baseline deltas", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "cognix-bench-cli-"));
+    try {
+      const baselineFile = path.join(dir, "baseline.json");
+      const candidateFile = path.join(dir, "candidate.json");
+      writeFileSync(
+        baselineFile,
+        JSON.stringify({
+          schemaVersion: 1,
+          recentRuns: [
+            {
+              id: "run-base-1",
+              benchmarkId: "marketing-site",
+              mode: "build",
+              status: "completed",
+              totalDurationMs: 600_000,
+              performance: {
+                timeToFirstPreviewMs: 320_000,
+                stages: { sandbox: { durationMs: 12_000 }, model: { durationMs: 420_000 } },
+                model: {
+                  turns: 40,
+                  turnMetrics: [{ promptTokens: 1_200_000 }, { promptTokens: 800_000 }],
+                },
+                commands: { productionBuilds: 3 },
+              },
+            },
+          ],
+        }),
+      );
+      writeFileSync(
+        candidateFile,
+        JSON.stringify({
+          schemaVersion: 1,
+          recentRuns: [
+            {
+              id: "run-cand-1",
+              benchmarkId: "marketing-site",
+              mode: "build",
+              status: "completed",
+              totalDurationMs: 180_000,
+              performance: {
+                timeToFirstPreviewMs: 55_000,
+                stages: { sandbox: { durationMs: 10_000 }, scaffold: { durationMs: 30_000 }, model: { durationMs: 90_000 } },
+                model: {
+                  turns: 10,
+                  turnMetrics: [{ promptTokens: 200_000 }, { promptTokens: 150_000 }],
+                },
+                commands: { productionBuilds: 1 },
+              },
+            },
+          ],
+        }),
+      );
+
+      const output = execFileSync(
+        process.execPath,
+        [cliPath, "--evaluate", candidateFile, "--baseline", baselineFile],
+        { encoding: "utf8" },
+      );
+
+      expect(output).toContain("Pass rate: 100% (1/1)");
+      expect(output).toContain("timeToFirstPreviewMs: p50 55.0s");
+      expect(output).toContain("turns: p50 10 / p95 10");
+      expect(output).not.toContain("turns: p50 10ms");
+      expect(output).toContain("inputTokens: p50 350,000");
+      expect(output).toContain("productionBuilds: p50 1 / p95 1");
+      expect(output).toContain("SLA (marketing-site): PASS");
+      expect(output).toContain("Baseline comparison: no regressions");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

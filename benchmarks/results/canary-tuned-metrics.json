@@ -1,0 +1,394 @@
+{
+  "schemaVersion": 1,
+  "label": "canary-all-flags-tuned",
+  "benchmarkId": "marketing-site",
+  "capturedAt": "2026-11-28T09:28:30.571Z",
+  "architecture": {
+    "scaffoldVersion": "1.0.0",
+    "flags": {
+      "scaffoldBootstrap": true,
+      "boundedAgent": true,
+      "contextCompaction": true,
+      "oneBuildPolicy": true
+    }
+  },
+  "recentRuns": [
+    {
+      "id": "b1b2fcba-6eeb-4895-8fdf-78ea73267ec7",
+      "label": "canary-all-flags-tuned",
+      "benchmarkId": "marketing-site",
+      "mode": "build",
+      "status": "checkpoint",
+      "passed": false,
+      "slaPassed": false,
+      "judgeFailures": [
+        "buildHealth: production build failed",
+        "routeProbes: route /services failed (status 404, body 20486); route /pricing failed (status 404, body 20485); route /contact failed (status 404, body 20484)",
+        "responsiveAndAccessibility: primary interaction failed",
+        "sla: 22 turns exceeded SLA cap of 20; 592295 input tokens exceeded SLA budget of 500000"
+      ],
+      "errorCategory": null,
+      "startedAt": "2026-11-28T09:15:38.298Z",
+      "completedAt": "2026-11-28T09:28:28.748Z",
+      "totalDurationMs": 770450,
+      "timeToFirstPreviewMs": 40761,
+      "turns": 22,
+      "inputTokens": 592295,
+      "productionBuilds": 1,
+      "routeProbes": [
+        {
+          "route": "/",
+          "status": 200,
+          "bodyLength": 296257,
+          "hasNextErrorOverlay": false
+        },
+        {
+          "route": "/services",
+          "status": 404,
+          "bodyLength": 20486,
+          "hasNextErrorOverlay": false
+        },
+        {
+          "route": "/pricing",
+          "status": 404,
+          "bodyLength": 20485,
+          "hasNextErrorOverlay": false
+        },
+        {
+          "route": "/contact",
+          "status": 404,
+          "bodyLength": 20484,
+          "hasNextErrorOverlay": false
+        }
+      ],
+      "performance": {
+        "model": {
+          "turns": 22,
+          "attempts": 28,
+          "durationMs": 678158,
+          "turnMetrics": [
+            {
+              "index": 1,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 3788,
+              "messageChars": 43350,
+              "promptTokens": 18029,
+              "completionTokens": 77,
+              "cachedPromptTokens": 0
+            },
+            {
+              "index": 2,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 1727,
+              "messageChars": 44364,
+              "promptTokens": 18506,
+              "completionTokens": 127,
+              "cachedPromptTokens": 12544
+            },
+            {
+              "index": 3,
+              "attempts": 4,
+              "toolCalls": 1,
+              "durationMs": 250537,
+              "messageChars": 49834,
+              "promptTokens": 20153,
+              "completionTokens": 6767,
+              "cachedPromptTokens": 14976
+            },
+            {
+              "index": 4,
+              "attempts": 4,
+              "toolCalls": 1,
+              "durationMs": 208490,
+              "messageChars": 50160,
+              "promptTokens": 20412,
+              "completionTokens": 135,
+              "cachedPromptTokens": 15168
+            },
+            {
+              "index": 5,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 65017,
+              "messageChars": 50789,
+              "promptTokens": 0,
+              "completionTokens": 12,
+              "cachedPromptTokens": 0
+            },
+            {
+              "index": 6,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 27929,
+              "messageChars": 51213,
+              "promptTokens": 21753,
+              "completionTokens": 4376,
+              "cachedPromptTokens": 15424
+            },
+            {
+              "index": 7,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 2230,
+              "messageChars": 43867,
+              "promptTokens": 21747,
+              "completionTokens": 104,
+              "cachedPromptTokens": 12480
+            },
+            {
+              "index": 8,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2168,
+              "messageChars": 46850,
+              "promptTokens": 22701,
+              "completionTokens": 117,
+              "cachedPromptTokens": 15680
+            },
+            {
+              "index": 9,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 8926,
+              "messageChars": 50481,
+              "promptTokens": 23837,
+              "completionTokens": 1196,
+              "cachedPromptTokens": 16768
+            },
+            {
+              "index": 10,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 24696,
+              "messageChars": 51657,
+              "promptTokens": 24297,
+              "completionTokens": 4644,
+              "cachedPromptTokens": 18048
+            },
+            {
+              "index": 11,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 14583,
+              "messageChars": 51757,
+              "promptTokens": 28297,
+              "completionTokens": 3521,
+              "cachedPromptTokens": 18560
+            },
+            {
+              "index": 12,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 30093,
+              "messageChars": 51865,
+              "promptTokens": 34424,
+              "completionTokens": 6668,
+              "cachedPromptTokens": 21120
+            },
+            {
+              "index": 13,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 4771,
+              "messageChars": 43987,
+              "promptTokens": 30183,
+              "completionTokens": 193,
+              "cachedPromptTokens": 12608
+            },
+            {
+              "index": 14,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 10778,
+              "messageChars": 82778,
+              "promptTokens": 40970,
+              "completionTokens": 1320,
+              "cachedPromptTokens": 19264
+            },
+            {
+              "index": 15,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 5988,
+              "messageChars": 82866,
+              "promptTokens": 41450,
+              "completionTokens": 720,
+              "cachedPromptTokens": 31296
+            },
+            {
+              "index": 16,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2816,
+              "messageChars": 82908,
+              "promptTokens": 41658,
+              "completionTokens": 120,
+              "cachedPromptTokens": 31808
+            },
+            {
+              "index": 17,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2144,
+              "messageChars": 83537,
+              "promptTokens": 41881,
+              "completionTokens": 135,
+              "cachedPromptTokens": 31936
+            },
+            {
+              "index": 18,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2520,
+              "messageChars": 83572,
+              "promptTokens": 41991,
+              "completionTokens": 80,
+              "cachedPromptTokens": 32256
+            },
+            {
+              "index": 19,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2567,
+              "messageChars": 84789,
+              "promptTokens": 42461,
+              "completionTokens": 129,
+              "cachedPromptTokens": 32320
+            },
+            {
+              "index": 20,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 1444,
+              "messageChars": 45303,
+              "promptTokens": 18847,
+              "completionTokens": 42,
+              "cachedPromptTokens": 12672
+            },
+            {
+              "index": 21,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 1791,
+              "messageChars": 45347,
+              "promptTokens": 18952,
+              "completionTokens": 62,
+              "cachedPromptTokens": 13248
+            },
+            {
+              "index": 22,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 3155,
+              "messageChars": 47960,
+              "promptTokens": 19746,
+              "completionTokens": 162,
+              "cachedPromptTokens": 13376
+            }
+          ],
+          "contextRefreshes": 4
+        },
+        "tools": {
+          "calls": 28,
+          "byName": {
+            "edit_file": {
+              "calls": 1,
+              "errors": 0,
+              "durationMs": 713
+            },
+            "read_file": {
+              "calls": 2,
+              "errors": 0,
+              "durationMs": 781
+            },
+            "list_files": {
+              "calls": 2,
+              "errors": 0,
+              "durationMs": 535
+            },
+            "read_files": {
+              "calls": 5,
+              "errors": 0,
+              "durationMs": 5527
+            },
+            "write_file": {
+              "calls": 9,
+              "errors": 1,
+              "durationMs": 7696
+            },
+            "run_command": {
+              "calls": 3,
+              "errors": 0,
+              "durationMs": 21497
+            },
+            "stop_process": {
+              "calls": 1,
+              "errors": 0,
+              "durationMs": 484
+            },
+            "list_processes": {
+              "calls": 2,
+              "errors": 0,
+              "durationMs": 806
+            },
+            "get_preview_url": {
+              "calls": 1,
+              "errors": 0,
+              "durationMs": 6160
+            },
+            "batch_edit_files": {
+              "calls": 1,
+              "errors": 0,
+              "durationMs": 485
+            },
+            "read_preview_console": {
+              "calls": 1,
+              "errors": 0,
+              "durationMs": 1879
+            }
+          },
+          "errors": 1,
+          "durationMs": 46563,
+          "unchangedFileRereads": 0
+        },
+        "stages": {
+          "tool": 17638,
+          "agent": 12,
+          "build": 20046,
+          "model": 678157,
+          "probe": 2644,
+          "setup": 1662,
+          "github": 0,
+          "preview": 6996,
+          "sandbox": 1314,
+          "scaffold": 37802,
+          "persistence": 113,
+          "verification": 4066
+        },
+        "commands": {
+          "count": 3,
+          "failed": 0,
+          "installs": 0,
+          "background": 1,
+          "durationMs": 21495,
+          "previewStarts": 1,
+          "previewRestarts": 0,
+          "productionBuilds": 1
+        },
+        "architecture": {
+          "flags": {
+            "boundedAgent": true,
+            "oneBuildPolicy": true,
+            "contextCompaction": true,
+            "scaffoldBootstrap": true
+          },
+          "scaffoldVersion": "1.0.0"
+        },
+        "schemaVersion": 1,
+        "timeToFirstPreviewMs": 40761
+      }
+    }
+  ]
+}

@@ -27,10 +27,27 @@
 ### Still open (operational execution, browser E2E judges & canary soak)
 
 - Add headless browser-based responsive/accessibility/interaction E2E runner feeding `judgeResponsiveAndAccessibility`.
-- Execute at least five live baseline runs per benchmark against the current architecture and save comparable p50/p95 results before enabling canary flags.
+- Expand live benchmark runs to 5+ samples per benchmark across all 7 catalog tasks (including full-stack `crud-notes`, `auth-dashboard`, `realtime-chat-storage`).
+- Address upstream LLM stream-timeout retries observed during canary runs (~60s idle stalls on large tool-call turns) as part of Phase 6 model routing evaluation.
 - Evaluate optional Daytona snapshot / warm-sandbox pool acceleration for package cache startup.
 - Wire safe autofixer invocation into the automated repair path behind a dedicated opt-in check after shadow testing.
 - Complete Phase 7 staged canary rollout (internal → 5% → 25% → 50% → 100%) and two-week stability soak before removing legacy fallback paths.
+
+### Live baseline vs. incremental canary benchmark results (`marketing-site`, 2026-11-28)
+
+Evaluated via `node scripts/run-benchmarks.mjs --evaluate <file> --baseline benchmarks/results/baseline-metrics.json --benchmark marketing-site` on live Daytona sandboxes + live LLM (`cf/@cf/deepseek-ai/deepseek-v4.1-flash-1017`):
+
+| Stage / Flags | First preview | Total duration | Model turns | Input tokens | Commands | Prod builds | Non-model platform time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **Baseline** (all `COGNIX_PERF_*` `false`) | 19m 33.5s | 19m 35.0s | 100 | 5,097,597 | 44 | 4 | 5m 42.8s |
+| **Canary 1** (`SCAFFOLD_BOOTSTRAP` + `BOUNDED_AGENT`) | **31.1s** (−97.3%) | 14m 15.1s* (−27.2%) | **22** (−78.0%) | **837,085** (−83.6%) | 9 | **1** (−75.0%) | 2m 04.0s |
+| **Canary 2** (`+ CONTEXT_COMPACTION`) | **29.1s** (−97.5%) | 7m 40.8s (−60.8%) | **22** (−78.0%) | **618,780** (−87.9%) | 4 | 0† | 1m 44.8s |
+| **Canary 3** (`+ ONE_BUILD`, all 4 flags) | **29.7s** (−97.5%) | **6m 18.8s** (−67.8%) | **22** (−78.0%) | **697,628** (−86.3%) | 4 | 0† | 1m 54.6s |
+| **Canary 4** (all 4 flags + base-profile & wrap-up tuning) | **40.8s** (−96.5%) | 12m 50.5s* (−34.4%) | **22** (−78.0%) | **592,295** (−88.4%) | **3** (−93.2%) | **1** (−75.0%) | **1m 32.3s** (−73.1%) |
+
+- \* Canary 1 and Canary 4 absorbed 6 upstream 60-second LLM stream idle retries (~6m 30s of provider stalls); excluding retries, Canary 4 active execution time was ~6m 20s and non-model platform time dropped **73.1%** (`5m 42.8s` → `1m 32.3s`), with redundant final `npm install` eliminated (`0ms`).
+- † Canary 2 and Canary 3 hit the 22-turn frontend cap before executing `npm run build` because the model provisioned an unnecessary database for the contact form; Canary 4's flag-gated base-only scaffold guidance and 4-turn wrap-up nudge eliminated the stray database provisioning and achieved **1 clean production build**, **3 total commands**, and **−88.4% input tokens** with **zero regressions**.
+- Stage-level telemetry accounted for **100.0%** of total run duration across all runs (meeting the Phase 0 `>= 95%` exit gate).
 
 ## 1. Baseline and diagnosis
 

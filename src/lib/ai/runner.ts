@@ -440,7 +440,20 @@ export async function runAgent(input: {
         }).catch(() => undefined);
         await emit({ type: "preview", url: bootstrapped.previewUrl, sandboxId: sandbox.id });
       }
-      scaffoldAppliedNote = `Cognix pre-scaffolded this new project (template v${bootstrapped.manifest.templateVersion}, profiles: ${bootstrapped.manifest.profiles.join(", ")}) with dependencies installed and a live preview running on port 3000. Do NOT rewrite package.json, tsconfig.json, next.config.ts, or postcss.config.mjs unless you need an additional package; build the requested product UI, schema, and routes directly on top of the scaffolded files.`;
+      const isBaseOnlyScaffold = bootstrapped.manifest.profiles.length === 1 && bootstrapped.manifest.profiles[0] === "base";
+      scaffoldAppliedNote = [
+        `Cognix pre-scaffolded this new project (template v${bootstrapped.manifest.templateVersion}, profiles: ${bootstrapped.manifest.profiles.join(", ")}) with dependencies installed and a live preview running on port 3000. Do NOT rewrite package.json, tsconfig.json, next.config.ts, or postcss.config.mjs unless you need an additional package; build the requested product UI, schema, and routes directly on top of the scaffolded files.`,
+        ...(isBaseOnlyScaffold
+          ? [
+              "This project uses the frontend-only `base` scaffold. Do NOT call `request_cognix_cloud`, provision a database, or install ORM/auth packages unless the user explicitly requested server-side persistence, user accounts, or file uploads; implement contact or inquiry forms with client-side validation and clear confirmation states.",
+            ]
+          : []),
+        ...(isBoundedAgentEnabled()
+          ? [
+              "Work efficiently within your turn budget: batch independent file writes and edits in parallel each turn, skip redundant re-reads, and run one clean production build (`rm -rf .next && npm run build`) once implementation is complete before finishing.",
+            ]
+          : []),
+      ].join(" ");
     }
   }
   let githubInfo: GitHubCommitInfo | undefined;
@@ -692,7 +705,8 @@ export async function runAgent(input: {
     hasVisualSelections: input.visualSelections.length > 0,
     isErrorRepair: promptAlreadyContainsErrors,
   });
-  const maxAgentTurns = boundedAgentEnabled ? adaptiveBudget.hardBudget : resolveAgentMaxTurns();
+  let maxAgentTurns = boundedAgentEnabled ? adaptiveBudget.hardBudget : resolveAgentMaxTurns();
+  let wrapUpNudgeSent = false;
   // Security mode: the build tools minus the preview, plus ask_user and the pull request proposal. No commit tool.
   const securityTools = [
     ...agentTools.filter((tool) => tool.type === "function" && !SECURITY_EXCLUDED_TOOLS.has(tool.function.name)),
@@ -943,6 +957,37 @@ export async function runAgent(input: {
       await emit({ type: "status", label: security ? "Continuing with a focused review context" : "Continuing with a focused build context" });
     }
     turnsSinceLastCompaction += 1;
+
+    if (boundedAgentEnabled && cloudState.enabled && inferredCloudCount === 0) {
+      const fullstackBudget = resolveAdaptiveTurnBudget({
+        mode: runMode,
+        prompt,
+        isNewProject: isNewProjectBuild,
+        cloudFeaturesCount: 1,
+        hasVisualSelections: input.visualSelections.length > 0,
+        isErrorRepair: promptAlreadyContainsErrors,
+      }).hardBudget;
+      if (fullstackBudget > maxAgentTurns) {
+        maxAgentTurns = fullstackBudget;
+      }
+    }
+
+    if (
+      boundedAgentEnabled
+      && !security
+      && !planMode
+      && !productionBuildPassed
+      && !wrapUpNudgeSent
+      && maxAgentTurns >= 8
+      && turn === maxAgentTurns - 4
+    ) {
+      wrapUpNudgeSent = true;
+      messages.push({
+        role: "user",
+        content:
+          "[Turn budget] You have 4 turns left in this pass. Finish any remaining files now, run one clean production build (`rm -rf .next && npm run build`), verify the live preview is healthy, and provide your concise completion summary.",
+      });
+    }
 
     const planTools = getPlanTools();
     const planToolNames = new Set(planTools.map((tool) => tool.function.name));

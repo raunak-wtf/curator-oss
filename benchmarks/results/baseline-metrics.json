@@ -1,0 +1,1159 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-11-28T08:42:00.326Z",
+  "sampleSize": 1,
+  "recentRuns": [
+    {
+      "id": "25a86230-57c1-4977-bce2-95cb92296f83",
+      "mode": "build",
+      "status": "checkpoint",
+      "errorCategory": null,
+      "startedAt": "2026-11-28T08:22:09.934Z",
+      "completedAt": "2026-11-28T08:41:44.980Z",
+      "totalDurationMs": 1175046,
+      "performance": {
+        "model": {
+          "turns": 100,
+          "attempts": 100,
+          "durationMs": 832231,
+          "turnMetrics": [
+            {
+              "index": 1,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 4006,
+              "messageChars": 42403,
+              "promptTokens": 17792,
+              "completionTokens": 77,
+              "cachedPromptTokens": 0
+            },
+            {
+              "index": 2,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 1730,
+              "messageChars": 42502,
+              "promptTokens": 18007,
+              "completionTokens": 87,
+              "cachedPromptTokens": 12352
+            },
+            {
+              "index": 3,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 38650,
+              "messageChars": 42632,
+              "promptTokens": 18210,
+              "completionTokens": 5317,
+              "cachedPromptTokens": 12480
+            },
+            {
+              "index": 4,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 25833,
+              "messageChars": 57301,
+              "promptTokens": 22144,
+              "completionTokens": 3657,
+              "cachedPromptTokens": 12608
+            },
+            {
+              "index": 5,
+              "attempts": 1,
+              "toolCalls": 4,
+              "durationMs": 44589,
+              "messageChars": 76292,
+              "promptTokens": 28990,
+              "completionTokens": 6606,
+              "cachedPromptTokens": 7552
+            },
+            {
+              "index": 6,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2408,
+              "messageChars": 76540,
+              "promptTokens": 30125,
+              "completionTokens": 74,
+              "cachedPromptTokens": 23104
+            },
+            {
+              "index": 7,
+              "attempts": 1,
+              "toolCalls": 3,
+              "durationMs": 27394,
+              "messageChars": 76774,
+              "promptTokens": 30328,
+              "completionTokens": 4370,
+              "cachedPromptTokens": 23936
+            },
+            {
+              "index": 8,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 1874,
+              "messageChars": 76938,
+              "promptTokens": 31346,
+              "completionTokens": 79,
+              "cachedPromptTokens": 24128
+            },
+            {
+              "index": 9,
+              "attempts": 1,
+              "toolCalls": 3,
+              "durationMs": 45622,
+              "messageChars": 78369,
+              "promptTokens": 31848,
+              "completionTokens": 8034,
+              "cachedPromptTokens": 24832
+            },
+            {
+              "index": 10,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 30307,
+              "messageChars": 78585,
+              "promptTokens": 34018,
+              "completionTokens": 4672,
+              "cachedPromptTokens": 25408
+            },
+            {
+              "index": 11,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 14313,
+              "messageChars": 78702,
+              "promptTokens": 36773,
+              "completionTokens": 2666,
+              "cachedPromptTokens": 27328
+            },
+            {
+              "index": 12,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 10135,
+              "messageChars": 78887,
+              "promptTokens": 39016,
+              "completionTokens": 1943,
+              "cachedPromptTokens": 29504
+            },
+            {
+              "index": 13,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 15496,
+              "messageChars": 78975,
+              "promptTokens": 41199,
+              "completionTokens": 2977,
+              "cachedPromptTokens": 30784
+            },
+            {
+              "index": 14,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 13033,
+              "messageChars": 79074,
+              "promptTokens": 44864,
+              "completionTokens": 2767,
+              "cachedPromptTokens": 32192
+            },
+            {
+              "index": 15,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 14119,
+              "messageChars": 79163,
+              "promptTokens": 49221,
+              "completionTokens": 2519,
+              "cachedPromptTokens": 34368
+            },
+            {
+              "index": 16,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 13521,
+              "messageChars": 79259,
+              "promptTokens": 52110,
+              "completionTokens": 2952,
+              "cachedPromptTokens": 36928
+            },
+            {
+              "index": 17,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 7638,
+              "messageChars": 79310,
+              "promptTokens": 56257,
+              "completionTokens": 1740,
+              "cachedPromptTokens": 38720
+            },
+            {
+              "index": 18,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 3308,
+              "messageChars": 79406,
+              "promptTokens": 59567,
+              "completionTokens": 140,
+              "cachedPromptTokens": 41216
+            },
+            {
+              "index": 19,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2901,
+              "messageChars": 79447,
+              "promptTokens": 59701,
+              "completionTokens": 391,
+              "cachedPromptTokens": 42944
+            },
+            {
+              "index": 20,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2433,
+              "messageChars": 79482,
+              "promptTokens": 60179,
+              "completionTokens": 80,
+              "cachedPromptTokens": 43008
+            },
+            {
+              "index": 21,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2188,
+              "messageChars": 80636,
+              "promptTokens": 60619,
+              "completionTokens": 136,
+              "cachedPromptTokens": 43328
+            },
+            {
+              "index": 22,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2082,
+              "messageChars": 80813,
+              "promptTokens": 60807,
+              "completionTokens": 43,
+              "cachedPromptTokens": 43776
+            },
+            {
+              "index": 23,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 9103,
+              "messageChars": 101881,
+              "promptTokens": 66679,
+              "completionTokens": 1093,
+              "cachedPromptTokens": 43904
+            },
+            {
+              "index": 24,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 6860,
+              "messageChars": 106290,
+              "promptTokens": 68043,
+              "completionTokens": 601,
+              "cachedPromptTokens": 50880
+            },
+            {
+              "index": 25,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 1952,
+              "messageChars": 106440,
+              "promptTokens": 68434,
+              "completionTokens": 48,
+              "cachedPromptTokens": 52416
+            },
+            {
+              "index": 26,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 3700,
+              "messageChars": 127112,
+              "promptTokens": 75255,
+              "completionTokens": 173,
+              "cachedPromptTokens": 52736
+            },
+            {
+              "index": 27,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 1828,
+              "messageChars": 127282,
+              "promptTokens": 75431,
+              "completionTokens": 48,
+              "cachedPromptTokens": 60544
+            },
+            {
+              "index": 28,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 14413,
+              "messageChars": 127663,
+              "promptTokens": 75619,
+              "completionTokens": 2349,
+              "cachedPromptTokens": 60672
+            },
+            {
+              "index": 29,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 1863,
+              "messageChars": 54363,
+              "promptTokens": 22681,
+              "completionTokens": 87,
+              "cachedPromptTokens": 17472
+            },
+            {
+              "index": 30,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2200,
+              "messageChars": 56125,
+              "promptTokens": 23356,
+              "completionTokens": 214,
+              "cachedPromptTokens": 17728
+            },
+            {
+              "index": 31,
+              "attempts": 1,
+              "toolCalls": 3,
+              "durationMs": 3817,
+              "messageChars": 72066,
+              "promptTokens": 27931,
+              "completionTokens": 298,
+              "cachedPromptTokens": 18432
+            },
+            {
+              "index": 32,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 1812,
+              "messageChars": 75508,
+              "promptTokens": 29158,
+              "completionTokens": 231,
+              "cachedPromptTokens": 23488
+            },
+            {
+              "index": 33,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 3571,
+              "messageChars": 76613,
+              "promptTokens": 29693,
+              "completionTokens": 390,
+              "cachedPromptTokens": 24704
+            },
+            {
+              "index": 34,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2623,
+              "messageChars": 98557,
+              "promptTokens": 35834,
+              "completionTokens": 117,
+              "cachedPromptTokens": 25280
+            },
+            {
+              "index": 35,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 6367,
+              "messageChars": 126435,
+              "promptTokens": 43379,
+              "completionTokens": 696,
+              "cachedPromptTokens": 31872
+            },
+            {
+              "index": 36,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 6687,
+              "messageChars": 130847,
+              "promptTokens": 44812,
+              "completionTokens": 810,
+              "cachedPromptTokens": 39680
+            },
+            {
+              "index": 37,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2912,
+              "messageChars": 131794,
+              "promptTokens": 45267,
+              "completionTokens": 287,
+              "cachedPromptTokens": 41152
+            },
+            {
+              "index": 38,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 10925,
+              "messageChars": 133243,
+              "promptTokens": 45826,
+              "completionTokens": 1575,
+              "cachedPromptTokens": 41664
+            },
+            {
+              "index": 39,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 32827,
+              "messageChars": 159375,
+              "promptTokens": 53165,
+              "completionTokens": 4767,
+              "cachedPromptTokens": 42240
+            },
+            {
+              "index": 40,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 26550,
+              "messageChars": 160818,
+              "promptTokens": 53680,
+              "completionTokens": 4962,
+              "cachedPromptTokens": 51072
+            },
+            {
+              "index": 41,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 9056,
+              "messageChars": 161108,
+              "promptTokens": 56808,
+              "completionTokens": 1713,
+              "cachedPromptTokens": 51456
+            },
+            {
+              "index": 42,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 6271,
+              "messageChars": 161364,
+              "promptTokens": 57919,
+              "completionTokens": 976,
+              "cachedPromptTokens": 53312
+            },
+            {
+              "index": 43,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2290,
+              "messageChars": 161525,
+              "promptTokens": 59119,
+              "completionTokens": 170,
+              "cachedPromptTokens": 54592
+            },
+            {
+              "index": 44,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 3662,
+              "messageChars": 163089,
+              "promptTokens": 59631,
+              "completionTokens": 431,
+              "cachedPromptTokens": 55296
+            },
+            {
+              "index": 45,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2348,
+              "messageChars": 163158,
+              "promptTokens": 59763,
+              "completionTokens": 73,
+              "cachedPromptTokens": 55744
+            },
+            {
+              "index": 46,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 3864,
+              "messageChars": 164402,
+              "promptTokens": 60240,
+              "completionTokens": 344,
+              "cachedPromptTokens": 55808
+            },
+            {
+              "index": 47,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2437,
+              "messageChars": 164512,
+              "promptTokens": 60473,
+              "completionTokens": 144,
+              "cachedPromptTokens": 56256
+            },
+            {
+              "index": 48,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 8824,
+              "messageChars": 164561,
+              "promptTokens": 60682,
+              "completionTokens": 1039,
+              "cachedPromptTokens": 56448
+            },
+            {
+              "index": 49,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 3321,
+              "messageChars": 164789,
+              "promptTokens": 60937,
+              "completionTokens": 242,
+              "cachedPromptTokens": 56640
+            },
+            {
+              "index": 50,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2888,
+              "messageChars": 170455,
+              "promptTokens": 62680,
+              "completionTokens": 178,
+              "cachedPromptTokens": 56832
+            },
+            {
+              "index": 51,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 7963,
+              "messageChars": 172867,
+              "promptTokens": 63466,
+              "completionTokens": 1078,
+              "cachedPromptTokens": 59008
+            },
+            {
+              "index": 52,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 4250,
+              "messageChars": 178640,
+              "promptTokens": 65115,
+              "completionTokens": 417,
+              "cachedPromptTokens": 59712
+            },
+            {
+              "index": 53,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 1808,
+              "messageChars": 178834,
+              "promptTokens": 65278,
+              "completionTokens": 59,
+              "cachedPromptTokens": 61824
+            },
+            {
+              "index": 54,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2179,
+              "messageChars": 178869,
+              "promptTokens": 65397,
+              "completionTokens": 145,
+              "cachedPromptTokens": 61952
+            },
+            {
+              "index": 55,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2312,
+              "messageChars": 178979,
+              "promptTokens": 65615,
+              "completionTokens": 110,
+              "cachedPromptTokens": 62016
+            },
+            {
+              "index": 56,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2330,
+              "messageChars": 179058,
+              "promptTokens": 65825,
+              "completionTokens": 62,
+              "cachedPromptTokens": 62208
+            },
+            {
+              "index": 57,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 1179,
+              "messageChars": 54410,
+              "promptTokens": 22693,
+              "completionTokens": 87,
+              "cachedPromptTokens": 17728
+            },
+            {
+              "index": 58,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2121,
+              "messageChars": 56184,
+              "promptTokens": 23370,
+              "completionTokens": 188,
+              "cachedPromptTokens": 17792
+            },
+            {
+              "index": 59,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2523,
+              "messageChars": 65266,
+              "promptTokens": 26022,
+              "completionTokens": 120,
+              "cachedPromptTokens": 18496
+            },
+            {
+              "index": 60,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 4273,
+              "messageChars": 84600,
+              "promptTokens": 31367,
+              "completionTokens": 355,
+              "cachedPromptTokens": 21440
+            },
+            {
+              "index": 61,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 3835,
+              "messageChars": 110975,
+              "promptTokens": 38797,
+              "completionTokens": 332,
+              "cachedPromptTokens": 27392
+            },
+            {
+              "index": 62,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 7410,
+              "messageChars": 130858,
+              "promptTokens": 44297,
+              "completionTokens": 871,
+              "cachedPromptTokens": 35264
+            },
+            {
+              "index": 63,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 2901,
+              "messageChars": 134092,
+              "promptTokens": 45431,
+              "completionTokens": 300,
+              "cachedPromptTokens": 41024
+            },
+            {
+              "index": 64,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 21703,
+              "messageChars": 182563,
+              "promptTokens": 61684,
+              "completionTokens": 2792,
+              "cachedPromptTokens": 42176
+            },
+            {
+              "index": 65,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 16301,
+              "messageChars": 183445,
+              "promptTokens": 62101,
+              "completionTokens": 2441,
+              "cachedPromptTokens": 59584
+            },
+            {
+              "index": 66,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 1941,
+              "messageChars": 183793,
+              "promptTokens": 62289,
+              "completionTokens": 67,
+              "cachedPromptTokens": 60032
+            },
+            {
+              "index": 67,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 20086,
+              "messageChars": 185037,
+              "promptTokens": 62714,
+              "completionTokens": 3465,
+              "cachedPromptTokens": 60224
+            },
+            {
+              "index": 68,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 11323,
+              "messageChars": 185325,
+              "promptTokens": 63157,
+              "completionTokens": 1811,
+              "cachedPromptTokens": 60608
+            },
+            {
+              "index": 69,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 11885,
+              "messageChars": 185374,
+              "promptTokens": 63292,
+              "completionTokens": 1819,
+              "cachedPromptTokens": 61056
+            },
+            {
+              "index": 70,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 19399,
+              "messageChars": 185430,
+              "promptTokens": 63473,
+              "completionTokens": 2955,
+              "cachedPromptTokens": 61184
+            },
+            {
+              "index": 71,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 4946,
+              "messageChars": 185487,
+              "promptTokens": 63730,
+              "completionTokens": 557,
+              "cachedPromptTokens": 61376
+            },
+            {
+              "index": 72,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 3782,
+              "messageChars": 186686,
+              "promptTokens": 64143,
+              "completionTokens": 295,
+              "cachedPromptTokens": 61632
+            },
+            {
+              "index": 73,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 1854,
+              "messageChars": 186796,
+              "promptTokens": 64277,
+              "completionTokens": 72,
+              "cachedPromptTokens": 62016
+            },
+            {
+              "index": 74,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 4235,
+              "messageChars": 186827,
+              "promptTokens": 64372,
+              "completionTokens": 402,
+              "cachedPromptTokens": 62208
+            },
+            {
+              "index": 75,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 4565,
+              "messageChars": 187106,
+              "promptTokens": 64572,
+              "completionTokens": 534,
+              "cachedPromptTokens": 62272
+            },
+            {
+              "index": 76,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2416,
+              "messageChars": 187837,
+              "promptTokens": 65042,
+              "completionTokens": 148,
+              "cachedPromptTokens": 62464
+            },
+            {
+              "index": 77,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 3722,
+              "messageChars": 191998,
+              "promptTokens": 66683,
+              "completionTokens": 404,
+              "cachedPromptTokens": 62976
+            },
+            {
+              "index": 78,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 6014,
+              "messageChars": 192587,
+              "promptTokens": 66979,
+              "completionTokens": 823,
+              "cachedPromptTokens": 64576
+            },
+            {
+              "index": 79,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 3132,
+              "messageChars": 192724,
+              "promptTokens": 67356,
+              "completionTokens": 74,
+              "cachedPromptTokens": 64896
+            },
+            {
+              "index": 80,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 3106,
+              "messageChars": 194011,
+              "promptTokens": 67840,
+              "completionTokens": 164,
+              "cachedPromptTokens": 65280
+            },
+            {
+              "index": 81,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2166,
+              "messageChars": 194082,
+              "promptTokens": 67944,
+              "completionTokens": 76,
+              "cachedPromptTokens": 65728
+            },
+            {
+              "index": 82,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 8555,
+              "messageChars": 194542,
+              "promptTokens": 68157,
+              "completionTokens": 1251,
+              "cachedPromptTokens": 65856
+            },
+            {
+              "index": 83,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 3727,
+              "messageChars": 194672,
+              "promptTokens": 68245,
+              "completionTokens": 195,
+              "cachedPromptTokens": 66048
+            },
+            {
+              "index": 84,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 18068,
+              "messageChars": 194740,
+              "promptTokens": 68475,
+              "completionTokens": 2170,
+              "cachedPromptTokens": 66048
+            },
+            {
+              "index": 85,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 1712,
+              "messageChars": 54475,
+              "promptTokens": 22709,
+              "completionTokens": 79,
+              "cachedPromptTokens": 17792
+            },
+            {
+              "index": 86,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 3587,
+              "messageChars": 56272,
+              "promptTokens": 23393,
+              "completionTokens": 306,
+              "cachedPromptTokens": 17792
+            },
+            {
+              "index": 87,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 3340,
+              "messageChars": 72598,
+              "promptTokens": 28179,
+              "completionTokens": 285,
+              "cachedPromptTokens": 18496
+            },
+            {
+              "index": 88,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 3491,
+              "messageChars": 87879,
+              "promptTokens": 32504,
+              "completionTokens": 293,
+              "cachedPromptTokens": 23680
+            },
+            {
+              "index": 89,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 4534,
+              "messageChars": 129527,
+              "promptTokens": 44003,
+              "completionTokens": 426,
+              "cachedPromptTokens": 28544
+            },
+            {
+              "index": 90,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 9319,
+              "messageChars": 131595,
+              "promptTokens": 44885,
+              "completionTokens": 737,
+              "cachedPromptTokens": 40576
+            },
+            {
+              "index": 91,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 4674,
+              "messageChars": 135216,
+              "promptTokens": 46094,
+              "completionTokens": 561,
+              "cachedPromptTokens": 41536
+            },
+            {
+              "index": 92,
+              "attempts": 1,
+              "toolCalls": 2,
+              "durationMs": 2743,
+              "messageChars": 135692,
+              "promptTokens": 46405,
+              "completionTokens": 292,
+              "cachedPromptTokens": 42688
+            },
+            {
+              "index": 93,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 4096,
+              "messageChars": 144829,
+              "promptTokens": 49028,
+              "completionTokens": 338,
+              "cachedPromptTokens": 43008
+            },
+            {
+              "index": 94,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 7451,
+              "messageChars": 145338,
+              "promptTokens": 49304,
+              "completionTokens": 1017,
+              "cachedPromptTokens": 46272
+            },
+            {
+              "index": 95,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 7346,
+              "messageChars": 145365,
+              "promptTokens": 49425,
+              "completionTokens": 1039,
+              "cachedPromptTokens": 46592
+            },
+            {
+              "index": 96,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 3355,
+              "messageChars": 145403,
+              "promptTokens": 49630,
+              "completionTokens": 299,
+              "cachedPromptTokens": 46656
+            },
+            {
+              "index": 97,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 12340,
+              "messageChars": 146647,
+              "promptTokens": 50110,
+              "completionTokens": 1941,
+              "cachedPromptTokens": 46848
+            },
+            {
+              "index": 98,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 2507,
+              "messageChars": 146857,
+              "promptTokens": 50356,
+              "completionTokens": 53,
+              "cachedPromptTokens": 47232
+            },
+            {
+              "index": 99,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 16072,
+              "messageChars": 199055,
+              "promptTokens": 77972,
+              "completionTokens": 1686,
+              "cachedPromptTokens": 47488
+            },
+            {
+              "index": 100,
+              "attempts": 1,
+              "toolCalls": 1,
+              "durationMs": 19103,
+              "messageChars": 200754,
+              "promptTokens": 78786,
+              "completionTokens": 2559,
+              "cachedPromptTokens": 75904
+            }
+          ],
+          "contextRefreshes": 3
+        },
+        "tools": {
+          "calls": 140,
+          "byName": {
+            "edit_file": {
+              "calls": 5,
+              "errors": 0,
+              "durationMs": 2921
+            },
+            "move_file": {
+              "calls": 1,
+              "errors": 0,
+              "durationMs": 884
+            },
+            "read_file": {
+              "calls": 7,
+              "errors": 1,
+              "durationMs": 2344
+            },
+            "find_files": {
+              "calls": 1,
+              "errors": 0,
+              "durationMs": 276
+            },
+            "list_files": {
+              "calls": 7,
+              "errors": 0,
+              "durationMs": 2323
+            },
+            "read_files": {
+              "calls": 12,
+              "errors": 0,
+              "durationMs": 14354
+            },
+            "write_file": {
+              "calls": 29,
+              "errors": 0,
+              "durationMs": 21756
+            },
+            "delete_file": {
+              "calls": 2,
+              "errors": 0,
+              "durationMs": 1080
+            },
+            "run_command": {
+              "calls": 44,
+              "errors": 0,
+              "durationMs": 229140
+            },
+            "stop_process": {
+              "calls": 3,
+              "errors": 0,
+              "durationMs": 1371
+            },
+            "neon_database": {
+              "calls": 7,
+              "errors": 0,
+              "durationMs": 4796
+            },
+            "list_processes": {
+              "calls": 2,
+              "errors": 0,
+              "durationMs": 452
+            },
+            "inspect_preview": {
+              "calls": 6,
+              "errors": 0,
+              "durationMs": 19184
+            },
+            "batch_edit_files": {
+              "calls": 2,
+              "errors": 0,
+              "durationMs": 2168
+            },
+            "get_process_logs": {
+              "calls": 1,
+              "errors": 0,
+              "durationMs": 399
+            },
+            "read_design_guide": {
+              "calls": 2,
+              "errors": 0,
+              "durationMs": 1
+            },
+            "read_preview_console": {
+              "calls": 8,
+              "errors": 0,
+              "durationMs": 15848
+            },
+            "request_cognix_cloud": {
+              "calls": 1,
+              "errors": 0,
+              "durationMs": 7095
+            }
+          },
+          "errors": 1,
+          "durationMs": 326392,
+          "unchangedFileRereads": 0
+        },
+        "stages": {
+          "tool": 160523,
+          "agent": 11924,
+          "build": 86875,
+          "model": 832229,
+          "probe": 35599,
+          "setup": 1574,
+          "github": 0,
+          "install": 27939,
+          "preview": 4119,
+          "sandbox": 1140,
+          "persistence": 162,
+          "verification": 12962
+        },
+        "commands": {
+          "count": 44,
+          "failed": 1,
+          "installs": 1,
+          "background": 5,
+          "durationMs": 229134,
+          "previewStarts": 5,
+          "previewRestarts": 4,
+          "productionBuilds": 4
+        },
+        "architecture": {
+          "flags": {
+            "boundedAgent": false,
+            "oneBuildPolicy": false,
+            "contextCompaction": false,
+            "scaffoldBootstrap": false
+          },
+          "scaffoldVersion": "1.0.0"
+        },
+        "schemaVersion": 1,
+        "timeToFirstPreviewMs": 1173519
+      }
+    }
+  ]
+}
