@@ -56,7 +56,8 @@ export function CodeWorkbench({ projectId, files, latestChanges = [], selectedPa
 
   useEffect(() => {
     const onShortcut = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "p") {
+      const key = typeof event.key === "string" ? event.key.toLowerCase() : "";
+      if ((event.ctrlKey || event.metaKey) && key === "p") {
         event.preventDefault();
         searchRef.current?.focus();
         searchRef.current?.select();
@@ -202,7 +203,8 @@ function FileEditor({
     <section
       className="code-editor-panel"
       onKeyDown={(event) => {
-        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        const key = typeof event.key === "string" ? event.key.toLowerCase() : "";
+        if ((event.ctrlKey || event.metaKey) && key === "s") {
           event.preventDefault();
           void saveFile();
         }

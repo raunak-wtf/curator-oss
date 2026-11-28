@@ -1086,7 +1086,8 @@ export function WorkspaceClient({
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
-      if (event.key.toLowerCase() !== "s" || event.metaKey || event.ctrlKey || event.altKey) return;
+      const key = typeof event.key === "string" ? event.key.toLowerCase() : "";
+      if (key !== "s" || event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target;
       if (target instanceof HTMLElement && target.matches("input, textarea, select, [contenteditable='true']")) return;
       if (activeTab !== "preview" || !currentPreviewUrl || security) return;
