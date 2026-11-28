@@ -44,7 +44,10 @@ import { Group, Panel, Separator, usePanelRef } from "react-resizable-panels";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 import { hasPersistedPrompt, stripInitialBuildParams } from "@/lib/initial-build";
-import { HomeSidebar, SidebarMobileTrigger } from "@/components/home-sidebar";
+import { BillingPaywallDialog } from "@/components/billing-paywall-dialog";
+import { HomeSidebar, SidebarMobileTrigger, type SidebarBillingBadge } from "@/components/home-sidebar";
+import { LowCreditsBanner } from "@/components/low-credits-banner";
+import { formatCredits } from "@/lib/credits";
 import { GitHubMark } from "@/components/github-mark";
 import { AgentQuestionCard, CloudRequestCard } from "@/components/agent-question-card";
 import { CLOUD_DECLINED_PROMPT, CLOUD_ENABLED_PROMPT, cloudWireUpPromptFor, formatAnswers, questionRequestFor } from "@/lib/agent-questions";
@@ -56,6 +59,7 @@ import { BuildModeMenu } from "@/components/workspace/build-mode-menu";
 import { CloudPanel } from "@/components/workspace/cloud-panel";
 import { GitPanel, type BuildCheckpoint } from "@/components/workspace/git-panel";
 import { PreviewConsolePanel, type ConsoleFilter } from "@/components/workspace/preview-console-panel";
+import { PreviewSharePopover } from "@/components/workspace/preview-share-popover";
 import { TerminalPanel, type TerminalEntry } from "@/components/workspace/terminal-panel";
 import { SECURITY_TOOL_ORDER, SECURITY_TOOL_TABS, TOOL_ORDER, TOOL_TABS, ToolLauncher, type ToolTab } from "@/components/workspace/tool-launcher";
 import { VisualEditInspector } from "@/components/workspace/visual-edit-inspector";
@@ -120,10 +124,12 @@ type WorkspaceTab = "preview" | ToolTab | "launcher";
 
 type WorkspaceClientProps = {
   initialProject: Project;
+  initialPreviewFrameUrl?: string | null;
   initialMessages: Message[];
   initialFiles: ProjectFile[];
   initialConsoleEntries?: PreviewConsoleEntry[];
   viewer: Viewer;
+  initialBilling?: SidebarBillingBadge | null;
   initialNow: string;
   initialPrompt?: string;
   initialAttachmentIds?: string[];
@@ -417,10 +423,12 @@ function assistantContent(message: Message) {
 
 export function WorkspaceClient({
   initialProject,
+  initialPreviewFrameUrl = null,
   initialMessages,
   initialFiles,
   initialConsoleEntries = [],
   viewer,
+  initialBilling = null,
   initialNow,
   initialPrompt,
   initialAttachmentIds = [],
@@ -458,8 +466,12 @@ export function WorkspaceClient({
   const [detailsPath, setDetailsPath] = useState("");
   const [liveCommands, setLiveCommands] = useState<TerminalEntry[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [billing, setBilling] = useState<SidebarBillingBadge | null>(initialBilling);
+  const [paywall, setPaywall] = useState<{ reason: "subscription_required" | "credits_exhausted"; message?: string } | null>(null);
   const [previewDevice, setPreviewDevice] = useState<PreviewDevice>("desktop");
   const [previewRevision, setPreviewRevision] = useState(0);
+  const [previewFrameUrl, setPreviewFrameUrl] = useState<string | null>(initialPreviewFrameUrl ?? initialProject.previewUrl);
+  const [sharePopoverOpen, setSharePopoverOpen] = useState(false);
   const [isPreviewReconnecting, setIsPreviewReconnecting] = useState(Boolean(initialProject.sandboxId) && !security);
   const [visualEditEnabled, setVisualEditEnabled] = useState(false);
   const [visualEditConnecting, setVisualEditConnecting] = useState(false);
@@ -678,6 +690,7 @@ export function WorkspaceClient({
             setProject(payload.project
               ? { ...(payload.project as Project), previewUrl: payload.url }
               : (current) => ({ ...current, previewUrl: payload.url }));
+            setPreviewFrameUrl(typeof payload.frameUrl === "string" ? payload.frameUrl : payload.url);
             setPreviewRevision((current) => current + 1);
             setIsPreviewReconnecting(false);
             return;
@@ -697,6 +710,72 @@ export function WorkspaceClient({
   }, [initialProject.id, initialProject.sandboxId, security]);
 
   const currentPreviewUrl = project.previewUrl;
+  const hasPreviewSession = !security && Boolean(project.sandboxId || currentPreviewUrl);
+  const hasPreviewSessionRef = useRef(hasPreviewSession);
+  useEffect(() => {
+    hasPreviewSessionRef.current = hasPreviewSession;
+    if (!hasPreviewSession) return;
+    void fetch(`/api/projects/${project.id}/preview/session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "ping" }),
+      keepalive: true,
+    }).catch(() => undefined);
+  }, [hasPreviewSession, project.id]);
+
+  // Keep the development preview lease alive while Curator is open, and signal turn-off the second it closes.
+  useEffect(() => {
+    if (security) return;
+    const sessionUrl = `/api/projects/${project.id}/preview/session`;
+    let closedSent = false;
+
+    const sendPing = () => {
+      if (!hasPreviewSessionRef.current) return;
+      void fetch(sessionUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "ping" }),
+        keepalive: true,
+      }).catch(() => undefined);
+    };
+
+    const sendClose = () => {
+      if (closedSent || !hasPreviewSessionRef.current) return;
+      closedSent = true;
+      const payload = JSON.stringify({ action: "close" });
+      if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
+        const sent = navigator.sendBeacon(sessionUrl, new Blob([payload], { type: "application/json" }));
+        if (sent) return;
+      }
+      void fetch(sessionUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload,
+        keepalive: true,
+      }).catch(() => undefined);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        closedSent = false;
+        sendPing();
+      }
+    };
+
+    const interval = window.setInterval(sendPing, 45_000);
+    window.addEventListener("pagehide", sendClose);
+    window.addEventListener("beforeunload", sendClose);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("pagehide", sendClose);
+      window.removeEventListener("beforeunload", sendClose);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      sendClose();
+    };
+  }, [project.id, security]);
+
   const canPublish = Boolean(project.sandboxId || currentPreviewUrl);
   const resolvedPublishedUrl = publishedUrl && siteOrigin
     ? new URL(publishedUrl, siteOrigin).toString()
@@ -1110,7 +1189,19 @@ export function WorkspaceClient({
           }),
         });
         if (!response.ok || !response.body) {
-          const payload = await response.json();
+          const payload = await response.json().catch(() => ({}));
+          if (response.status === 402) {
+            setPaywall({
+              reason: payload.code === "CREDITS_EXHAUSTED" ? "credits_exhausted" : "subscription_required",
+              message: typeof payload.error === "string" ? payload.error : undefined,
+            });
+            setMessages((current) =>
+              current.filter((item) => item.id !== userMessage.id && item.id !== assistantId),
+            );
+            setProject((current) => ({ ...current, status: current.previewUrl ? "ready" : "draft" }));
+            setIsBuilding(false);
+            return;
+          }
           throw new Error(payload.error ?? "The build could not start.");
         }
         postVisualState(false, []);
@@ -1209,9 +1300,20 @@ export function WorkspaceClient({
               sandboxId: event.sandboxId ?? current.sandboxId,
               status: "ready",
             }));
-            setPreviewRevision((current) => current + 1);
             setActiveTab("preview");
             setLastTab("preview");
+            void fetch(`/api/projects/${project.id}/preview`, { cache: "no-store" })
+              .then((res) => (res.ok ? res.json() : null))
+              .then((payload) => {
+                setPreviewFrameUrl(
+                  payload && typeof payload.frameUrl === "string" ? payload.frameUrl : event.url,
+                );
+                setPreviewRevision((current) => current + 1);
+              })
+              .catch(() => {
+                setPreviewFrameUrl(event.url);
+                setPreviewRevision((current) => current + 1);
+              });
           }
           if (event.type === "files_changed") {
             setMessages((current) =>
@@ -1235,6 +1337,19 @@ export function WorkspaceClient({
             if (event.commands) setLiveCommands([]);
             if (event.github) setGithubRefreshKey((current) => current + 1);
             void loadConsoleSnapshot({ silent: true });
+            if (typeof event.creditsChargedHundredths === "number") {
+              setBilling((current) =>
+                current
+                  ? {
+                      ...current,
+                      creditsBalanceHundredths: Math.max(
+                        0,
+                        current.creditsBalanceHundredths - event.creditsChargedHundredths!,
+                      ),
+                    }
+                  : current,
+              );
+            }
             setProject((current) => ({
               ...current,
               status:
@@ -1261,6 +1376,11 @@ export function WorkspaceClient({
                         ...(event.github ? { github: event.github } : {}),
                         ...(event.chatMode ? { chatMode: event.chatMode } : {}),
                         ...(typeof event.runDurationMs === "number" ? { runDurationMs: event.runDurationMs } : {}),
+                        ...(typeof event.creditsChargedHundredths === "number"
+                          ? { creditsChargedHundredths: event.creditsChargedHundredths }
+                          : {}),
+                        ...(event.complexityTier ? { complexityTier: event.complexityTier } : {}),
+                        ...(typeof event.totalTokens === "number" ? { totalTokens: event.totalTokens } : {}),
                       },
                     }
                   : message,
@@ -1327,8 +1447,20 @@ export function WorkspaceClient({
       if (Array.isArray(payload.files)) setFiles(payload.files as ProjectFile[]);
       if (payload.project) setProject(payload.project as Project);
       if (typeof payload.previewUrl === "string") {
-        setProject((current) => ({ ...current, previewUrl: payload.previewUrl, status: "ready" }));
-        setPreviewRevision((current) => current + 1);
+        const restoredUrl = payload.previewUrl as string;
+        setProject((current) => ({ ...current, previewUrl: restoredUrl, status: "ready" }));
+        void fetch(`/api/projects/${project.id}/preview`, { cache: "no-store" })
+          .then((res) => (res.ok ? res.json() : null))
+          .then((previewPayload) => {
+            setPreviewFrameUrl(
+              previewPayload && typeof previewPayload.frameUrl === "string" ? previewPayload.frameUrl : restoredUrl,
+            );
+            setPreviewRevision((current) => current + 1);
+          })
+          .catch(() => {
+            setPreviewFrameUrl(restoredUrl);
+            setPreviewRevision((current) => current + 1);
+          });
       }
       setDetailsMessage(null);
       setGithubRefreshKey((current) => current + 1);
@@ -1381,6 +1513,7 @@ export function WorkspaceClient({
       setProject(payload.project
         ? { ...(payload.project as Project), previewUrl: payload.url }
         : (current) => ({ ...current, previewUrl: payload.url }));
+      setPreviewFrameUrl(typeof payload.frameUrl === "string" ? payload.frameUrl : payload.url);
       setPreviewRevision((current) => current + 1);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Preview is not ready yet.");
@@ -1455,21 +1588,13 @@ export function WorkspaceClient({
     }
   }
 
-  async function shareProject() {
-    try {
-      const response = await fetch(`/api/projects/${project.id}/preview`, { cache: "no-store" });
-      const payload = await response.json();
-      if (!response.ok || typeof payload.url !== "string") {
-        throw new Error(payload.error ?? "Build the app before sharing its preview.");
-      }
-      setProject(payload.project
-        ? { ...(payload.project as Project), previewUrl: payload.url }
-        : (current) => ({ ...current, previewUrl: payload.url }));
-      await navigator.clipboard.writeText(payload.url);
-      toast.success("Fresh preview link copied.");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Build the app before sharing its preview.");
+  function openShareMenu() {
+    if (!currentPreviewUrl) {
+      toast.error("Build the app before sharing its preview.");
+      return;
     }
+    showTab("preview");
+    setSharePopoverOpen(true);
   }
 
   function openFile(path: string) {
@@ -1753,6 +1878,13 @@ export function WorkspaceClient({
   return (
     <div className="workspace-frame">
       {skillCommands.dialogs}
+      <BillingPaywallDialog
+        open={Boolean(paywall)}
+        reason={paywall?.reason ?? "subscription_required"}
+        message={paywall?.message}
+        returnPath={`/projects/${project.id}`}
+        onClose={() => setPaywall(null)}
+      />
       <HomeSidebar
         viewer={viewer}
         projects={projects}
@@ -1761,6 +1893,7 @@ export function WorkspaceClient({
         onNewChat={() => router.push("/")}
         defaultOpen={false}
         activeProjectId={project.id}
+        billing={billing}
       />
 
       <Group orientation={isCompact ? "vertical" : "horizontal"} className="min-w-0 flex-1" id="cognix-workspace">
@@ -1772,7 +1905,7 @@ export function WorkspaceClient({
           maxSize={security ? "100%" : isCompact ? "72%" : "60%"}
         >
           <section className={cn("flex h-full min-h-0 flex-col", isCompact ? "p-2 pb-1" : "py-3 pl-3 pr-1", security && !paneOpen && "workspace-chat-wide")} aria-label="Chat">
-            <div className="flex min-h-0 flex-1 flex-col overflow-clip rounded-2xl border border-white/[0.08] bg-[#1c1c1c]">
+            <div className="flex min-h-0 flex-1 flex-col overflow-clip">
               <header className="chat-header">
                 <div className="flex min-w-0 items-center gap-1">
                   <SidebarMobileTrigger onOpen={() => setSidebarOpen(true)} />
@@ -1991,7 +2124,14 @@ export function WorkspaceClient({
                           ) : null}
                         </div>
                       )}
-                      <time>{formatRelativeDate(message.createdAt, relativeNow)}</time>
+                      <time className="flex items-center gap-2 tabular-nums">
+                        <span>{formatRelativeDate(message.createdAt, relativeNow)}</span>
+                        {message.role === "assistant" && typeof message.metadata.creditsChargedHundredths === "number" ? (
+                          <span className="text-white/35">
+                            · {formatCredits(message.metadata.creditsChargedHundredths)} credits
+                          </span>
+                        ) : null}
+                      </time>
                     </article>
                   );
                 })}
@@ -2075,6 +2215,7 @@ export function WorkspaceClient({
               <div className="mb-2 flex gap-2 overflow-x-auto px-1 pb-0.5">
                 {activeSuggestions.map((suggestion) => <button key={suggestion} type="button" className="suggestion-chip" onClick={() => setPrompt(suggestion)}>{suggestion}</button>)}
               </div>
+              <LowCreditsBanner billing={billing} isAdmin={Boolean(viewer.isAdmin)} className="mb-2" />
               <div className="rounded-2xl bg-white/[0.035]">
                 <div
                   className={cn(
@@ -2356,7 +2497,7 @@ export function WorkspaceClient({
                       <PanelRightClose className="size-4" />
                     </button>
                   ) : null}
-                  {security ? null : <button type="button" className="toolbar-button toolbar-expandable" onClick={() => void shareProject()} disabled={!currentPreviewUrl} aria-label="Share preview" title={currentPreviewUrl ? "Copy preview link" : "Build the app to enable sharing"}><Share2 className="size-3.5" /><span className="toolbar-control-label">Share</span></button>}
+                  {security ? null : <button type="button" className="toolbar-button toolbar-expandable" onClick={openShareMenu} disabled={!currentPreviewUrl} aria-label="Share preview" title={currentPreviewUrl ? "Share preview & manage access" : "Build the app to enable sharing"}><Share2 className="size-3.5" /><span className="toolbar-control-label">Share</span></button>}
                   {security ? null : <button
                     type="button"
                     className="publish-button toolbar-expandable relative"
@@ -2408,39 +2549,49 @@ export function WorkspaceClient({
                     <div className="preview-address">
                       <button type="button" aria-label="Refresh preview" onClick={() => void refreshPreview()} disabled={isPreviewReconnecting}>{isPreviewReconnecting ? <PixelLoader /> : <RefreshCw className="size-3.5" />}</button>
                       <span>{projectHost}</span>
-                      {currentPreviewUrl ? <a href={currentPreviewUrl} target="_blank" rel="noreferrer" aria-label="Open preview in a new tab"><ExternalLink className="size-3.5" /></a> : null}
+                      {currentPreviewUrl ? <a href={previewFrameUrl ?? currentPreviewUrl} target="_blank" rel="noreferrer" aria-label="Open preview in a new tab"><ExternalLink className="size-3.5" /></a> : null}
                     </div>
-                    <button
-                      type="button"
-                      className={cn(
-                        "visual-edit-button ml-auto gap-1.5 px-2.5",
-                        consoleDrawerOpen && "is-active",
-                        consoleErrorCount > 0 && !consoleDrawerOpen && "border-rose-500/40 bg-rose-500/10 text-rose-200 hover:border-rose-400/60 hover:bg-rose-500/15",
-                      )}
-                      onClick={() => {
-                        setConsoleDrawerOpen((open) => {
-                          const next = !open;
-                          if (next) void loadConsoleSnapshot({ wake: true, silent: true });
-                          return next;
-                        });
-                      }}
-                      aria-expanded={consoleDrawerOpen}
-                      aria-controls="preview-console-drawer"
-                      aria-label={
-                        consoleErrorCount > 0
-                          ? `Toggle sandbox console (${consoleErrorCount} ${consoleErrorCount === 1 ? "error" : "errors"})`
-                          : "Toggle sandbox console"
-                      }
-                      title="Open live sandbox & preview console"
-                    >
-                      <SquareTerminal className="size-3.5" aria-hidden="true" />
-                      <span className="hidden sm:inline text-[11px] font-medium">Console</span>
-                      {consoleErrorCount > 0 ? (
-                        <span className="rounded-full bg-rose-500/30 px-1.5 py-0.5 text-[9.5px] font-semibold text-rose-100 tabular-nums leading-none">
-                          {consoleErrorCount}
-                        </span>
-                      ) : null}
-                    </button>
+                    <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                      <PreviewSharePopover
+                        projectId={project.id}
+                        previewUrl={currentPreviewUrl}
+                        isPublished={Boolean(project.publishedAt)}
+                        open={sharePopoverOpen}
+                        onOpenChange={setSharePopoverOpen}
+                        onOpenPublish={openPublishSettings}
+                      />
+                      <button
+                        type="button"
+                        className={cn(
+                          "visual-edit-button gap-1.5 px-2.5",
+                          consoleDrawerOpen && "is-active",
+                          consoleErrorCount > 0 && !consoleDrawerOpen && "border-rose-500/40 bg-rose-500/10 text-rose-200 hover:border-rose-400/60 hover:bg-rose-500/15",
+                        )}
+                        onClick={() => {
+                          setConsoleDrawerOpen((open) => {
+                            const next = !open;
+                            if (next) void loadConsoleSnapshot({ wake: true, silent: true });
+                            return next;
+                          });
+                        }}
+                        aria-expanded={consoleDrawerOpen}
+                        aria-controls="preview-console-drawer"
+                        aria-label={
+                          consoleErrorCount > 0
+                            ? `Toggle sandbox console (${consoleErrorCount} ${consoleErrorCount === 1 ? "error" : "errors"})`
+                            : "Toggle sandbox console"
+                        }
+                        title="Open live sandbox & preview console"
+                      >
+                        <SquareTerminal className="size-3.5" aria-hidden="true" />
+                        <span className="hidden sm:inline text-[11px] font-medium">Console</span>
+                        {consoleErrorCount > 0 ? (
+                          <span className="rounded-full bg-rose-500/30 px-1.5 py-0.5 text-[9.5px] font-semibold text-rose-100 tabular-nums leading-none">
+                            {consoleErrorCount}
+                          </span>
+                        ) : null}
+                      </button>
+                    </div>
                   </div>
                   <div className="relative flex min-h-0 flex-1 flex-col">
                     <div className={cn("relative min-h-0 flex-1", consoleDrawerOpen && consoleExpanded && "hidden")}>
@@ -2448,10 +2599,10 @@ export function WorkspaceClient({
                         <div className={cn("preview-frame-wrap", `is-${previewDevice}`)}>
                           <div className="preview-device-stage">
                             <iframe
-                              key={`${currentPreviewUrl}:${previewRevision}`}
+                              key={`${previewFrameUrl ?? currentPreviewUrl}:${previewRevision}`}
                               ref={previewFrameRef}
                               title={`${project.title} ${previewDevice} preview`}
-                              src={currentPreviewUrl}
+                              src={previewFrameUrl ?? currentPreviewUrl}
                               sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
                               onLoad={() => postVisualState(visualEditEnabled, visualSelections)}
                             />

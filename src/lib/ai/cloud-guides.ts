@@ -110,24 +110,33 @@ Cognix manages this project's storage buckets on the server. Never ask the user 
 - If \`S3_BUCKET\` or \`S3_ACCESS_KEY_ID\` is not listed in project secrets yet, call \`cloud_storage\` with \`{ "action": "provision" }\` first (or \`{ "action": "create_bucket", "suffix": "media", "accessMode": "public", "makeActive": true }\` when fast public CDN URLs for inline image thumbnails, avatars, galleries, or public share links are desirable). Cognix creates an isolated \`cx-<project>-*\` bucket, mints bucket-scoped credentials, and syncs \`S3_ENDPOINT\`, \`S3_REGION\`, \`S3_BUCKET\`, \`S3_ACCESS_KEY_ID\`, \`S3_SECRET_ACCESS_KEY\`, \`S3_CDN_URL\`, and \`S3_ACCESS_MODE\` into \`.env.local\` automatically.
 - Use \`cloud_storage\` to inspect/create/delete project buckets, switch the active bucket (\`use_bucket\`), rotate S3 keys (\`rotate_credentials\`), list/copy/delete objects, upload text/JSON seed assets, or mint presigned URLs.
 
-## 2. Gateway, Next.js Images & CORS Contract
+## 2. Gateway, Next.js Images, SigV4 Checksums & CORS Contract
 
-- **S3 Gateway (path-style required)**: \`endpoint: process.env.S3_ENDPOINT\`, \`region: process.env.S3_REGION || "auto"\`, \`forcePathStyle: true\`.
+- **S3 Gateway (path-style + checksum flags required)**: Always initialize \`S3Client\` with:
+  \`\`\`ts
+  endpoint: process.env.S3_ENDPOINT,
+  region: process.env.S3_REGION || "auto",
+  forcePathStyle: true,
+  requestChecksumCalculation: "WHEN_REQUIRED",
+  responseChecksumValidation: "WHEN_REQUIRED",
+  \`\`\`
+  **Critical (\`@aws-sdk/client-s3\` v3.729+ compatibility)**: Without \`requestChecksumCalculation: "WHEN_REQUIRED"\` and \`responseChecksumValidation: "WHEN_REQUIRED"\`, AWS SDK v3 automatically appends \`x-amz-checksum-mode=ENABLED\` / CRC32 checksum query parameters that cause **\`HTTP 403 SignatureDoesNotMatch\`** on Cognix Cloud Storage! Also **never** pass \`ResponseContentDisposition\` or \`ResponseContentType\` into S3 presigned URLs (that also triggers \`SignatureDoesNotMatch\` on the storage gateway)—instead, set \`Content-Disposition\` from your Next.js \`/api/storage/file/[...key]\` Route Handler!
 - **Hard object size limit**: **50 MB** maximum per object (\`50 * 1024 * 1024\` bytes). Enforce this limit on both client and server.
-- **Next.js image configuration**: In \`next.config.ts\`, always allow remote HTTPS images (\`images: { remotePatterns: [{ protocol: "https", hostname: "**" }] }\`) or render dynamic user-uploaded thumbnails with standard \`<img>\` (\`loading="lazy"\`) so Next.js never throws \`Invalid src prop\` hostname errors on storage/CDN URLs!
+- **Next.js image configuration**: In \`next.config.ts\`, always allow remote HTTPS images (\`images: { remotePatterns: [{ protocol: "https", hostname: "**" }] }\`) or render dynamic user-uploaded thumbnails with standard \`<img>\` (\`loading="lazy"\`) pointing at the same-origin \`/api/storage/file/...\` URL so Next.js never throws \`Invalid src prop\` hostname errors on storage/CDN URLs!
 - **CORS-safe browser uploads**: Never \`PUT\` directly from browser \`fetch()\` to the external S3 gateway (cross-origin preview iframes will fail CORS preflight). Always post \`FormData\` to a same-origin Next.js Route Handler (\`POST /api/storage/upload\`) that validates the user session, size, and MIME type and executes \`PutObjectCommand\` on the server.
 
 ## 3. Application Code Setup
 
-1. Install \`@aws-sdk/client-s3\`, \`@aws-sdk/s3-request-presigner\`, and \`server-only\`.
+1. Install \`@aws-sdk/client-s3\` and \`server-only\` (no \`@aws-sdk/s3-request-presigner\` needed—use the clean RFC SigV4 helper below plus the same-origin \`/api/storage/file/[...key]\` streaming route!).
 2. Create \`src/lib/storage.ts\`:
    \`\`\`ts
    import "server-only";
+   import { createHash, createHmac } from "node:crypto";
    import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
-   import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
    const bucket = process.env.S3_BUCKET;
    const endpoint = process.env.S3_ENDPOINT;
+   const region = process.env.S3_REGION || "auto";
    const accessKeyId = process.env.S3_ACCESS_KEY_ID;
    const secretAccessKey = process.env.S3_SECRET_ACCESS_KEY;
 
@@ -136,9 +145,12 @@ Cognix manages this project's storage buckets on the server. Never ask the user 
    export const s3 =
      bucket && endpoint && accessKeyId && secretAccessKey
        ? new S3Client({
-           region: process.env.S3_REGION || "auto",
+           region,
            endpoint,
            forcePathStyle: true,
+           // Required for @aws-sdk/client-s3 v3.729+ so S3-compatible gateways never reject requests with SignatureDoesNotMatch
+           requestChecksumCalculation: "WHEN_REQUIRED",
+           responseChecksumValidation: "WHEN_REQUIRED",
            credentials: { accessKeyId, secretAccessKey },
          })
        : null;
@@ -174,20 +186,52 @@ Cognix manages this project's storage buckets on the server. Never ask the user 
      return { key: input.key, size: input.body.byteLength };
    }
 
-   export function getAppFileUrl(key: string) {
+   /** Preferred durable URL for inline <img> previews and downloads (never expires, zero CORS/signature issues). */
+   export function getAppFileUrl(key: string, options?: { download?: boolean; fileName?: string }) {
      const cleanKey = key.replace(/^\\/+/, "");
-     return \`/api/storage/file/\${cleanKey.split("/").map(encodeURIComponent).join("/")}\`;
+     const base = \`/api/storage/file/\${cleanKey.split("/").map(encodeURIComponent).join("/")}\`;
+     if (!options?.download) return base;
+     const params = new URLSearchParams({ download: "1" });
+     if (options.fileName) params.set("name", options.fileName);
+     return \`\${base}?\${params.toString()}\`;
    }
 
-   export async function resolveObjectUrl(key: string, expiresIn = 3600) {
+   function encodeRfc3986(value: string) {
+     return encodeURIComponent(value).replace(/[!'()*]/g, (c) => \`%\${c.charCodeAt(0).toString(16).toUpperCase()}\`);
+   }
+
+   /**
+    * Pure RFC AWS SigV4 presigned GET URL (never appends AWS SDK v3 x-amz-checksum-mode or
+    * response-content-disposition query params that cause SignatureDoesNotMatch).
+    */
+   export function createDirectSignedUrl(key: string, expiresIn = 3600) {
      const cleanKey = key.replace(/^\\/+/, "");
      if (process.env.S3_ACCESS_MODE === "public" && process.env.S3_CDN_URL) {
-       return \`\${process.env.S3_CDN_URL.replace(/\\/+$/, "")}/\${cleanKey}\`;
+       return \`\${process.env.S3_CDN_URL.replace(/\\/+$/, "")}/\${cleanKey.split("/").map(encodeRfc3986).join("/")}\`;
      }
-     if (!s3 || !bucket) {
+     if (!bucket || !endpoint || !accessKeyId || !secretAccessKey) {
        throw new Error("Cloud Storage is not configured. Provision it in Cloud → Storage.");
      }
-     return getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: cleanKey }), { expiresIn });
+     const gateway = new URL(endpoint);
+     const segs = [...gateway.pathname.split("/").filter(Boolean), bucket, ...cleanKey.split("/")];
+     const canonicalUri = \`/\${segs.map(encodeRfc3986).join("/")}\`;
+     const amzDate = new Date().toISOString().replace(/[:-]|\\.\\d{3}/g, "");
+     const dateStamp = amzDate.slice(0, 8);
+     const scope = \`\${dateStamp}/\${region}/s3/aws4_request\`;
+     const qp: Record<string, string> = {
+       "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+       "X-Amz-Credential": \`\${accessKeyId}/\${scope}\`,
+       "X-Amz-Date": amzDate,
+       "X-Amz-Expires": String(Math.max(60, Math.min(604_800, Math.trunc(expiresIn)))),
+       "X-Amz-SignedHeaders": "host",
+     };
+     const canonicalQuery = Object.keys(qp).sort().map((k) => \`\${encodeRfc3986(k)}=\${encodeRfc3986(qp[k])}\`).join("&");
+     const canonicalRequest = ["GET", canonicalUri, canonicalQuery, \`host:\${gateway.host}\\n\`, "host", "UNSIGNED-PAYLOAD"].join("\\n");
+     const stringToSign = ["AWS4-HMAC-SHA256", amzDate, scope, createHash("sha256").update(canonicalRequest).digest("hex")].join("\\n");
+     const hmac = (k: Buffer | string, d: string) => createHmac("sha256", k).update(d, "utf8").digest();
+     const signingKey = hmac(hmac(hmac(hmac(\`AWS4\${secretAccessKey}\`, dateStamp), region), "s3"), "aws4_request");
+     const signature = createHmac("sha256", signingKey).update(stringToSign, "utf8").digest("hex");
+     return \`\${gateway.origin}\${canonicalUri}?\${canonicalQuery}&X-Amz-Signature=\${signature}\`;
    }
 
    export async function getStoredObject(key: string) {
@@ -202,13 +246,14 @@ Cognix manages this project's storage buckets on the server. Never ask the user 
      await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key.replace(/^\\/+/, "") }));
    }
    \`\`\`
-3. Create **two** same-origin Storage Route Handlers so uploads AND inline \`<img>\` / PDF previews work reliably across private buckets, public buckets, preview iframes, and public share pages without expiring URLs or CORS errors:
+3. Create **two** same-origin Storage Route Handlers so uploads, inline \`<img>\` / PDF previews, AND attachment downloads work reliably across private buckets, public buckets, preview iframes, and public share pages without expiring URLs, CORS errors, or \`SignatureDoesNotMatch\`:
    - \`src/app/api/storage/upload/route.ts\`: verifies \`auth.api.getSession\` (when auth is used), checks \`file instanceof File\`, MIME type, and \`file.size <= MAX_UPLOAD_BYTES\`, calls \`uploadObject\`, and returns \`{ key, url: getAppFileUrl(key), size: file.size, contentType: file.type, name: file.name }\`.
-   - \`src/app/api/storage/file/[...key]/route.ts\`: \`GET\` handler that reconstructs \`const objectKey = (await params).key.map(decodeURIComponent).join("/")\`, calls \`getStoredObject(objectKey)\` (after any required ownership or public-share check), and returns \`new Response(obj.Body?.transformToWebStream() ?? null, { headers: { "Content-Type": obj.ContentType || "application/octet-stream", "Cache-Control": "private, max-age=3600" } })\`.
+   - \`src/app/api/storage/file/[...key]/route.ts\`: \`GET\` handler that reconstructs \`const objectKey = (await params).key.map(decodeURIComponent).join("/")\`, verifies ownership or public-share access, calls \`getStoredObject(objectKey)\`, and streams the bytes back with \`Content-Type\`, \`Cache-Control: private, max-age=3600\`, and (when \`?download=1\`) \`Content-Disposition: attachment; filename="..."\`.
 
 ## 4. Storage Rules
 
-- Store the durable object \`key\` (never an expiring presigned URL) in PostgreSQL alongside the record that owns it, and render \`getAppFileUrl(row.fileKey)\` (or \`resolveObjectUrl(row.fileKey)\`) in UI components and public share views.
+- Store the durable object \`key\` (never an expiring presigned URL) in PostgreSQL alongside the record that owns it.
+- Always render \`getAppFileUrl(row.fileKey)\` for inline \`<img>\` / media previews and \`getAppFileUrl(row.fileKey, { download: true, fileName: row.fileName })\` for download buttons—never rely on \`@aws-sdk/s3-request-presigner\` \`getSignedUrl\` with default AWS SDK v3 checksums or \`ResponseContentDisposition\`.
 - When deleting a database record that owns a stored file, verify ownership first and delete both the PostgreSQL row and the stored object (\`deleteStoredObject(row.fileKey)\`).
 - Show upload progress/pending state, file size & type hints, inline image thumbnails for \`image/*\`, download links, and actionable error messages.
 ${SHARED_RULES}`;

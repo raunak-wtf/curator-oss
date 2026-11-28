@@ -19,5 +19,7 @@ describe("cloud-skills (internal automatic agent intelligence)", () => {
     expect(onContext).toContain("process.loadEnvFile");
     expect(onContext).toContain("drizzleAdapter");
     expect(onContext).toContain("forcePathStyle: true");
+    expect(onContext).toContain('requestChecksumCalculation: "WHEN_REQUIRED"');
+    expect(onContext).toContain('responseChecksumValidation: "WHEN_REQUIRED"');
   });
 });

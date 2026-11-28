@@ -7,7 +7,9 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AppDither } from "@/components/dither-backdrop";
-import { HomeSidebar, SidebarMobileTrigger } from "@/components/home-sidebar";
+import { BillingPaywallDialog } from "@/components/billing-paywall-dialog";
+import { HomeSidebar, SidebarMobileTrigger, type SidebarBillingBadge } from "@/components/home-sidebar";
+import { LowCreditsBanner } from "@/components/low-credits-banner";
 import { PendingUpload } from "@/components/pending-upload";
 import { ApprovalModeMenu } from "@/components/security/approval-mode-menu";
 import { RepoSelector } from "@/components/security/repo-selector";
@@ -21,11 +23,13 @@ type HomeShellProps = {
   projects?: Project[];
   /** Security mode only: repository preselected from `?repo=owner/name`. */
   initialRepository?: string | null;
+  /** Compact credit & subscription summary shown in the sidebar. */
+  billing?: SidebarBillingBadge | null;
 };
 
 export const SECURITY_PATH = "/security-scanner";
 
-export function HomeShell({ viewer, projects = [], initialRepository = null }: HomeShellProps) {
+export function HomeShell({ viewer, projects = [], initialRepository = null, billing = null }: HomeShellProps) {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -59,6 +63,7 @@ export function HomeShell({ viewer, projects = [], initialRepository = null }: H
   const [isDragging, setIsDragging] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [paywall, setPaywall] = useState<{ reason: "subscription_required" | "credits_exhausted"; message?: string } | null>(null);
   const skillCommands = useSkillCommands({ prompt, setPrompt, textareaRef, signedIn: Boolean(viewer) });
 
   function addFiles(incoming: File[]) {
@@ -96,6 +101,14 @@ export function HomeShell({ viewer, projects = [], initialRepository = null }: H
         body: JSON.stringify(security ? { prompt: effectivePrompt, mode: "security", repository: repository ?? undefined } : { prompt: effectivePrompt }),
       });
       const payload = await response.json();
+      if (response.status === 402) {
+        setPaywall({
+          reason: payload.code === "CREDITS_EXHAUSTED" ? "credits_exhausted" : "subscription_required",
+          message: typeof payload.error === "string" ? payload.error : undefined,
+        });
+        setIsCreating(false);
+        return;
+      }
       if (!response.ok) throw new Error(payload.error ?? "Could not create the project.");
 
       const attachmentIds: string[] = [];
@@ -181,6 +194,7 @@ export function HomeShell({ viewer, projects = [], initialRepository = null }: H
         mobileOpen={sidebarOpen}
         onMobileOpenChange={setSidebarOpen}
         onNewChat={startNewChat}
+        billing={billing}
       />
 
       {/* Main Surface */}
@@ -237,6 +251,13 @@ export function HomeShell({ viewer, projects = [], initialRepository = null }: H
               </button>
             </div>
           </div>
+
+          {/* Low-credit warning (< 3 credits) above the prompt input */}
+          <LowCreditsBanner
+            billing={billing}
+            isAdmin={Boolean(viewer?.isAdmin)}
+            className="mb-2.5 w-full max-w-[656px]"
+          />
 
           {/* Composer frame: card plus disclaimer row */}
           <div className="w-full max-w-[656px] rounded-2xl bg-white/[0.035]">
@@ -408,6 +429,13 @@ export function HomeShell({ viewer, projects = [], initialRepository = null }: H
         <AppDither className="inset-x-0 bottom-0 z-0 h-[40%] opacity-70 [mask-image:linear-gradient(to_top,black_35%,transparent)]" />
       </main>
       {skillCommands.dialogs}
+      <BillingPaywallDialog
+        open={Boolean(paywall)}
+        reason={paywall?.reason ?? "subscription_required"}
+        message={paywall?.message}
+        returnPath="/"
+        onClose={() => setPaywall(null)}
+      />
     </div>
   );
 }

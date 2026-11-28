@@ -1,5 +1,6 @@
 import { getPreviewProxyTarget, getPublishedProxyTarget, publishedProxyHeaders } from "@/lib/daytona";
 import { hostnameFromHeader, isTrustedEdgeRequest, parseAppsHostname } from "@/lib/domains";
+import { isPublicPreviewActive } from "@/lib/preview-access";
 import { badgeHrefFor } from "@/lib/remix";
 import { getProjectForEdgePreview, getPublishedProject, getPublishedProjectByHostname } from "@/lib/store";
 
@@ -9,6 +10,8 @@ export const maxDuration = 180;
 
 /** How long the edge proxy may reuse an answer before asking again. */
 const EDGE_CACHE_SECONDS = 60;
+/** Previews use a short cache TTL so access revocations, 24h expiry, and tab-close sleep apply quickly. */
+const PREVIEW_CACHE_SECONDS = 10;
 const RESTARTING_RETRY_SECONDS = 5;
 const PREVIEW_RETRY_SECONDS = 3;
 
@@ -16,7 +19,7 @@ const noStore = { "cache-control": "no-store" };
 
 /**
  * Tells the Cognix edge proxy (`vm/edge-proxy.mjs` or `cloudflare/edge-worker.js`) where to forward:
- *   1. `preview-<projectId>.<COGNIX_APPS_DOMAIN>` -> live development preview on Daytona port 3000
+ *   1. `<adj>-<noun>-<hex8>.<COGNIX_APPS_DOMAIN>` -> live development preview on Daytona port 3000 (access-controlled)
  *   2. `<slug>.<COGNIX_APPS_DOMAIN>` -> published production release on Daytona port 3001
  *   3. Attached customer custom domains -> published production release on Daytona port 3001
  *
@@ -49,21 +52,60 @@ export async function GET(request: Request) {
     if (!project) {
       return Response.json({ error: "Preview unavailable.", cacheSeconds: 15 }, { status: 404, headers: noStore });
     }
+
+    const mode = project.previewAccessMode ?? "owner";
+    const publicActive = isPublicPreviewActive(mode, project.previewPublicExpiresAt);
+    const previewAccess = {
+      projectId: project.id,
+      mode,
+      publicActive,
+      publicExpiresAt: publicActive ? (project.previewPublicExpiresAt ?? null) : null,
+      hasPasscode: Boolean(project.previewHasPasscode),
+      accessVersion: project.previewAccessVersion ?? 1,
+    };
+
+    const activeUntilMs = project.previewActiveUntil ? Date.parse(project.previewActiveUntil) : Number.NaN;
+    const isEditorOrGuestActive =
+      (Number.isFinite(activeUntilMs) && activeUntilMs > Date.now()) || project.status === "building";
+
+    // Do not run or wake previews when Curator is closed unless a 24h Public Preview is explicitly active.
+    if (!isEditorOrGuestActive && !publicActive) {
+      return Response.json(
+        {
+          kind: "preview_paused",
+          projectId: project.id,
+          title: project.title,
+          isPublished: Boolean(project.publishedAt),
+          previewAccess,
+          cacheSeconds: 5,
+        },
+        { status: 423, headers: noStore },
+      );
+    }
+
     const target = await getPreviewProxyTarget(project, { fresh }).catch(() => null);
     if (!target) {
       return Response.json(
-        { error: "This preview is starting.", retryAfter: PREVIEW_RETRY_SECONDS, kind: "preview" },
+        {
+          error: "This preview is starting.",
+          retryAfter: PREVIEW_RETRY_SECONDS,
+          kind: "preview",
+          projectId: project.id,
+          previewAccess,
+        },
         { status: 503, headers: { ...noStore, "retry-after": String(PREVIEW_RETRY_SECONDS) } },
       );
     }
     return Response.json(
       {
         kind: "preview",
+        projectId: project.id,
         upstream: target.upstream,
         headers: publishedProxyHeaders(target, hostname),
         title: project.title,
         badge: null,
-        cacheSeconds: EDGE_CACHE_SECONDS,
+        previewAccess,
+        cacheSeconds: PREVIEW_CACHE_SECONDS,
       },
       { headers: noStore },
     );

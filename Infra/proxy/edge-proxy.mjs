@@ -4,7 +4,7 @@
  * Reference: https://www.daytona.io/docs/en/custom-preview-proxy/
  *
  * Sits behind Caddy (TLS termination + wildcard DNS-01 + On-Demand TLS) and forwards:
- *   - `<adj>-<noun>-<hex8>.<COGNIX_APPS_DOMAIN>` -> Daytona port 3000 (live dev preview + HMR WebSockets)
+ *   - `<adj>-<noun>-<hex8>.<COGNIX_APPS_DOMAIN>` -> Daytona port 3000 (access-controlled live dev preview + HMR WebSockets)
  *   - `<slug>.<COGNIX_APPS_DOMAIN>`              -> Daytona port 3001 (published production build)
  *   - `<customer-custom-domain>`                 -> Daytona port 3001 (published production build)
  *   - `/.well-known/cognix-domain-check`         -> Cognix builder app (ownership + TLS serving probe)
@@ -13,10 +13,11 @@
  *   EDGE_LISTEN_HOST    default: 127.0.0.1
  *   EDGE_LISTEN_PORT    default: 3006
  *   COGNIX_INTERNAL_URL default: http://127.0.0.1:3005  (where Cognix Next.js listens locally)
- *   COGNIX_PUBLIC_ORIGIN e.g. https://curator.codes     (used for badge asset/remix links)
+ *   COGNIX_PUBLIC_ORIGIN e.g. https://curator.codes     (used for preview auth redirects & badge links)
  *   COGNIX_EDGE_SECRET  shared secret matching Cognix's COGNIX_EDGE_SECRET
  */
 
+import crypto from "node:crypto";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
@@ -38,6 +39,8 @@ const RESOLVE_PATH = "/api/edge/resolve";
 const ANALYTICS_PATH = "/api/edge/analytics";
 const PROBE_PATH = "/.well-known/cognix-domain-check";
 const HEALTH_PATH = "/_cognix-edge/healthz";
+const PREVIEW_AUTH_CALLBACK_PATH = "/__cognix_preview_auth";
+const PREVIEW_GRANT_COOKIE = "__cognix_preview_grant";
 const MAX_CACHED_HOSTS = 2000;
 const DEFAULT_RETRY_SECONDS = 4;
 
@@ -141,6 +144,100 @@ function markStale(hostname) {
   staleHosts.add(hostname);
 }
 
+// ── Preview Access Token Verification (Offline HMAC-SHA256) ──────────────
+
+function parseCookieHeader(rawCookie) {
+  /** @type {Record<string, string>} */
+  const out = {};
+  if (!rawCookie) return out;
+  const header = Array.isArray(rawCookie) ? rawCookie.join("; ") : String(rawCookie);
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) continue;
+    const name = part.slice(0, eq).trim();
+    const val = part.slice(eq + 1).trim();
+    if (name) out[name] = val;
+  }
+  return out;
+}
+
+function stripPreviewGrantCookie(rawCookie) {
+  if (!rawCookie) return undefined;
+  const header = Array.isArray(rawCookie) ? rawCookie.join("; ") : String(rawCookie);
+  const kept = header
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part && !part.startsWith(`${PREVIEW_GRANT_COOKIE}=`));
+  return kept.length ? kept.join("; ") : undefined;
+}
+
+function verifyPreviewGrantToken(token, expectedHost) {
+  if (!token || typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 3 || parts[0] !== "cg1") return null;
+  const [, body, sig] = parts;
+  if (!body || !sig) return null;
+  try {
+    const expectedSig = crypto
+      .createHmac("sha256", COGNIX_EDGE_SECRET)
+      .update(`cg1.${body}`, "utf8")
+      .digest();
+    const actualSig = Buffer.from(sig, "base64url");
+    if (expectedSig.length !== actualSig.length || !crypto.timingSafeEqual(expectedSig, actualSig)) {
+      return null;
+    }
+    const decoded = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    if (!decoded || typeof decoded.pid !== "string" || typeof decoded.host !== "string") return null;
+    if (typeof decoded.exp !== "number" || decoded.exp <= Math.floor(Date.now() / 1000)) return null;
+    if (expectedHost && decoded.host.toLowerCase() !== expectedHost.toLowerCase()) return null;
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
+function isPreviewRequestAuthorized(req, hostname, previewAccess) {
+  if (!previewAccess) return true;
+  const nowMs = Date.now();
+  const publicStillValid =
+    Boolean(previewAccess.publicActive) &&
+    (!previewAccess.publicExpiresAt || Date.parse(previewAccess.publicExpiresAt) > nowMs);
+
+  if (publicStillValid && !previewAccess.hasPasscode) {
+    return true;
+  }
+
+  const cookies = parseCookieHeader(req.headers.cookie);
+  const grant = verifyPreviewGrantToken(cookies[PREVIEW_GRANT_COOKIE], hostname);
+  if (!grant) return false;
+  if (previewAccess.projectId && grant.pid !== previewAccess.projectId) return false;
+
+  if (grant.role === "owner") return true;
+  if (grant.role === "passcode") {
+    return publicStillValid && grant.ver === previewAccess.accessVersion;
+  }
+  if (grant.role === "invited") {
+    return previewAccess.mode !== "owner" && grant.ver === previewAccess.accessVersion;
+  }
+  return false;
+}
+
+function isBrowserNavigationRequest(req, pathname) {
+  if (req.method !== "GET" && req.method !== "HEAD") return false;
+  if (/^(?:\/api\/|\/_next\/|\/favicon\.ico$|\/robots\.txt$|\/sitemap\.xml$)/i.test(pathname)) return false;
+  const accept = String(req.headers.accept || "");
+  return accept.includes("text/html") || accept.includes("*/*") || !accept;
+}
+
+function buildCuratorPreviewAuthUrl(hostname, nextPath, options = {}) {
+  const target = new URL("/preview-auth", COGNIX_PUBLIC_ORIGIN);
+  target.searchParams.set("host", hostname);
+  if (options.key) target.searchParams.set("key", options.key);
+  if (options.mode) target.searchParams.set("mode", options.mode);
+  if (nextPath && nextPath !== "/") target.searchParams.set("next", nextPath);
+  return target.toString();
+}
+
 async function fetchTarget(hostname) {
   const url = new URL(RESOLVE_PATH, COGNIX_INTERNAL_URL);
   url.searchParams.set("host", hostname);
@@ -163,8 +260,21 @@ async function fetchTarget(hostname) {
       headers: payload.headers,
       badge: payload.badge ?? null,
       isPreview: payload.kind === "preview",
+      previewAccess: payload.previewAccess ?? null,
     };
     remember(hostname, value, Number(payload.cacheSeconds) || 60);
+    return value;
+  }
+  if (response.status === 423 && payload.kind === "preview_paused") {
+    const value = {
+      kind: "preview_paused",
+      isPreview: true,
+      projectId: typeof payload.projectId === "string" ? payload.projectId : null,
+      title: typeof payload.title === "string" ? payload.title : "Project preview",
+      isPublished: Boolean(payload.isPublished),
+      previewAccess: payload.previewAccess ?? null,
+    };
+    remember(hostname, value, Number(payload.cacheSeconds) || 5);
     return value;
   }
   if (response.status === 404) {
@@ -176,6 +286,8 @@ async function fetchTarget(hostname) {
     return {
       kind: "restarting",
       isPreview: payload.kind === "preview",
+      projectId: typeof payload.projectId === "string" ? payload.projectId : null,
+      previewAccess: payload.previewAccess ?? null,
       retryAfter: Number(payload.retryAfter) || DEFAULT_RETRY_SECONDS,
     };
   }
@@ -208,7 +320,7 @@ function safeTargetPath(rawUrl) {
   }
 }
 
-function sanitizeVisitorHeaders(rawHeaders, options = { keepUpgrade: false, stripCookie: false }) {
+function sanitizeVisitorHeaders(rawHeaders, options = { keepUpgrade: false, stripCookie: false, stripPreviewGrant: false }) {
   /** @type {Record<string, string | string[]>} */
   const clean = {};
   for (const [key, value] of Object.entries(rawHeaders)) {
@@ -218,7 +330,14 @@ function sanitizeVisitorHeaders(rawHeaders, options = { keepUpgrade: false, stri
     if (INTERNAL_HEADERS.has(lower)) continue;
     if (lower.startsWith("x-daytona-")) continue;
     if (!options.keepUpgrade && HOP_BY_HOP_HEADERS.has(lower)) continue;
-    if (options.stripCookie && lower === "cookie") continue;
+    if (lower === "cookie") {
+      if (options.stripCookie) continue;
+      if (options.stripPreviewGrant) {
+        const filtered = stripPreviewGrantCookie(value);
+        if (filtered) clean[lower] = filtered;
+        continue;
+      }
+    }
     clean[lower] = value;
   }
   return clean;
@@ -232,10 +351,10 @@ const PAGE_STYLE = `
 :root { color-scheme: dark; }
 body { margin: 0; display: grid; min-height: 100dvh; place-items: center; background: #090909; padding: 24px; box-sizing: border-box;
   color: white; text-align: center; font: 13px/1.5 Geist, system-ui, -apple-system, "Segoe UI", sans-serif; }
-main > div { width: min(420px, 100%); border: 1px solid rgba(255,255,255,.1); border-radius: 12px; background: #151515; padding: 24px; box-sizing: border-box; }
+main > div { width: min(440px, 100%); border: 1px solid rgba(255,255,255,.1); border-radius: 12px; background: #151515; padding: 24px; box-sizing: border-box; }
 h1 { margin: 0; font-size: 16px; font-weight: 600; }
 p { margin: 8px 0 16px; color: rgba(255,255,255,.6); font-size: 12px; font-variant-numeric: tabular-nums; }
-a { display: inline-flex; min-height: 34px; align-items: center; border-radius: 7px; background: #6c58f5; padding: 0 12px; color: white; font-size: 12px; text-decoration: none; }
+a { display: inline-flex; min-height: 34px; align-items: center; border-radius: 7px; background: #6c58f5; padding: 0 14px; color: white; font-size: 12px; font-weight: 500; text-decoration: none; }
 a:focus-visible { outline: 2px solid #a99bff; outline-offset: 2px; }
 @media (pointer: coarse) { a { min-height: 44px; } }`;
 
@@ -243,7 +362,7 @@ function writeRestartingPage(res, reqUrl, isPreview = false, retrySeconds = DEFA
   const retryHref = escapeHtml(safeTargetPath(reqUrl));
   const heading = isPreview ? "This preview is starting" : "This app is restarting";
   const detail = isPreview
-    ? "Waking the sandbox and starting the development server. This page reloads automatically…"
+    ? "Waking the workspace preview server. This page reloads automatically…"
     : "Its saved production release is starting up. This page reloads automatically…";
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -256,6 +375,26 @@ function writeRestartingPage(res, reqUrl, isPreview = false, retrySeconds = DEFA
     "content-type": "text/html; charset=utf-8",
     "cache-control": "no-store",
     "retry-after": String(retrySeconds),
+    "content-length": String(Buffer.byteLength(html)),
+  });
+  res.end(html);
+}
+
+function writePreviewPausedPage(res, target) {
+  const projectHref = target.projectId
+    ? escapeHtml(new URL(`/projects/${target.projectId}`, COGNIX_PUBLIC_ORIGIN).toString())
+    : escapeHtml(COGNIX_PUBLIC_ORIGIN);
+  const title = escapeHtml(target.title || "Preview paused");
+  const html = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>${title} — Preview paused</title><style>${PAGE_STYLE}</style></head>
+<body><main><div><h1>Preview is turned off</h1>
+<p>Development previews automatically stop when Curator is closed. Open this project in Curator to resume the preview, or publish the app to keep it live 24/7.</p>
+<a href="${projectHref}">Open in Curator</a></div></main></body></html>`;
+  res.writeHead(503, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
     "content-length": String(Buffer.byteLength(html)),
   });
   res.end(html);
@@ -366,6 +505,7 @@ function sendProxyAttempt(req, res, upstreamBase, extraHeaders, options, buffere
   const headers = sanitizeVisitorHeaders(req.headers, {
     keepUpgrade: false,
     stripCookie: Boolean(options.stripCookie),
+    stripPreviewGrant: Boolean(options.isPreview),
   });
   headers.host = upstreamUrl.host;
   if (bufferedBody) {
@@ -588,7 +728,87 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  const parsedUrl = new URL(pathOnly, "http://cognix.invalid");
+
+  // 1. Edge preview auth grant callback:
+  //    - Preferred query form on real path (`/<next>?__cognix_preview_grant=<signed>`) — degrades cleanly to 200 OK
+  //      if an older proxy forwards it before rollout.
+  //    - Legacy path form (`/__cognix_preview_auth?grant=<signed>&next=/`).
+  const isLegacyGrantCallback = parsedUrl.pathname === PREVIEW_AUTH_CALLBACK_PATH && req.method === "GET";
+  const queryGrantToken = req.method === "GET" ? parsedUrl.searchParams.get(PREVIEW_GRANT_COOKIE) : null;
+  if (isLegacyGrantCallback || queryGrantToken) {
+    const grantToken = isLegacyGrantCallback
+      ? parsedUrl.searchParams.get("grant") || ""
+      : queryGrantToken || "";
+    let nextPath = "/";
+    if (isLegacyGrantCallback) {
+      nextPath = safeTargetPath(parsedUrl.searchParams.get("next") || "/");
+    } else {
+      const cleaned = new URL(parsedUrl.toString());
+      cleaned.searchParams.delete(PREVIEW_GRANT_COOKIE);
+      nextPath = safeTargetPath(`${cleaned.pathname}${cleaned.search}`);
+    }
+    const verified = verifyPreviewGrantToken(grantToken, hostname);
+    if (!verified) {
+      const authRedirect = buildCuratorPreviewAuthUrl(hostname, nextPath);
+      res.writeHead(302, { location: authRedirect, "cache-control": "no-store" });
+      res.end();
+      return;
+    }
+    // Clear cached paused state so the redirected request wakes/resolves immediately.
+    markStale(hostname);
+    const maxAge = Math.max(60, verified.exp - Math.floor(Date.now() / 1000));
+    const secureAttrs = proto === "https" ? "; Secure; SameSite=None; Partitioned" : "; SameSite=Lax";
+    res.writeHead(302, {
+      location: nextPath,
+      "cache-control": "no-store",
+      "set-cookie": `${PREVIEW_GRANT_COOKIE}=${grantToken}; HttpOnly; Path=/; Max-Age=${maxAge}${secureAttrs}`,
+    });
+    res.end();
+    return;
+  }
+
+  // 2. Private invite link entry (`/auth?key={sharing_key}`) on preview subdomains
+  if (parsedUrl.pathname === "/auth" && parsedUrl.searchParams.get("key") && req.method === "GET") {
+    const shareKey = parsedUrl.searchParams.get("key") || "";
+    const targetForAuth = await resolveTarget(hostname);
+    if (targetForAuth.isPreview) {
+      const authRedirect = buildCuratorPreviewAuthUrl(hostname, "/", { key: shareKey });
+      res.writeHead(302, { location: authRedirect, "cache-control": "no-store" });
+      res.end();
+      return;
+    }
+  }
+
   const target = await resolveTarget(hostname);
+
+  // 3. Enforce preview access control on all preview requests (including paused previews)
+  if (target.isPreview && target.previewAccess) {
+    const authorized = isPreviewRequestAuthorized(req, hostname, target.previewAccess);
+    if (!authorized) {
+      if (isBrowserNavigationRequest(req, parsedUrl.pathname)) {
+        const modeHint =
+          target.previewAccess.publicActive && target.previewAccess.hasPasscode ? "passcode" : undefined;
+        const authRedirect = buildCuratorPreviewAuthUrl(hostname, pathOnly, { mode: modeHint });
+        res.writeHead(302, { location: authRedirect, "cache-control": "no-store" });
+        res.end();
+        return;
+      }
+      const errBody = JSON.stringify({ error: "Authentication required to access this preview." });
+      res.writeHead(401, {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "content-length": String(Buffer.byteLength(errBody)),
+      });
+      res.end(errBody);
+      return;
+    }
+  }
+
+  if (target.kind === "preview_paused") {
+    writePreviewPausedPage(res, target);
+    return;
+  }
 
   if (target.kind === "proxy") {
     forwardHttpRequest(req, res, target.upstream, target.headers, {
@@ -636,6 +856,11 @@ server.on("upgrade", async (req, clientSocket, head) => {
   }
 
   const target = await resolveTarget(hostname);
+  if (target.isPreview && target.previewAccess && !isPreviewRequestAuthorized(req, hostname, target.previewAccess)) {
+    clientSocket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+    clientSocket.destroy();
+    return;
+  }
   if (target.kind !== "proxy") {
     clientSocket.write("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
     clientSocket.destroy();
@@ -646,7 +871,11 @@ server.on("upgrade", async (req, clientSocket, head) => {
   const isTls = upstreamUrl.protocol === "https:";
   const port = Number(upstreamUrl.port) || (isTls ? 443 : 80);
 
-  const headers = sanitizeVisitorHeaders(req.headers, { keepUpgrade: true, stripCookie: false });
+  const headers = sanitizeVisitorHeaders(req.headers, {
+    keepUpgrade: true,
+    stripCookie: false,
+    stripPreviewGrant: Boolean(target.isPreview),
+  });
   headers.host = upstreamUrl.host;
   headers.connection = "Upgrade";
   headers.upgrade = req.headers.upgrade || "websocket";

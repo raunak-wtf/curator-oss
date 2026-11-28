@@ -4,7 +4,7 @@ import { requireViewer } from "@/lib/auth0";
 import { githubErrorResponse } from "@/lib/github/http";
 import { resolveSecuritySource } from "@/lib/github/security-source";
 import { errorResponse } from "@/lib/http";
-import { createProject, ensureUser, listProjects } from "@/lib/store";
+import { checkUserAgentEntitlement, createProject, ensureUser, listProjects } from "@/lib/store";
 
 export async function GET() {
   try {
@@ -26,6 +26,17 @@ const createSchema = z.object({
 export async function POST(request: Request) {
   try {
     const viewer = await requireViewer();
+    const entitlement = await checkUserAgentEntitlement(viewer);
+    if (!entitlement.allowed) {
+      return Response.json(
+        {
+          error: entitlement.message ?? "An active Curator Pro subscription ($10/month) is required.",
+          code: entitlement.reason === "credits_exhausted" ? "CREDITS_EXHAUSTED" : "SUBSCRIPTION_REQUIRED",
+          billingUrl: "/billing",
+        },
+        { status: 402 },
+      );
+    }
     const body = createSchema.parse(await request.json());
     if (body.mode === "build" && body.prompt.length < 3) {
       return Response.json({ error: "Describe the app in a few more words." }, { status: 400 });

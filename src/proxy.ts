@@ -82,6 +82,11 @@ export async function proxy(request: NextRequest) {
     });
   }
 
+  // Webhooks authenticate via cryptographic signatures (Standard Webhooks), never via Auth0 sessions.
+  if (request.nextUrl.pathname.startsWith("/api/webhooks/")) {
+    return NextResponse.next();
+  }
+
   if (!auth0) return NextResponse.next();
   const response = await auth0.middleware(request);
 

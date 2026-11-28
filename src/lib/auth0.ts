@@ -1,5 +1,5 @@
 import { Auth0Client } from "@auth0/nextjs-auth0/server";
-import { canonicalAccountId } from "./identity";
+import { canonicalAccountId, isAdminEmail, parseAuthProvider } from "./identity";
 import type { Viewer } from "./types";
 
 export const isAuthConfigured = Boolean(
@@ -43,12 +43,18 @@ export async function getViewer(): Promise<Viewer | null> {
       const session = await auth0.getSession();
       if (session?.user.sub && session.user.email) {
         const emailVerified = session.user.email_verified === true;
+        const parsedProvider = parseAuthProvider(session.user.sub);
         return {
           id: canonicalAccountId(session.user.email, emailVerified, session.user.sub),
           email: session.user.email,
           emailVerified,
           name: session.user.name ?? session.user.nickname ?? session.user.email,
           picture: session.user.picture,
+          authProvider: parsedProvider.provider,
+          authProviderLabel: parsedProvider.label,
+          authMethod: parsedProvider.method,
+          authSubject: session.user.sub,
+          isAdmin: isAdminEmail(session.user.email),
         };
       }
     } catch (error) {
@@ -66,5 +72,13 @@ export async function requireViewer() {
   }
   const { ensureUser } = await import("./store");
   await ensureUser(viewer);
+  return viewer;
+}
+
+export async function requireAdmin() {
+  const viewer = await requireViewer();
+  if (!viewer.isAdmin) {
+    throw new Response("Administrator access required.", { status: 403 });
+  }
   return viewer;
 }

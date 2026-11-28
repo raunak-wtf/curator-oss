@@ -2,16 +2,24 @@ import { notFound, redirect } from "next/navigation";
 import { WorkspaceClient } from "@/components/workspace-client";
 import { getViewer } from "@/lib/auth0";
 import { ensurePreviewUrl, publishedAutoStopMinutes } from "@/lib/daytona";
-import { appsDomain } from "@/lib/domains";
+import { appsDomain, parseAppsHostname } from "@/lib/domains";
+import {
+  buildOwnerPreviewFrameUrl,
+  PREVIEW_OWNER_LEASE_MS,
+  signPreviewGrant,
+} from "@/lib/preview-access";
 import {
   ensureUser,
   getPendingAgentApproval,
   getProject,
   getProjectCloud,
+  getUserSubscription,
+  hasActiveSubscriptionAccess,
   listMessages,
   listProjectConsoleLogs,
   listProjectFiles,
   listProjects,
+  touchProjectPreviewSession,
 } from "@/lib/store";
 
 type Props = {
@@ -28,6 +36,7 @@ export default async function ProjectPage({ params, searchParams }: Props) {
   if (!project) notFound();
 
   if (project.sandboxId && project.mode !== "security") {
+    await touchProjectPreviewSession(project.id, PREVIEW_OWNER_LEASE_MS).catch(() => undefined);
     const latestPreviewUrl = await ensurePreviewUrl(project).catch(() => null);
     if (latestPreviewUrl) {
       project = {
@@ -38,7 +47,27 @@ export default async function ProjectPage({ params, searchParams }: Props) {
     }
   }
 
-  const [messages, files, projects, cloud, query, pendingApproval, consoleEntries] = await Promise.all([
+  let initialPreviewFrameUrl: string | null = project.previewUrl;
+  if (project.previewUrl && project.mode !== "security") {
+    try {
+      const host = new URL(project.previewUrl).hostname;
+      if (parseAppsHostname(host)?.kind === "preview" && (process.env.COGNIX_EDGE_SECRET || process.env.AUTH0_SECRET)) {
+        const grant = signPreviewGrant({
+          pid: project.id,
+          host,
+          role: "owner",
+          ver: project.previewAccessVersion ?? 1,
+          email: viewer.email,
+          ttlSeconds: 12 * 3600,
+        });
+        initialPreviewFrameUrl = buildOwnerPreviewFrameUrl(project.previewUrl, grant, "/");
+      }
+    } catch {
+      initialPreviewFrameUrl = project.previewUrl;
+    }
+  }
+
+  const [messages, files, projects, cloud, query, pendingApproval, consoleEntries, subscription] = await Promise.all([
     listMessages(project.id),
     listProjectFiles(project.id),
     listProjects(viewer.id),
@@ -46,15 +75,23 @@ export default async function ProjectPage({ params, searchParams }: Props) {
     searchParams,
     project.mode === "security" ? getPendingAgentApproval(project.id, viewer.id).catch(() => null) : Promise.resolve(null),
     project.mode !== "security" ? listProjectConsoleLogs(project.id, 150).catch(() => []) : Promise.resolve([]),
+    getUserSubscription(viewer.id),
   ]);
 
   return (
     <WorkspaceClient
       initialProject={project}
+      initialPreviewFrameUrl={initialPreviewFrameUrl}
       initialMessages={messages}
       initialFiles={files}
       initialConsoleEntries={consoleEntries}
       viewer={viewer}
+      initialBilling={{
+        status: subscription.status,
+        hasActiveAccess: Boolean(viewer.isAdmin) || hasActiveSubscriptionAccess(subscription),
+        creditsBalanceHundredths: subscription.creditsBalanceHundredths,
+        monthlyCreditsHundredths: subscription.monthlyCreditsHundredths,
+      }}
       initialNow={new Date().toISOString()}
       initialPrompt={query.prompt}
       initialAttachmentIds={query.attachments?.split(",").filter(Boolean)}

@@ -79,7 +79,8 @@ export async function ensureSandbox(project: Project): Promise<{ sandbox: Sandbo
     image: "node:22-bookworm",
     language: CodeLanguage.TYPESCRIPT,
     public: !isDirectPreviewProxyConfigured(),
-    autoStopInterval: 30,
+    // Unpublished preview sandboxes sleep quickly when Curator is closed; publishing configures the live lifecycle.
+    autoStopInterval: 5,
     autoArchiveInterval: 1440,
     labels: { app: "cognix", projectId: project.id },
     envVars: { CI: "1", NEXT_TELEMETRY_DISABLED: "1", COGNIX_HOSTED_PREVIEW: "1" },
@@ -437,6 +438,29 @@ async function resumeDevelopmentPreview(sandbox: Sandbox, project: Project, root
     undefined,
     70,
   );
+}
+
+export async function shutdownDevelopmentPreview(project: Project): Promise<{ stoppedSandbox: boolean; pausedServer: boolean }> {
+  if (!isDaytonaConfigured || !project.sandboxId) {
+    return { stoppedSandbox: false, pausedServer: false };
+  }
+  previewProxyTargets.delete(project.id);
+  try {
+    const sandbox = await getClient().get(project.sandboxId);
+    if (String(sandbox.state) !== "started") {
+      return { stoppedSandbox: false, pausedServer: false };
+    }
+    const root = await getProjectRoot(sandbox).catch(() => "/home/daytona/app");
+    const pausedServer = await pauseDevelopmentPreview(sandbox, project, root).catch(() => false);
+    // Keep the container alive when the project is published so the published port-3001 release stays available.
+    if (!project.publishedAt) {
+      await sandbox.stop(30).catch(() => undefined);
+      return { stoppedSandbox: true, pausedServer };
+    }
+    return { stoppedSandbox: false, pausedServer };
+  } catch {
+    return { stoppedSandbox: false, pausedServer: false };
+  }
 }
 
 async function stopPublishedSession(sandbox: Sandbox, project: Project) {

@@ -29,11 +29,14 @@ import {
   getProjectRepository,
   listProjectConsoleLogs,
   listSecretNames,
+  recordCreditUsage,
   updateAttachmentSandboxPath,
+  updateMessageMetadata,
   updateProject,
   updateProjectCloud,
   upsertSecret,
 } from "../store";
+import { calculateAgentCredits, estimateTokensFromChars } from "../credits";
 import { createSignedObjectReadUrl, downloadObject } from "../storage";
 import type {
   AgentApprovalDecision,
@@ -429,6 +432,71 @@ export async function runAgent(input: {
   const fileChanges = new Map<string, FileChangeSnapshot>();
   let finalContent = "";
   let pendingRequest: AgentQuestionRequest | null = null;
+  let totalPromptTokens = 0;
+  let totalCompletionTokens = 0;
+  let modelTurnsExecuted = 0;
+  let streamUsageOptionsSupported = true;
+
+  const CLOUD_ACTION_TOOLS = new Set(["neon_database", "cloud_storage", "resend_email", "request_cognix_cloud"]);
+
+  function approximateMessageChars(list: ChatCompletionMessageParam[]): number {
+    let chars = 0;
+    for (const msg of list) {
+      if (typeof msg.content === "string") chars += msg.content.length;
+      else if (Array.isArray(msg.content)) {
+        for (const part of msg.content) {
+          if (part && typeof part === "object" && "text" in part && typeof part.text === "string") {
+            chars += part.text.length;
+          } else {
+            chars += 400;
+          }
+        }
+      }
+    }
+    return chars;
+  }
+
+  async function chargeRunCredits(messageId: string, durationMs: number) {
+    const mode: "build" | "plan" | "security" = security ? "security" : planMode ? "plan" : "build";
+    const cloudActions = usedTools.filter((name) => CLOUD_ACTION_TOOLS.has(name)).length;
+    const calc = calculateAgentCredits({
+      mode,
+      promptTokens: totalPromptTokens,
+      completionTokens: totalCompletionTokens,
+      turns: Math.max(1, modelTurnsExecuted),
+      toolCalls: usedTools.length,
+      filesChanged: changedPaths.size,
+      commandsRun: terminal.commands.length,
+      cloudActions,
+      durationMs,
+    });
+    const totalTokens = totalPromptTokens + totalCompletionTokens;
+    await recordCreditUsage({
+      userId: project.ownerId,
+      projectId: project.id,
+      messageId,
+      mode,
+      complexityTier: calc.complexityTier,
+      promptTokens: totalPromptTokens,
+      completionTokens: totalCompletionTokens,
+      totalTokens,
+      turns: Math.max(1, modelTurnsExecuted),
+      toolCalls: usedTools.length,
+      filesChanged: changedPaths.size,
+      commandsRun: terminal.commands.length,
+      cloudActions,
+      durationMs,
+      creditsHundredths: calc.creditsHundredths,
+      description: calc.description,
+    }).catch(() => undefined);
+    const usageMeta = {
+      creditsChargedHundredths: calc.creditsHundredths,
+      complexityTier: calc.complexityTier,
+      totalTokens,
+    };
+    await updateMessageMetadata(messageId, project.id, usageMeta).catch(() => undefined);
+    return usageMeta;
+  }
 
   /** Saves the turn and stops before the preview steps, because the agent is waiting for the user. */
   async function finishWithQuestions(request: AgentQuestionRequest) {
@@ -438,6 +506,7 @@ export async function runAgent(input: {
     const changedPathList = [...changedPaths];
     const fileChangeList = [...fileChanges.values()];
     const completedAt = new Date();
+    const runDurationMs = completedAt.getTime() - runStartedAt;
     const message = await createMessage(project.id, "assistant", content, {
       tools: usedTools,
       activity: runActivity.slice(-100),
@@ -445,13 +514,14 @@ export async function runAgent(input: {
       questions: request,
       runStartedAt: new Date(runStartedAt).toISOString(),
       runCompletedAt: completedAt.toISOString(),
-      runDurationMs: completedAt.getTime() - runStartedAt,
+      runDurationMs,
       changedPaths: changedPathList,
       fileChanges: fileChangeList,
       ...(changedPathList.length
         ? { summary: `Updated ${changedPathList.length} ${changedPathList.length === 1 ? "file" : "files"}` }
         : {}),
     });
+    const usageMeta = await chargeRunCredits(message.id, runDurationMs);
     await updateProject(project.id, project.ownerId, { status: project.previewUrl ? "ready" : "draft" });
     await emit({
       type: "done",
@@ -461,7 +531,8 @@ export async function runAgent(input: {
       activity: runActivity.slice(-100),
       commands: terminal.commands,
       questions: request,
-      runDurationMs: completedAt.getTime() - runStartedAt,
+      runDurationMs,
+      ...usageMeta,
     });
     return message;
   }
@@ -692,6 +763,7 @@ export async function runAgent(input: {
           tools: security ? securityTools : planMode ? planTools : buildTools,
           tool_choice: "auto",
           stream: true,
+          ...(streamUsageOptionsSupported ? { stream_options: { include_usage: true } } : {}),
           temperature: 0.2,
         },
         { signal },
@@ -704,23 +776,42 @@ export async function runAgent(input: {
         onStatus: (label) => emit({ type: "status", label }),
       });
     } catch (error) {
-      if (!nativeFilePartsEnabled || turn !== 0 || !isNativeFileCompatibilityError(error)) throw error;
-      nativeFilePartsEnabled = false;
-      messages[currentUserMessageIndex] = {
-        role: "user",
-        content: buildMultimodalUserContent(effectivePrompt, stagedAttachments, {
-          includeNativeFiles: false,
-          visualSelections: input.visualSelections,
-        }),
-      };
-      await emit({ type: "status", label: "Opening attachments in compatibility mode" });
-      turnResult = await streamModelTurnWithRetry({
-        createStream,
-        onStatus: (label) => emit({ type: "status", label }),
-      });
+      const errMsg = error instanceof Error ? error.message : "";
+      if (streamUsageOptionsSupported && /stream_options|include_usage|unknown field|extra_forbidden|unrecognized/i.test(errMsg)) {
+        streamUsageOptionsSupported = false;
+        turnResult = await streamModelTurnWithRetry({
+          createStream,
+          onStatus: (label) => emit({ type: "status", label }),
+        });
+      } else if (nativeFilePartsEnabled && turn === 0 && isNativeFileCompatibilityError(error)) {
+        nativeFilePartsEnabled = false;
+        messages[currentUserMessageIndex] = {
+          role: "user",
+          content: buildMultimodalUserContent(effectivePrompt, stagedAttachments, {
+            includeNativeFiles: false,
+            visualSelections: input.visualSelections,
+          }),
+        };
+        await emit({ type: "status", label: "Opening attachments in compatibility mode" });
+        turnResult = await streamModelTurnWithRetry({
+          createStream,
+          onStatus: (label) => emit({ type: "status", label }),
+        });
+      } else {
+        throw error;
+      }
     }
 
-    const { content, calls } = turnResult;
+    const { content, calls, usage } = turnResult;
+    modelTurnsExecuted += 1;
+    if (usage) {
+      totalPromptTokens += usage.promptTokens;
+      totalCompletionTokens += usage.completionTokens;
+    } else {
+      totalPromptTokens += estimateTokensFromChars(approximateMessageChars(messages));
+      const toolArgChars = calls.reduce((acc, c) => acc + c.function.name.length + c.function.arguments.length, 0);
+      totalCompletionTokens += estimateTokensFromChars(content.length + toolArgChars);
+    }
 
     messages.push({
       role: "assistant",
@@ -1196,6 +1287,7 @@ export async function runAgent(input: {
     }
     await emit({ type: "token", value: finalContent });
     const completedAt = new Date();
+    const runDurationMs = completedAt.getTime() - runStartedAt;
     const restoredStatus = project.publishedAt ? "published" : project.previewUrl ? "ready" : "draft";
     const message = await createMessage(project.id, "assistant", finalContent, {
       tools: usedTools,
@@ -1204,8 +1296,9 @@ export async function runAgent(input: {
       chatMode: "plan",
       runStartedAt: new Date(runStartedAt).toISOString(),
       runCompletedAt: completedAt.toISOString(),
-      runDurationMs: completedAt.getTime() - runStartedAt,
+      runDurationMs,
     });
+    const usageMeta = await chargeRunCredits(message.id, runDurationMs);
     await updateProject(project.id, project.ownerId, { status: restoredStatus });
     await emit({
       type: "done",
@@ -1213,7 +1306,8 @@ export async function runAgent(input: {
       activity: runActivity.slice(-100),
       commands: terminal.commands,
       chatMode: "plan",
-      runDurationMs: completedAt.getTime() - runStartedAt,
+      runDurationMs,
+      ...usageMeta,
     });
     return message;
   }
@@ -1226,6 +1320,7 @@ export async function runAgent(input: {
     }
     await emit({ type: "token", value: finalContent });
     const completedAt = new Date();
+    const runDurationMs = completedAt.getTime() - runStartedAt;
     const source = project.securitySource;
     const changedPathList = [...changedPaths];
     const fileChangeList = [...fileChanges.values()];
@@ -1235,12 +1330,13 @@ export async function runAgent(input: {
       commands: terminal.commands,
       runStartedAt: new Date(runStartedAt).toISOString(),
       runCompletedAt: completedAt.toISOString(),
-      runDurationMs: completedAt.getTime() - runStartedAt,
+      runDurationMs,
       changedPaths: changedPathList,
       fileChanges: fileChangeList,
       ...(changedPathList.length ? { summary: `Updated ${changedPathList.length} ${changedPathList.length === 1 ? "file" : "files"}` } : {}),
       ...(source ? { security: { repository: source.fullName, branch: source.branch, commit: source.importedSha } } : {}),
     });
+    const usageMeta = await chargeRunCredits(message.id, runDurationMs);
     await updateProject(project.id, project.ownerId, { status: "ready" });
     await emit({
       type: "done",
@@ -1249,7 +1345,8 @@ export async function runAgent(input: {
       fileChanges: fileChangeList,
       activity: runActivity.slice(-100),
       commands: terminal.commands,
-      runDurationMs: completedAt.getTime() - runStartedAt,
+      runDurationMs,
+      ...usageMeta,
     });
     return message;
   }
@@ -1391,6 +1488,7 @@ export async function runAgent(input: {
   const changedPathList = [...changedPaths];
   const fileChangeList = [...fileChanges.values()];
   const completedAt = new Date();
+  const runDurationMs = completedAt.getTime() - runStartedAt;
   const message = await createMessage(project.id, "assistant", finalContent, {
     tools: usedTools,
     activity: runActivity.slice(-100),
@@ -1398,13 +1496,14 @@ export async function runAgent(input: {
     ...(githubInfo ? { github: githubInfo } : {}),
     runStartedAt: new Date(runStartedAt).toISOString(),
     runCompletedAt: completedAt.toISOString(),
-    runDurationMs: completedAt.getTime() - runStartedAt,
+    runDurationMs,
     changedPaths: changedPathList,
     fileChanges: fileChangeList,
     summary: changedPathList.length
       ? `Updated ${changedPathList.length} ${changedPathList.length === 1 ? "file" : "files"}`
       : "Verified the existing app",
   });
+  const usageMeta = await chargeRunCredits(message.id, runDurationMs);
   await updateProject(project.id, project.ownerId, { status: previewReady ? "ready" : "error" });
   await emit({
     type: "done",
@@ -1414,7 +1513,8 @@ export async function runAgent(input: {
     activity: runActivity.slice(-100),
     commands: terminal.commands,
     ...(githubInfo ? { github: githubInfo } : {}),
-    runDurationMs: completedAt.getTime() - runStartedAt,
+    runDurationMs,
+    ...usageMeta,
   });
   return message;
 }

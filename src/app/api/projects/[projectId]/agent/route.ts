@@ -3,7 +3,7 @@ import { requireViewer } from "@/lib/auth0";
 import { runAgent } from "@/lib/ai/runner";
 import { errorResponse, notFound } from "@/lib/http";
 import { SKILLS_PER_PROMPT, skillReferences } from "@/lib/skills";
-import { createMessage, getAttachment, getProject, getSkillsByNames, listMessages, updateProject } from "@/lib/store";
+import { checkUserAgentEntitlement, createMessage, getAttachment, getProject, getSkillsByNames, listMessages, updateProject } from "@/lib/store";
 import type { AgentEvent, Attachment } from "@/lib/types";
 import { visualSelectionsSchema } from "@/lib/visual-edit";
 
@@ -36,6 +36,17 @@ function agentErrorMessage(error: unknown) {
 export async function POST(request: Request, context: Context) {
   try {
     const viewer = await requireViewer();
+    const entitlement = await checkUserAgentEntitlement(viewer);
+    if (!entitlement.allowed) {
+      return Response.json(
+        {
+          error: entitlement.message ?? "An active Curator Pro subscription ($10/month) is required.",
+          code: entitlement.reason === "credits_exhausted" ? "CREDITS_EXHAUSTED" : "SUBSCRIPTION_REQUIRED",
+          billingUrl: "/billing",
+        },
+        { status: 402 },
+      );
+    }
     const { projectId } = await context.params;
     const project = await getProject(projectId, viewer.id);
     if (!project) return notFound();

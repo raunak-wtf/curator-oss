@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentTools, applyExactEdit, isPrivateNetworkAddress, projectRelativePath } from "./tools";
+import { agentTools, applyExactEdit, detectCloudStorageWarnings, isPrivateNetworkAddress, projectRelativePath } from "./tools";
 
 describe("agent tool contract", () => {
   it("exposes discovery, editing, terminal, process, preview, and web tools", () => {
@@ -80,5 +80,40 @@ describe("public web tool network boundaries", () => {
   it("permits ordinary public addresses", () => {
     expect(isPrivateNetworkAddress("1.1.1.1")).toBe(false);
     expect(isPrivateNetworkAddress("2606:4700:4700::1111")).toBe(false);
+  });
+});
+
+describe("Cloud Storage SigV4 compatibility checks", () => {
+  it("warns when S3Client omits AWS SDK v3.729+ WHEN_REQUIRED checksum flags", () => {
+    const warnings = detectCloudStorageWarnings(`
+      export const s3 = new S3Client({
+        region: "auto",
+        endpoint: process.env.S3_ENDPOINT,
+        forcePathStyle: true,
+      });
+    `);
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("SignatureDoesNotMatch");
+  });
+
+  it("warns when getSignedUrl uses ResponseContentDisposition", () => {
+    const warnings = detectCloudStorageWarnings(`
+      const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket, Key, ResponseContentDisposition: "attachment" }));
+    `);
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("ResponseContentDisposition");
+  });
+
+  it("returns no warnings for properly configured S3Client", () => {
+    const warnings = detectCloudStorageWarnings(`
+      export const s3 = new S3Client({
+        region: "auto",
+        endpoint: process.env.S3_ENDPOINT,
+        forcePathStyle: true,
+        requestChecksumCalculation: "WHEN_REQUIRED",
+        responseChecksumValidation: "WHEN_REQUIRED",
+      });
+    `);
+    expect(warnings).toEqual([]);
   });
 });

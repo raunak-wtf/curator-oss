@@ -67,11 +67,11 @@ export const CLOUD_ARCHITECTURE_SKILLS: readonly InternalCloudSkill[] = [
   },
   {
     name: "bucketline-s3-storage-and-cdn",
-    description: "CORS-safe Cloud S3 uploads, 50 MB validation, CDN URLs, and presigned access.",
+    description: "CORS-safe Cloud S3 uploads, AWS SDK v3 checksum compatibility, 50 MB validation, CDN URLs, and same-origin streaming.",
     instructions: [
-      "Configure `S3Client` in `src/lib/storage.ts` (`import \"server-only\"`) with `endpoint: process.env.S3_ENDPOINT`, `region: process.env.S3_REGION || \"auto\"`, and `forcePathStyle: true`.",
+      "Configure `S3Client` in `src/lib/storage.ts` (`import \"server-only\"`) with `endpoint: process.env.S3_ENDPOINT`, `region: process.env.S3_REGION || \"auto\"`, `forcePathStyle: true`, `requestChecksumCalculation: \"WHEN_REQUIRED\"`, and `responseChecksumValidation: \"WHEN_REQUIRED\"`. The two checksum flags are mandatory on `@aws-sdk/client-s3` v3.729+ because default `WHEN_SUPPORTED` checksums append `x-amz-checksum-mode=ENABLED` and cause `HTTP 403 SignatureDoesNotMatch` on Cloud Storage.",
       "Route browser file uploads through an authenticated same-origin Next.js Route Handler (`POST /api/storage/upload` reading `request.formData()`) that checks `auth.api.getSession`, validates MIME type and `file.size <= 50 * 1024 * 1024` (50 MB hard limit), generates a sanitized server key (`users/${session.user.id}/${crypto.randomUUID()}-${safeName}`), and uploads via `PutObjectCommand`. Never `PUT` directly from browser `fetch` to the external S3 endpoint.",
-      "Persist the stable `objectKey` (plus filename, contentType, and byte size) in PostgreSQL—never store expiring presigned URLs in database columns. Serve uploaded files reliably through a same-origin `GET /api/storage/file/[...key]` Route Handler (or `S3_CDN_URL` when `S3_ACCESS_MODE === \"public\"`) so inline `<img>` thumbnails and PDF downloads never expire or fail CORS/hostname checks, and delete S3 objects when their owning PostgreSQL row is deleted.",
+      "Persist the stable `objectKey` (plus filename, contentType, and byte size) in PostgreSQL—never store expiring presigned URLs in database columns. Serve uploaded files and downloads reliably through a same-origin `GET /api/storage/file/[...key]` Route Handler (supporting `?download=1` for `Content-Disposition: attachment`) instead of `@aws-sdk/s3-request-presigner` `getSignedUrl` (never pass `ResponseContentDisposition` into S3 presigned URLs), and delete S3 objects when their owning PostgreSQL row is deleted.",
     ],
   },
   {

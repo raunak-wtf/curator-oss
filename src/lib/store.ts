@@ -1,16 +1,55 @@
 import { encryptSecret, decryptSecret } from './secrets-crypto';
 import { and, asc, desc, eq, gte, lte, ne, sql } from "drizzle-orm";
 import { db } from "./db";
-import { agentApprovals, attachments, githubConnections, messages, projectAnalyticsEvents, projectConsoleLogs, projectDomains, projectFiles, projectRepositories, projects, users, projectSecrets, projectCloud, skills } from "./db/schema";
+import {
+  agentApprovals,
+  attachments,
+  billingWebhookEvents,
+  creditUsageEvents,
+  githubConnections,
+  messages,
+  projectAnalyticsEvents,
+  projectConsoleLogs,
+  projectDomains,
+  projectFiles,
+  projectPreviewShares,
+  projectRepositories,
+  projects,
+  users,
+  userSubscriptions,
+  projectSecrets,
+  projectCloud,
+  skills,
+} from "./db/schema";
+import {
+  PRO_MAX_ROLLOVER_CREDITS_HUNDREDTHS,
+  PRO_MONTHLY_CREDITS_HUNDREDTHS,
+  PRO_PLAN_CODE,
+  PRO_PLAN_CURRENCY,
+  PRO_PLAN_PRICE_CENTS,
+} from "./credits";
 import { previewSlugForProjectId } from "./domains";
+import { isAdminEmail } from "./identity";
+import {
+  createPreviewShareKey,
+  hashPreviewPasscode,
+  isPublicPreviewActive,
+  normalizeInviteEmail,
+  verifyPreviewPasscode,
+} from "./preview-access";
 import { SKILLS_PER_ACCOUNT, SkillRequestError } from "./skills";
 import type {
+  AdminOverviewStats,
+  AdminUserSummary,
   AgentApprovalDecision,
   AgentApprovalItem,
   AgentApprovalRequest,
   AnalyticsDevice,
   AnalyticsEventRecord,
   Attachment,
+  AuthMethod,
+  CreditComplexityTier,
+  CreditUsageEvent,
   Message,
   MessageRole,
   Project,
@@ -19,6 +58,8 @@ import type {
   ProjectDomainStatus,
   ProjectFile,
   ProjectStatus,
+  SubscriptionStatus,
+  UserSubscription,
   Viewer,
   ProjectSecret,
   ProjectCloud,
@@ -30,10 +71,13 @@ import type {
   ProjectMode,
   RepositoryCache,
   SecuritySource,
+  PreviewAccessMode,
+  PreviewAccessState,
   PreviewConsoleEntry,
   PreviewConsoleInput,
   PreviewConsoleLevel,
   PreviewConsoleSource,
+  ProjectPreviewShare,
 } from "./types";
 import {
   PREVIEW_CONSOLE_MAX_ENTRIES,
@@ -63,7 +107,24 @@ type StoredGitHubTokens = {
   refreshExpiresAt: Date | null;
 };
 
+type MemoryUser = {
+  id: string;
+  email: string;
+  name: string | null;
+  avatarUrl: string | null;
+  authProvider: string;
+  authProviderLabel: string;
+  authMethod: AuthMethod;
+  authSubject: string | null;
+  createdAt: string;
+  lastSeenAt: string;
+};
+
 type MemoryStore = {
+  users?: MemoryUser[];
+  subscriptions?: UserSubscription[];
+  creditUsageEvents?: CreditUsageEvent[];
+  webhookEvents?: Set<string>;
   projects: Project[];
   messages: Message[];
   files: ProjectFile[];
@@ -77,6 +138,8 @@ type MemoryStore = {
   repositoryCache: Map<string, RepositoryCache>;
   analyticsEvents?: (AnalyticsEventRecord & { id: string; createdAt: string })[];
   consoleLogs?: PreviewConsoleEntry[];
+  previewShares?: (ProjectPreviewShare & { ownerId: string })[];
+  previewPasscodeHashes?: Map<string, string | null>;
 };
 
 declare global {
@@ -101,6 +164,10 @@ const memory =
   });
 
 // Keeps development sessions working when an older in-memory store is reused after a reload.
+memory.users ??= [];
+memory.subscriptions ??= [];
+memory.creditUsageEvents ??= [];
+memory.webhookEvents ??= new Set<string>();
 memory.domains ??= [];
 memory.repositoryCache ??= new Map();
 memory.secrets ??= [];
@@ -110,6 +177,8 @@ memory.githubConnections ??= [];
 memory.repositories ??= [];
 memory.analyticsEvents ??= [];
 memory.consoleLogs ??= [];
+memory.previewShares ??= [];
+memory.previewPasscodeHashes ??= new Map<string, string | null>();
 
 function mapProject(row: typeof projects.$inferSelect): Project {
   return {
@@ -125,6 +194,14 @@ function mapProject(row: typeof projects.$inferSelect): Project {
     publishedAt: row.publishedAt?.toISOString() ?? null,
     showBadge: row.showBadge,
     publicRemix: row.publicRemix,
+    previewAccessMode:
+      row.previewAccessMode === "public" || row.previewAccessMode === "private"
+        ? row.previewAccessMode
+        : "owner",
+    previewPublicExpiresAt: row.previewPublicExpiresAt?.toISOString() ?? null,
+    previewHasPasscode: Boolean(row.previewPasscodeHash),
+    previewAccessVersion: row.previewAccessVersion ?? 1,
+    previewActiveUntil: row.previewActiveUntil?.toISOString() ?? null,
     customInstructions: row.customInstructions ?? "",
     mode: row.mode === "security" ? "security" : "build",
     securitySource: row.securitySource ?? null,
@@ -187,7 +264,43 @@ function mapAttachment(row: typeof attachments.$inferSelect): Attachment {
 }
 
 export async function ensureUser(viewer: Viewer) {
-  if (!db) return;
+  const now = new Date();
+  const authProvider = viewer.authProvider || "unknown";
+  const authProviderLabel = viewer.authProviderLabel || "Unknown";
+  const authMethod: AuthMethod = viewer.authMethod || "oauth";
+  const authSubject = viewer.authSubject ?? null;
+
+  if (!db) {
+    memory.users ??= [];
+    const existing = memory.users.find((item) => item.id === viewer.id);
+    if (existing) {
+      existing.email = viewer.email;
+      existing.name = viewer.name;
+      existing.avatarUrl = viewer.picture ?? null;
+      if (authProvider !== "unknown") {
+        existing.authProvider = authProvider;
+        existing.authProviderLabel = authProviderLabel;
+        existing.authMethod = authMethod;
+      }
+      if (authSubject) existing.authSubject = authSubject;
+      existing.lastSeenAt = now.toISOString();
+    } else {
+      memory.users.push({
+        id: viewer.id,
+        email: viewer.email,
+        name: viewer.name,
+        avatarUrl: viewer.picture ?? null,
+        authProvider,
+        authProviderLabel,
+        authMethod,
+        authSubject,
+        createdAt: now.toISOString(),
+        lastSeenAt: now.toISOString(),
+      });
+    }
+    return;
+  }
+
   await db
     .insert(users)
     .values({
@@ -195,6 +308,11 @@ export async function ensureUser(viewer: Viewer) {
       email: viewer.email,
       name: viewer.name,
       avatarUrl: viewer.picture,
+      authProvider,
+      authProviderLabel,
+      authMethod,
+      authSubject,
+      lastSeenAt: now,
     })
     .onConflictDoUpdate({
       target: users.id,
@@ -202,7 +320,16 @@ export async function ensureUser(viewer: Viewer) {
         email: viewer.email,
         name: viewer.name,
         avatarUrl: viewer.picture,
-        updatedAt: new Date(),
+        ...(authProvider !== "unknown"
+          ? {
+              authProvider,
+              authProviderLabel,
+              authMethod,
+            }
+          : {}),
+        ...(authSubject ? { authSubject } : {}),
+        lastSeenAt: now,
+        updatedAt: now,
       },
     });
 
@@ -215,6 +342,15 @@ export async function ensureUser(viewer: Viewer) {
   for (const identity of legacyIdentities) {
     await db.update(projects).set({ ownerId: viewer.id }).where(eq(projects.ownerId, identity.id));
     await db.update(attachments).set({ ownerId: viewer.id }).where(eq(attachments.ownerId, identity.id));
+    await db.update(creditUsageEvents).set({ userId: viewer.id }).where(eq(creditUsageEvents.userId, identity.id));
+    const [existingCanonicalSub] = await db
+      .select({ userId: userSubscriptions.userId })
+      .from(userSubscriptions)
+      .where(eq(userSubscriptions.userId, viewer.id))
+      .limit(1);
+    if (!existingCanonicalSub) {
+      await db.update(userSubscriptions).set({ userId: viewer.id }).where(eq(userSubscriptions.userId, identity.id));
+    }
     await db.delete(users).where(eq(users.id, identity.id));
   }
 }
@@ -1660,4 +1796,1300 @@ export async function clearProjectConsoleLogs(projectId: string): Promise<void> 
   } catch {
     // Table may not exist yet before migration; memory store is already cleared.
   }
+}
+
+// ── Billing, Subscriptions, Credit Ledger & Admin Overview ────────────────
+
+const VALID_SUB_STATUSES = new Set<SubscriptionStatus>([
+  "inactive",
+  "active",
+  "on_hold",
+  "cancelled",
+  "expired",
+  "failed",
+]);
+
+function normalizeSubscriptionStatus(raw: string | null | undefined): SubscriptionStatus {
+  if (raw && VALID_SUB_STATUSES.has(raw as SubscriptionStatus)) return raw as SubscriptionStatus;
+  return "inactive";
+}
+
+function defaultInactiveSubscription(userId: string): UserSubscription {
+  const now = new Date().toISOString();
+  return {
+    userId,
+    planCode: PRO_PLAN_CODE,
+    status: "inactive",
+    priceCents: PRO_PLAN_PRICE_CENTS,
+    currency: PRO_PLAN_CURRENCY,
+    dodoCustomerId: null,
+    dodoSubscriptionId: null,
+    dodoProductId: null,
+    monthlyCreditsHundredths: PRO_MONTHLY_CREDITS_HUNDREDTHS,
+    creditsBalanceHundredths: 0,
+    creditsUsedThisPeriodHundredths: 0,
+    lifetimeCreditsUsedHundredths: 0,
+    currentPeriodStart: null,
+    currentPeriodEnd: null,
+    cancelAtPeriodEnd: false,
+    lastPaymentId: null,
+    lastPaymentAt: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function mapUserSubscription(row: typeof userSubscriptions.$inferSelect): UserSubscription {
+  return {
+    userId: row.userId,
+    planCode: row.planCode,
+    status: normalizeSubscriptionStatus(row.status),
+    priceCents: row.priceCents,
+    currency: row.currency,
+    dodoCustomerId: row.dodoCustomerId ?? null,
+    dodoSubscriptionId: row.dodoSubscriptionId ?? null,
+    dodoProductId: row.dodoProductId ?? null,
+    monthlyCreditsHundredths: row.monthlyCreditsHundredths,
+    creditsBalanceHundredths: row.creditsBalanceHundredths,
+    creditsUsedThisPeriodHundredths: row.creditsUsedThisPeriodHundredths,
+    lifetimeCreditsUsedHundredths: row.lifetimeCreditsUsedHundredths,
+    currentPeriodStart: row.currentPeriodStart?.toISOString() ?? null,
+    currentPeriodEnd: row.currentPeriodEnd?.toISOString() ?? null,
+    cancelAtPeriodEnd: row.cancelAtPeriodEnd,
+    lastPaymentId: row.lastPaymentId ?? null,
+    lastPaymentAt: row.lastPaymentAt?.toISOString() ?? null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapCreditUsageEvent(
+  row: typeof creditUsageEvents.$inferSelect,
+  extra?: { userEmail?: string; userName?: string | null; projectTitle?: string | null },
+): CreditUsageEvent {
+  const mode = row.mode === "plan" || row.mode === "security" ? row.mode : "build";
+  const tier: CreditComplexityTier =
+    row.complexityTier === "light" ||
+    row.complexityTier === "heavy" ||
+    row.complexityTier === "extended"
+      ? row.complexityTier
+      : "standard";
+  return {
+    id: row.id,
+    userId: row.userId,
+    ...(extra?.userEmail !== undefined ? { userEmail: extra.userEmail } : {}),
+    ...(extra?.userName !== undefined ? { userName: extra.userName } : {}),
+    projectId: row.projectId ?? null,
+    ...(extra?.projectTitle !== undefined ? { projectTitle: extra.projectTitle } : {}),
+    messageId: row.messageId ?? null,
+    mode,
+    complexityTier: tier,
+    promptTokens: row.promptTokens,
+    completionTokens: row.completionTokens,
+    totalTokens: row.totalTokens,
+    turns: row.turns,
+    toolCalls: row.toolCalls,
+    filesChanged: row.filesChanged,
+    commandsRun: row.commandsRun,
+    cloudActions: row.cloudActions,
+    durationMs: row.durationMs,
+    creditsHundredths: row.creditsHundredths,
+    description: row.description,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+export function hasActiveSubscriptionAccess(sub: UserSubscription, nowMs = Date.now()): boolean {
+  if (sub.status === "active") {
+    // Allow a 48h grace window past currentPeriodEnd for webhook delivery delays.
+    if (sub.currentPeriodEnd) {
+      const endMs = Date.parse(sub.currentPeriodEnd);
+      if (Number.isFinite(endMs) && nowMs > endMs + 48 * 60 * 60_000) {
+        return false;
+      }
+    }
+    return true;
+  }
+  if (sub.status === "cancelled" && sub.currentPeriodEnd) {
+    const endMs = Date.parse(sub.currentPeriodEnd);
+    return Number.isFinite(endMs) && endMs > nowMs;
+  }
+  return false;
+}
+
+export async function getUserSubscription(userId: string): Promise<UserSubscription> {
+  if (!db) {
+    memory.subscriptions ??= [];
+    const found = memory.subscriptions.find((item) => item.userId === userId);
+    return found ?? defaultInactiveSubscription(userId);
+  }
+  const [row] = await db
+    .select()
+    .from(userSubscriptions)
+    .where(eq(userSubscriptions.userId, userId))
+    .limit(1);
+  return row ? mapUserSubscription(row) : defaultInactiveSubscription(userId);
+}
+
+export type AgentEntitlementCheck = {
+  allowed: boolean;
+  reason?: "subscription_required" | "credits_exhausted";
+  message?: string;
+  subscription: UserSubscription;
+};
+
+/**
+ * Enforces the single-plan ($10/mo, no free tier) policy and available credit balance.
+ * Admins can always run builds for testing/administration while usage is still logged.
+ */
+export async function checkUserAgentEntitlement(viewer: Viewer): Promise<AgentEntitlementCheck> {
+  const subscription = await getUserSubscription(viewer.id);
+  if (viewer.isAdmin) {
+    return { allowed: true, subscription };
+  }
+  if (!hasActiveSubscriptionAccess(subscription)) {
+    return {
+      allowed: false,
+      reason: "subscription_required",
+      message: "Curator Pro ($10/month) is required to build apps. Subscribe to unlock 90 monthly credits.",
+      subscription,
+    };
+  }
+  if (subscription.creditsBalanceHundredths <= 0) {
+    return {
+      allowed: false,
+      reason: "credits_exhausted",
+      message: "You have used all available credits for this billing cycle. Credits renew automatically on your next billing date.",
+      subscription,
+    };
+  }
+  return { allowed: true, subscription };
+}
+
+export async function recordCreditUsage(input: {
+  userId: string;
+  projectId: string | null;
+  messageId: string | null;
+  mode: "build" | "plan" | "security";
+  complexityTier: CreditComplexityTier;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  turns: number;
+  toolCalls: number;
+  filesChanged: number;
+  commandsRun: number;
+  cloudActions: number;
+  durationMs: number;
+  creditsHundredths: number;
+  description: string;
+}): Promise<CreditUsageEvent> {
+  const safeCredits = Math.max(0, Math.trunc(input.creditsHundredths));
+  const now = new Date();
+
+  if (!db) {
+    memory.creditUsageEvents ??= [];
+    memory.subscriptions ??= [];
+    const event: CreditUsageEvent = {
+      id: crypto.randomUUID(),
+      userId: input.userId,
+      projectId: input.projectId,
+      messageId: input.messageId,
+      mode: input.mode,
+      complexityTier: input.complexityTier,
+      promptTokens: input.promptTokens,
+      completionTokens: input.completionTokens,
+      totalTokens: input.totalTokens,
+      turns: input.turns,
+      toolCalls: input.toolCalls,
+      filesChanged: input.filesChanged,
+      commandsRun: input.commandsRun,
+      cloudActions: input.cloudActions,
+      durationMs: input.durationMs,
+      creditsHundredths: safeCredits,
+      description: input.description,
+      createdAt: now.toISOString(),
+    };
+    memory.creditUsageEvents.unshift(event);
+    const subIdx = memory.subscriptions.findIndex((s) => s.userId === input.userId);
+    const current = subIdx >= 0 ? memory.subscriptions[subIdx] : defaultInactiveSubscription(input.userId);
+    const updated: UserSubscription = {
+      ...current,
+      creditsBalanceHundredths: Math.max(0, current.creditsBalanceHundredths - safeCredits),
+      creditsUsedThisPeriodHundredths: current.creditsUsedThisPeriodHundredths + safeCredits,
+      lifetimeCreditsUsedHundredths: current.lifetimeCreditsUsedHundredths + safeCredits,
+      updatedAt: now.toISOString(),
+    };
+    if (subIdx >= 0) memory.subscriptions[subIdx] = updated;
+    else memory.subscriptions.push(updated);
+    return event;
+  }
+
+  const [eventRow] = await db
+    .insert(creditUsageEvents)
+    .values({
+      userId: input.userId,
+      projectId: input.projectId,
+      messageId: input.messageId,
+      mode: input.mode,
+      complexityTier: input.complexityTier,
+      promptTokens: Math.max(0, Math.trunc(input.promptTokens)),
+      completionTokens: Math.max(0, Math.trunc(input.completionTokens)),
+      totalTokens: Math.max(0, Math.trunc(input.totalTokens)),
+      turns: Math.max(1, Math.trunc(input.turns)),
+      toolCalls: Math.max(0, Math.trunc(input.toolCalls)),
+      filesChanged: Math.max(0, Math.trunc(input.filesChanged)),
+      commandsRun: Math.max(0, Math.trunc(input.commandsRun)),
+      cloudActions: Math.max(0, Math.trunc(input.cloudActions)),
+      durationMs: Math.max(0, Math.trunc(input.durationMs)),
+      creditsHundredths: safeCredits,
+      description: input.description.slice(0, 300),
+    })
+    .returning();
+
+  // Atomically update the user's subscription balance and usage counters
+  await db
+    .insert(userSubscriptions)
+    .values({
+      userId: input.userId,
+      planCode: PRO_PLAN_CODE,
+      status: "inactive",
+      priceCents: PRO_PLAN_PRICE_CENTS,
+      currency: PRO_PLAN_CURRENCY,
+      monthlyCreditsHundredths: PRO_MONTHLY_CREDITS_HUNDREDTHS,
+      creditsBalanceHundredths: 0,
+      creditsUsedThisPeriodHundredths: safeCredits,
+      lifetimeCreditsUsedHundredths: safeCredits,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: userSubscriptions.userId,
+      set: {
+        creditsBalanceHundredths: sql`GREATEST(0, ${userSubscriptions.creditsBalanceHundredths} - ${safeCredits})`,
+        creditsUsedThisPeriodHundredths: sql`${userSubscriptions.creditsUsedThisPeriodHundredths} + ${safeCredits}`,
+        lifetimeCreditsUsedHundredths: sql`${userSubscriptions.lifetimeCreditsUsedHundredths} + ${safeCredits}`,
+        updatedAt: now,
+      },
+    });
+
+  return mapCreditUsageEvent(eventRow);
+}
+
+export async function listUserCreditUsage(userId: string, limit = 30): Promise<CreditUsageEvent[]> {
+  const safeLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
+  if (!db) {
+    memory.creditUsageEvents ??= [];
+    return memory.creditUsageEvents
+      .filter((event) => event.userId === userId)
+      .slice(0, safeLimit)
+      .map((event) => ({
+        ...event,
+        projectTitle: memory.projects.find((p) => p.id === event.projectId)?.title ?? null,
+      }));
+  }
+
+  const rows = await db
+    .select({
+      event: creditUsageEvents,
+      projectTitle: projects.title,
+    })
+    .from(creditUsageEvents)
+    .leftJoin(projects, eq(creditUsageEvents.projectId, projects.id))
+    .where(eq(creditUsageEvents.userId, userId))
+    .orderBy(desc(creditUsageEvents.createdAt))
+    .limit(safeLimit);
+
+  return rows.map((row) => mapCreditUsageEvent(row.event, { projectTitle: row.projectTitle ?? null }));
+}
+
+/**
+ * Claims a webhook event ID for idempotent processing.
+ * Returns `true` if this is the first time seeing the event, `false` if already processed.
+ */
+export async function claimBillingWebhookEvent(eventId: string, eventType: string): Promise<boolean> {
+  if (!db) {
+    memory.webhookEvents ??= new Set<string>();
+    if (memory.webhookEvents.has(eventId)) return false;
+    memory.webhookEvents.add(eventId);
+    return true;
+  }
+  const inserted = await db
+    .insert(billingWebhookEvents)
+    .values({ eventId, eventType })
+    .onConflictDoNothing({ target: billingWebhookEvents.eventId })
+    .returning({ eventId: billingWebhookEvents.eventId });
+  return inserted.length > 0;
+}
+
+export async function resolveUserIdForBilling(lookup: {
+  userId?: string | null;
+  dodoSubscriptionId?: string | null;
+  dodoCustomerId?: string | null;
+  email?: string | null;
+}): Promise<string | null> {
+  if (!db) {
+    memory.users ??= [];
+    memory.subscriptions ??= [];
+    if (lookup.userId && memory.users.some((u) => u.id === lookup.userId)) return lookup.userId;
+    if (lookup.dodoSubscriptionId) {
+      const sub = memory.subscriptions.find((s) => s.dodoSubscriptionId === lookup.dodoSubscriptionId);
+      if (sub) return sub.userId;
+    }
+    if (lookup.dodoCustomerId) {
+      const sub = memory.subscriptions.find((s) => s.dodoCustomerId === lookup.dodoCustomerId);
+      if (sub) return sub.userId;
+    }
+    if (lookup.email) {
+      const norm = lookup.email.trim().toLowerCase();
+      const user = memory.users.find((u) => u.email.trim().toLowerCase() === norm);
+      if (user) return user.id;
+    }
+    return lookup.userId ?? null;
+  }
+
+  if (lookup.userId) {
+    const [row] = await db.select({ id: users.id }).from(users).where(eq(users.id, lookup.userId)).limit(1);
+    if (row) return row.id;
+  }
+  if (lookup.dodoSubscriptionId) {
+    const [row] = await db
+      .select({ userId: userSubscriptions.userId })
+      .from(userSubscriptions)
+      .where(eq(userSubscriptions.dodoSubscriptionId, lookup.dodoSubscriptionId))
+      .limit(1);
+    if (row) return row.userId;
+  }
+  if (lookup.dodoCustomerId) {
+    const [row] = await db
+      .select({ userId: userSubscriptions.userId })
+      .from(userSubscriptions)
+      .where(eq(userSubscriptions.dodoCustomerId, lookup.dodoCustomerId))
+      .limit(1);
+    if (row) return row.userId;
+  }
+  if (lookup.email) {
+    const norm = lookup.email.trim().toLowerCase();
+    const [row] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(sql`lower(${users.email}) = ${norm}`)
+      .limit(1);
+    if (row) return row.id;
+  }
+  return null;
+}
+
+export async function applyDodoSubscriptionEvent(input: {
+  userId: string;
+  eventType: string;
+  customerId?: string | null;
+  subscriptionId?: string | null;
+  productId?: string | null;
+  paymentId?: string | null;
+  currentPeriodStart?: string | null;
+  currentPeriodEnd?: string | null;
+  cancelAtPeriodEnd?: boolean | null;
+}): Promise<UserSubscription> {
+  const existing = await getUserSubscription(input.userId);
+  const now = new Date();
+  const nextPeriodStart = input.currentPeriodStart
+    ? new Date(input.currentPeriodStart)
+    : existing.currentPeriodStart
+      ? new Date(existing.currentPeriodStart)
+      : now;
+  const fallbackEnd = new Date(nextPeriodStart.getTime() + 31 * 24 * 60 * 60_000);
+  const nextPeriodEnd = input.currentPeriodEnd
+    ? new Date(input.currentPeriodEnd)
+    : existing.currentPeriodEnd
+      ? new Date(existing.currentPeriodEnd)
+      : fallbackEnd;
+
+  let status: SubscriptionStatus = existing.status;
+  let creditsBalanceHundredths = existing.creditsBalanceHundredths;
+  let creditsUsedThisPeriodHundredths = existing.creditsUsedThisPeriodHundredths;
+  let cancelAtPeriodEnd = input.cancelAtPeriodEnd ?? existing.cancelAtPeriodEnd;
+  let lastPaymentId = input.paymentId ?? existing.lastPaymentId;
+  let lastPaymentAt = existing.lastPaymentAt ? new Date(existing.lastPaymentAt) : null;
+
+  switch (input.eventType) {
+    case "subscription.active": {
+      const isNewActivation =
+        existing.status !== "active" ||
+        (input.subscriptionId && input.subscriptionId !== existing.dodoSubscriptionId) ||
+        existing.creditsBalanceHundredths <= 0;
+      status = "active";
+      cancelAtPeriodEnd = false;
+      if (isNewActivation) {
+        creditsBalanceHundredths = Math.max(existing.creditsBalanceHundredths, PRO_MONTHLY_CREDITS_HUNDREDTHS);
+        creditsUsedThisPeriodHundredths = 0;
+      }
+      if (input.paymentId) {
+        lastPaymentId = input.paymentId;
+        lastPaymentAt = now;
+      }
+      break;
+    }
+    case "subscription.renewed": {
+      status = "active";
+      cancelAtPeriodEnd = false;
+      // Lovable-style rollover: carry unused credits forward up to 2x monthly cap
+      creditsBalanceHundredths = Math.min(
+        PRO_MAX_ROLLOVER_CREDITS_HUNDREDTHS,
+        existing.creditsBalanceHundredths + PRO_MONTHLY_CREDITS_HUNDREDTHS,
+      );
+      creditsUsedThisPeriodHundredths = 0;
+      if (input.paymentId) {
+        lastPaymentId = input.paymentId;
+        lastPaymentAt = now;
+      }
+      break;
+    }
+    case "subscription.updated":
+    case "subscription.plan_changed": {
+      if (existing.status === "inactive") status = "active";
+      break;
+    }
+    case "subscription.on_hold":
+    case "subscription.past_due": {
+      status = "on_hold";
+      break;
+    }
+    case "subscription.cancelled": {
+      status = "cancelled";
+      cancelAtPeriodEnd = true;
+      break;
+    }
+    case "subscription.expired": {
+      status = "expired";
+      cancelAtPeriodEnd = true;
+      break;
+    }
+    case "subscription.failed": {
+      status = "failed";
+      break;
+    }
+    case "payment.succeeded": {
+      if (input.paymentId) {
+        lastPaymentId = input.paymentId;
+        lastPaymentAt = now;
+      }
+      break;
+    }
+    case "payment.failed": {
+      if (existing.status === "active") {
+        status = "on_hold";
+      }
+      break;
+    }
+    default:
+      break;
+  }
+
+  const nextSub: UserSubscription = {
+    userId: input.userId,
+    planCode: PRO_PLAN_CODE,
+    status,
+    priceCents: PRO_PLAN_PRICE_CENTS,
+    currency: PRO_PLAN_CURRENCY,
+    dodoCustomerId: input.customerId ?? existing.dodoCustomerId,
+    dodoSubscriptionId: input.subscriptionId ?? existing.dodoSubscriptionId,
+    dodoProductId: input.productId ?? existing.dodoProductId,
+    monthlyCreditsHundredths: PRO_MONTHLY_CREDITS_HUNDREDTHS,
+    creditsBalanceHundredths,
+    creditsUsedThisPeriodHundredths,
+    lifetimeCreditsUsedHundredths: existing.lifetimeCreditsUsedHundredths,
+    currentPeriodStart: nextPeriodStart.toISOString(),
+    currentPeriodEnd: nextPeriodEnd.toISOString(),
+    cancelAtPeriodEnd,
+    lastPaymentId,
+    lastPaymentAt: lastPaymentAt?.toISOString() ?? null,
+    createdAt: existing.createdAt,
+    updatedAt: now.toISOString(),
+  };
+
+  if (!db) {
+    memory.subscriptions ??= [];
+    const idx = memory.subscriptions.findIndex((s) => s.userId === input.userId);
+    if (idx >= 0) memory.subscriptions[idx] = nextSub;
+    else memory.subscriptions.push(nextSub);
+    return nextSub;
+  }
+
+  const [row] = await db
+    .insert(userSubscriptions)
+    .values({
+      userId: input.userId,
+      planCode: nextSub.planCode,
+      status: nextSub.status,
+      priceCents: nextSub.priceCents,
+      currency: nextSub.currency,
+      dodoCustomerId: nextSub.dodoCustomerId,
+      dodoSubscriptionId: nextSub.dodoSubscriptionId,
+      dodoProductId: nextSub.dodoProductId,
+      monthlyCreditsHundredths: nextSub.monthlyCreditsHundredths,
+      creditsBalanceHundredths: nextSub.creditsBalanceHundredths,
+      creditsUsedThisPeriodHundredths: nextSub.creditsUsedThisPeriodHundredths,
+      lifetimeCreditsUsedHundredths: nextSub.lifetimeCreditsUsedHundredths,
+      currentPeriodStart: nextPeriodStart,
+      currentPeriodEnd: nextPeriodEnd,
+      cancelAtPeriodEnd: nextSub.cancelAtPeriodEnd,
+      lastPaymentId: nextSub.lastPaymentId,
+      lastPaymentAt,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: userSubscriptions.userId,
+      set: {
+        status: nextSub.status,
+        dodoCustomerId: nextSub.dodoCustomerId,
+        dodoSubscriptionId: nextSub.dodoSubscriptionId,
+        dodoProductId: nextSub.dodoProductId,
+        monthlyCreditsHundredths: nextSub.monthlyCreditsHundredths,
+        creditsBalanceHundredths: nextSub.creditsBalanceHundredths,
+        creditsUsedThisPeriodHundredths: nextSub.creditsUsedThisPeriodHundredths,
+        currentPeriodStart: nextPeriodStart,
+        currentPeriodEnd: nextPeriodEnd,
+        cancelAtPeriodEnd: nextSub.cancelAtPeriodEnd,
+        lastPaymentId: nextSub.lastPaymentId,
+        lastPaymentAt,
+        updatedAt: now,
+      },
+    })
+    .returning();
+
+  return mapUserSubscription(row);
+}
+
+export async function adminAdjustUserBilling(input: {
+  userId: string;
+  grantCreditsHundredths?: number;
+  setCreditsBalanceHundredths?: number;
+  monthlyCreditsHundredths?: number;
+  setStatus?: SubscriptionStatus;
+  extendDays?: number;
+}): Promise<UserSubscription> {
+  const existing = await getUserSubscription(input.userId);
+  const now = new Date();
+  const nextBalance =
+    typeof input.setCreditsBalanceHundredths === "number"
+      ? Math.max(0, Math.trunc(input.setCreditsBalanceHundredths))
+      : Math.max(0, existing.creditsBalanceHundredths + Math.trunc(input.grantCreditsHundredths ?? 0));
+  const nextMonthly =
+    typeof input.monthlyCreditsHundredths === "number" && input.monthlyCreditsHundredths > 0
+      ? Math.trunc(input.monthlyCreditsHundredths)
+      : existing.monthlyCreditsHundredths;
+  const nextStatus = input.setStatus ?? existing.status;
+  const nextCancelAtPeriodEnd = nextStatus === "active" ? false : nextStatus === "cancelled" ? true : existing.cancelAtPeriodEnd;
+
+  const existingEndMs = existing.currentPeriodEnd ? Date.parse(existing.currentPeriodEnd) : Number.NaN;
+  const hasFuturePeriodEnd = Number.isFinite(existingEndMs) && existingEndMs > now.getTime();
+  const periodDays = Math.max(1, Math.min(365, Math.trunc(input.extendDays ?? 31)));
+
+  let periodStart = existing.currentPeriodStart ? new Date(existing.currentPeriodStart) : now;
+  let periodEnd = existing.currentPeriodEnd ? new Date(existing.currentPeriodEnd) : null;
+
+  if (nextStatus === "active" && (!hasFuturePeriodEnd || typeof input.extendDays === "number")) {
+    periodStart = now;
+    periodEnd = new Date(now.getTime() + periodDays * 24 * 60 * 60_000);
+  }
+
+  if (!db) {
+    memory.subscriptions ??= [];
+    const updated: UserSubscription = {
+      ...existing,
+      status: nextStatus,
+      monthlyCreditsHundredths: nextMonthly,
+      creditsBalanceHundredths: nextBalance,
+      cancelAtPeriodEnd: nextCancelAtPeriodEnd,
+      currentPeriodStart: periodStart.toISOString(),
+      currentPeriodEnd: periodEnd?.toISOString() ?? null,
+      updatedAt: now.toISOString(),
+    };
+    const idx = memory.subscriptions.findIndex((s) => s.userId === input.userId);
+    if (idx >= 0) memory.subscriptions[idx] = updated;
+    else memory.subscriptions.push(updated);
+    return updated;
+  }
+
+  const [row] = await db
+    .insert(userSubscriptions)
+    .values({
+      userId: input.userId,
+      planCode: PRO_PLAN_CODE,
+      status: nextStatus,
+      priceCents: PRO_PLAN_PRICE_CENTS,
+      currency: PRO_PLAN_CURRENCY,
+      monthlyCreditsHundredths: nextMonthly,
+      creditsBalanceHundredths: nextBalance,
+      cancelAtPeriodEnd: nextCancelAtPeriodEnd,
+      currentPeriodStart: periodStart,
+      currentPeriodEnd: periodEnd,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: userSubscriptions.userId,
+      set: {
+        status: nextStatus,
+        monthlyCreditsHundredths: nextMonthly,
+        creditsBalanceHundredths: nextBalance,
+        cancelAtPeriodEnd: nextCancelAtPeriodEnd,
+        currentPeriodStart: periodStart,
+        currentPeriodEnd: periodEnd,
+        updatedAt: now,
+      },
+    })
+    .returning();
+
+  return mapUserSubscription(row);
+}
+
+const METHOD_LABELS: Record<AuthMethod, string> = {
+  password: "Email & Password",
+  oauth: "OAuth (Social)",
+  passwordless: "Passwordless",
+  sso: "Enterprise SSO",
+};
+
+export async function getAdminDashboardData(): Promise<{
+  stats: AdminOverviewStats;
+  users: AdminUserSummary[];
+  recentUsage: CreditUsageEvent[];
+}> {
+  const nowMs = Date.now();
+  const sevenDaysAgoMs = nowMs - 7 * 24 * 60 * 60_000;
+  const thirtyDaysAgoMs = nowMs - 30 * 24 * 60 * 60_000;
+
+  let rawUsers: {
+    id: string;
+    email: string;
+    name: string | null;
+    avatarUrl: string | null;
+    authProvider: string;
+    authProviderLabel: string;
+    authMethod: AuthMethod;
+    createdAt: string;
+    lastSeenAt: string;
+  }[] = [];
+  const subByUser = new Map<string, UserSubscription>();
+  const projectCountByUser = new Map<string, number>();
+  const usageStatsByUser = new Map<string, { runs: number; tokens: number; credits: number }>();
+  let totalProjects = 0;
+  let totalAgentRuns = 0;
+  let totalTokens = 0;
+  let totalCreditsUsedHundredths = 0;
+  let recentUsage: CreditUsageEvent[] = [];
+
+  if (!db) {
+    memory.users ??= [];
+    memory.subscriptions ??= [];
+    memory.creditUsageEvents ??= [];
+
+    rawUsers = memory.users.map((u) => ({
+      id: u.id,
+      email: u.email,
+      name: u.name,
+      avatarUrl: u.avatarUrl,
+      authProvider: u.authProvider,
+      authProviderLabel: u.authProviderLabel,
+      authMethod: u.authMethod,
+      createdAt: u.createdAt,
+      lastSeenAt: u.lastSeenAt,
+    }));
+    for (const s of memory.subscriptions) subByUser.set(s.userId, s);
+    for (const p of memory.projects) {
+      totalProjects += 1;
+      projectCountByUser.set(p.ownerId, (projectCountByUser.get(p.ownerId) ?? 0) + 1);
+    }
+    for (const ev of memory.creditUsageEvents) {
+      totalAgentRuns += 1;
+      totalTokens += ev.totalTokens;
+      totalCreditsUsedHundredths += ev.creditsHundredths;
+      const cur = usageStatsByUser.get(ev.userId) ?? { runs: 0, tokens: 0, credits: 0 };
+      cur.runs += 1;
+      cur.tokens += ev.totalTokens;
+      cur.credits += ev.creditsHundredths;
+      usageStatsByUser.set(ev.userId, cur);
+    }
+    const userMap = new Map(rawUsers.map((u) => [u.id, u]));
+    recentUsage = memory.creditUsageEvents.slice(0, 40).map((ev) => ({
+      ...ev,
+      userEmail: userMap.get(ev.userId)?.email,
+      userName: userMap.get(ev.userId)?.name ?? null,
+      projectTitle: memory.projects.find((p) => p.id === ev.projectId)?.title ?? null,
+    }));
+  } else {
+    const [userRows, subRows, projectAggRows, usageAggRows, recentUsageRows] = await Promise.all([
+      db.select().from(users).orderBy(desc(users.createdAt)),
+      db.select().from(userSubscriptions),
+      db
+        .select({
+          ownerId: projects.ownerId,
+          count: sql<number>`count(*)::int`,
+        })
+        .from(projects)
+        .groupBy(projects.ownerId),
+      db
+        .select({
+          userId: creditUsageEvents.userId,
+          runs: sql<number>`count(*)::int`,
+          tokens: sql<number>`coalesce(sum(${creditUsageEvents.totalTokens}), 0)::bigint`,
+          credits: sql<number>`coalesce(sum(${creditUsageEvents.creditsHundredths}), 0)::bigint`,
+        })
+        .from(creditUsageEvents)
+        .groupBy(creditUsageEvents.userId),
+      db
+        .select({
+          event: creditUsageEvents,
+          userEmail: users.email,
+          userName: users.name,
+          projectTitle: projects.title,
+        })
+        .from(creditUsageEvents)
+        .leftJoin(users, eq(creditUsageEvents.userId, users.id))
+        .leftJoin(projects, eq(creditUsageEvents.projectId, projects.id))
+        .orderBy(desc(creditUsageEvents.createdAt))
+        .limit(40),
+    ]);
+
+    rawUsers = userRows.map((u) => ({
+      id: u.id,
+      email: u.email,
+      name: u.name ?? null,
+      avatarUrl: u.avatarUrl ?? null,
+      authProvider: u.authProvider || "unknown",
+      authProviderLabel: u.authProviderLabel || "Unknown",
+      authMethod: (["password", "oauth", "passwordless", "sso"].includes(u.authMethod)
+        ? u.authMethod
+        : "oauth") as AuthMethod,
+      createdAt: u.createdAt.toISOString(),
+      lastSeenAt: (u.lastSeenAt ?? u.updatedAt).toISOString(),
+    }));
+
+    for (const s of subRows) {
+      subByUser.set(s.userId, mapUserSubscription(s));
+    }
+    for (const row of projectAggRows) {
+      const count = Number(row.count ?? 0);
+      totalProjects += count;
+      projectCountByUser.set(row.ownerId, count);
+    }
+    for (const row of usageAggRows) {
+      const runs = Number(row.runs ?? 0);
+      const tokens = Number(row.tokens ?? 0);
+      const credits = Number(row.credits ?? 0);
+      totalAgentRuns += runs;
+      totalTokens += tokens;
+      totalCreditsUsedHundredths += credits;
+      usageStatsByUser.set(row.userId, { runs, tokens, credits });
+    }
+    recentUsage = recentUsageRows.map((row) =>
+      mapCreditUsageEvent(row.event, {
+        userEmail: row.userEmail ?? undefined,
+        userName: row.userName ?? null,
+        projectTitle: row.projectTitle ?? null,
+      }),
+    );
+  }
+
+  let newUsersLast7Days = 0;
+  let newUsersLast30Days = 0;
+  let activeSubscribers = 0;
+  const providerCounts = new Map<string, { label: string; method: AuthMethod; count: number }>();
+  const methodCounts = new Map<AuthMethod, number>();
+
+  const summaries: AdminUserSummary[] = rawUsers.map((u) => {
+    const createdMs = Date.parse(u.createdAt);
+    if (Number.isFinite(createdMs)) {
+      if (createdMs >= sevenDaysAgoMs) newUsersLast7Days += 1;
+      if (createdMs >= thirtyDaysAgoMs) newUsersLast30Days += 1;
+    }
+
+    const sub = subByUser.get(u.id) ?? defaultInactiveSubscription(u.id);
+    if (hasActiveSubscriptionAccess(sub, nowMs)) {
+      activeSubscribers += 1;
+    }
+
+    const pEntry = providerCounts.get(u.authProvider) ?? {
+      label: u.authProviderLabel,
+      method: u.authMethod,
+      count: 0,
+    };
+    pEntry.count += 1;
+    providerCounts.set(u.authProvider, pEntry);
+    methodCounts.set(u.authMethod, (methodCounts.get(u.authMethod) ?? 0) + 1);
+
+    const usage = usageStatsByUser.get(u.id) ?? { runs: 0, tokens: 0, credits: 0 };
+
+    return {
+      id: u.id,
+      email: u.email,
+      name: u.name,
+      avatarUrl: u.avatarUrl,
+      authProvider: u.authProvider,
+      authProviderLabel: u.authProviderLabel,
+      authMethod: u.authMethod,
+      isAdmin: isAdminEmail(u.email),
+      createdAt: u.createdAt,
+      lastSeenAt: u.lastSeenAt,
+      subscriptionStatus: sub.status,
+      dodoCustomerId: sub.dodoCustomerId,
+      dodoSubscriptionId: sub.dodoSubscriptionId,
+      creditsBalanceHundredths: sub.creditsBalanceHundredths,
+      creditsUsedThisPeriodHundredths: sub.creditsUsedThisPeriodHundredths,
+      lifetimeCreditsUsedHundredths: Math.max(sub.lifetimeCreditsUsedHundredths, usage.credits),
+      monthlyCreditsHundredths: sub.monthlyCreditsHundredths,
+      currentPeriodEnd: sub.currentPeriodEnd,
+      cancelAtPeriodEnd: sub.cancelAtPeriodEnd,
+      projectCount: projectCountByUser.get(u.id) ?? 0,
+      agentRunCount: usage.runs,
+      totalTokens: usage.tokens,
+    };
+  });
+
+  const totalUsers = summaries.length;
+  const providerBreakdown = [...providerCounts.entries()]
+    .map(([provider, item]) => ({
+      provider,
+      label: item.label,
+      method: item.method,
+      count: item.count,
+      percentage: totalUsers > 0 ? Math.round((item.count / totalUsers) * 100) : 0,
+    }))
+    .sort((a, b) => b.count - a.count);
+
+  const methodBreakdown = (["password", "oauth", "passwordless", "sso"] as const)
+    .map((method) => {
+      const count = methodCounts.get(method) ?? 0;
+      return {
+        method,
+        label: METHOD_LABELS[method],
+        count,
+        percentage: totalUsers > 0 ? Math.round((count / totalUsers) * 100) : 0,
+      };
+    })
+    .filter((item) => item.count > 0);
+
+  return {
+    stats: {
+      totalUsers,
+      newUsersLast7Days,
+      newUsersLast30Days,
+      activeSubscribers,
+      estimatedMrrCents: activeSubscribers * PRO_PLAN_PRICE_CENTS,
+      totalProjects,
+      totalAgentRuns,
+      totalCreditsUsedHundredths,
+      totalTokens,
+      providerBreakdown,
+      methodBreakdown,
+    },
+    users: summaries,
+    recentUsage,
+  };
+}
+
+// ── Preview Access Control, Private Email Shares & Presence Lease ────────
+
+function mapPreviewShare(row: typeof projectPreviewShares.$inferSelect): ProjectPreviewShare {
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    email: row.email,
+    shareKey: row.shareKey,
+    note: row.note ?? null,
+    expiresAt: row.expiresAt?.toISOString() ?? null,
+    lastAccessedAt: row.lastAccessedAt?.toISOString() ?? null,
+    accessCount: row.accessCount,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+export async function listProjectPreviewShares(projectId: string): Promise<ProjectPreviewShare[]> {
+  if (!db) {
+    memory.previewShares ??= [];
+    return memory.previewShares
+      .filter((item) => item.projectId === projectId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map(({ ownerId: _ignored, ...rest }) => {
+        void _ignored;
+        return rest;
+      });
+  }
+  const rows = await db
+    .select()
+    .from(projectPreviewShares)
+    .where(eq(projectPreviewShares.projectId, projectId))
+    .orderBy(desc(projectPreviewShares.createdAt));
+  return rows.map(mapPreviewShare);
+}
+
+export async function getProjectPreviewAccessState(project: Project): Promise<PreviewAccessState> {
+  const shares = await listProjectPreviewShares(project.id);
+  const mode: PreviewAccessMode =
+    project.previewAccessMode === "public" || project.previewAccessMode === "private"
+      ? project.previewAccessMode
+      : "owner";
+  const publicActive = isPublicPreviewActive(mode, project.previewPublicExpiresAt);
+  return {
+    mode: mode === "public" && !publicActive ? (shares.length > 0 ? "private" : "owner") : mode,
+    publicExpiresAt: publicActive ? (project.previewPublicExpiresAt ?? null) : null,
+    publicActive,
+    hasPasscode: Boolean(project.previewHasPasscode),
+    accessVersion: project.previewAccessVersion ?? 1,
+    activeUntil: project.previewActiveUntil ?? null,
+    previewUrl: project.previewUrl,
+    isPublished: Boolean(project.publishedAt),
+    shares,
+  };
+}
+
+export async function updateProjectPreviewAccess(
+  projectId: string,
+  ownerId: string,
+  patch: {
+    mode?: PreviewAccessMode;
+    publicDurationHours?: number;
+    passcode?: string | null;
+    bumpVersion?: boolean;
+  },
+): Promise<Project | null> {
+  const current = await getProject(projectId, ownerId);
+  if (!current) return null;
+
+  const nextMode = patch.mode ?? current.previewAccessMode ?? "owner";
+  let nextPublicExpiresAt: Date | null = current.previewPublicExpiresAt
+    ? new Date(current.previewPublicExpiresAt)
+    : null;
+
+  if (nextMode === "public") {
+    const hours = Math.max(1, Math.min(168, Math.trunc(patch.publicDurationHours ?? 24)));
+    nextPublicExpiresAt = new Date(Date.now() + hours * 60 * 60_000);
+  } else if (patch.mode !== undefined) {
+    nextPublicExpiresAt = null;
+  }
+
+  const nextVersion =
+    (current.previewAccessVersion ?? 1) + (patch.bumpVersion || patch.mode === "owner" || patch.passcode !== undefined ? 1 : 0);
+  const passcodeHashUpdate =
+    patch.passcode === undefined
+      ? undefined
+      : patch.passcode === null || !patch.passcode.trim()
+        ? null
+        : hashPreviewPasscode(patch.passcode.trim());
+
+  if (!db) {
+    const idx = memory.projects.findIndex((p) => p.id === projectId && p.ownerId === ownerId);
+    if (idx < 0) return null;
+    memory.previewPasscodeHashes ??= new Map();
+    if (passcodeHashUpdate !== undefined) {
+      memory.previewPasscodeHashes.set(projectId, passcodeHashUpdate);
+    }
+    const updated: Project = {
+      ...memory.projects[idx],
+      previewAccessMode: nextMode,
+      previewPublicExpiresAt: nextPublicExpiresAt?.toISOString() ?? null,
+      previewHasPasscode:
+        passcodeHashUpdate !== undefined ? Boolean(passcodeHashUpdate) : Boolean(memory.projects[idx].previewHasPasscode),
+      previewAccessVersion: nextVersion,
+      updatedAt: new Date().toISOString(),
+    };
+    memory.projects[idx] = updated;
+    return updated;
+  }
+
+  const [row] = await db
+    .update(projects)
+    .set({
+      previewAccessMode: nextMode,
+      previewPublicExpiresAt: nextPublicExpiresAt,
+      ...(passcodeHashUpdate !== undefined ? { previewPasscodeHash: passcodeHashUpdate } : {}),
+      previewAccessVersion: nextVersion,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(projects.id, projectId), eq(projects.ownerId, ownerId)))
+    .returning();
+  return row ? mapProject(row) : null;
+}
+
+export async function verifyProjectPreviewPasscode(projectId: string, candidate: string): Promise<boolean> {
+  if (!candidate.trim()) return false;
+  if (!db) {
+    memory.previewPasscodeHashes ??= new Map();
+    return verifyPreviewPasscode(candidate.trim(), memory.previewPasscodeHashes.get(projectId) ?? null);
+  }
+  const [row] = await db
+    .select({ hash: projects.previewPasscodeHash })
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .limit(1);
+  return verifyPreviewPasscode(candidate.trim(), row?.hash ?? null);
+}
+
+export async function createOrUpdateProjectPreviewShare(input: {
+  projectId: string;
+  ownerId: string;
+  email: string;
+  note?: string | null;
+  expiresInHours?: number | null;
+}): Promise<ProjectPreviewShare> {
+  const email = normalizeInviteEmail(input.email);
+  const shareKey = createPreviewShareKey();
+  const expiresAt =
+    typeof input.expiresInHours === "number" && input.expiresInHours > 0
+      ? new Date(Date.now() + Math.min(24 * 30, input.expiresInHours) * 60 * 60_000)
+      : null;
+  const note = input.note?.trim() ? input.note.trim().slice(0, 120) : null;
+
+  if (!db) {
+    memory.previewShares ??= [];
+    const existingIdx = memory.previewShares.findIndex(
+      (item) => item.projectId === input.projectId && item.email === email,
+    );
+    const nowIso = new Date().toISOString();
+    if (existingIdx >= 0) {
+      const updated = {
+        ...memory.previewShares[existingIdx],
+        shareKey,
+        note,
+        expiresAt: expiresAt?.toISOString() ?? null,
+      };
+      memory.previewShares[existingIdx] = updated;
+      const { ownerId: _ignored, ...view } = updated;
+      void _ignored;
+      return view;
+    }
+    const created: ProjectPreviewShare & { ownerId: string } = {
+      id: crypto.randomUUID(),
+      projectId: input.projectId,
+      ownerId: input.ownerId,
+      email,
+      shareKey,
+      note,
+      expiresAt: expiresAt?.toISOString() ?? null,
+      lastAccessedAt: null,
+      accessCount: 0,
+      createdAt: nowIso,
+    };
+    memory.previewShares.unshift(created);
+    const { ownerId: _ignored, ...view } = created;
+    void _ignored;
+    return view;
+  }
+
+  const [row] = await db
+    .insert(projectPreviewShares)
+    .values({
+      projectId: input.projectId,
+      ownerId: input.ownerId,
+      email,
+      shareKey,
+      note,
+      expiresAt,
+    })
+    .onConflictDoUpdate({
+      target: [projectPreviewShares.projectId, projectPreviewShares.email],
+      set: {
+        shareKey,
+        note,
+        expiresAt,
+      },
+    })
+    .returning();
+
+  // If the project was owner-only, promote to "private" so invited users can access it immediately.
+  const [proj] = await db
+    .select({ mode: projects.previewAccessMode })
+    .from(projects)
+    .where(and(eq(projects.id, input.projectId), eq(projects.ownerId, input.ownerId)))
+    .limit(1);
+  if (proj && proj.mode === "owner") {
+    await db
+      .update(projects)
+      .set({ previewAccessMode: "private", updatedAt: new Date() })
+      .where(and(eq(projects.id, input.projectId), eq(projects.ownerId, input.ownerId)));
+  }
+
+  return mapPreviewShare(row);
+}
+
+export async function revokeProjectPreviewShare(
+  projectId: string,
+  ownerId: string,
+  shareId: string,
+): Promise<boolean> {
+  if (!db) {
+    memory.previewShares ??= [];
+    const before = memory.previewShares.length;
+    memory.previewShares = memory.previewShares.filter(
+      (item) => !(item.id === shareId && item.projectId === projectId && item.ownerId === ownerId),
+    );
+    if (memory.previewShares.length === before) return false;
+    const pIdx = memory.projects.findIndex((p) => p.id === projectId && p.ownerId === ownerId);
+    if (pIdx >= 0) {
+      memory.projects[pIdx] = {
+        ...memory.projects[pIdx],
+        previewAccessVersion: (memory.projects[pIdx].previewAccessVersion ?? 1) + 1,
+      };
+    }
+    return true;
+  }
+
+  const deleted = await db
+    .delete(projectPreviewShares)
+    .where(
+      and(
+        eq(projectPreviewShares.id, shareId),
+        eq(projectPreviewShares.projectId, projectId),
+        eq(projectPreviewShares.ownerId, ownerId),
+      ),
+    )
+    .returning({ id: projectPreviewShares.id });
+
+  if (deleted.length === 0) return false;
+
+  // Bump previewAccessVersion so any active guest cookie for the revoked share stops working immediately.
+  await db
+    .update(projects)
+    .set({
+      previewAccessVersion: sql`${projects.previewAccessVersion} + 1`,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(projects.id, projectId), eq(projects.ownerId, ownerId)));
+
+  return true;
+}
+
+export async function revokeAllProjectPreviewShares(projectId: string, ownerId: string): Promise<void> {
+  if (!db) {
+    memory.previewShares = (memory.previewShares ?? []).filter(
+      (item) => !(item.projectId === projectId && item.ownerId === ownerId),
+    );
+    await updateProjectPreviewAccess(projectId, ownerId, {
+      mode: "owner",
+      passcode: null,
+      bumpVersion: true,
+    });
+    return;
+  }
+  await db
+    .delete(projectPreviewShares)
+    .where(and(eq(projectPreviewShares.projectId, projectId), eq(projectPreviewShares.ownerId, ownerId)));
+  await updateProjectPreviewAccess(projectId, ownerId, {
+    mode: "owner",
+    passcode: null,
+    bumpVersion: true,
+  });
+}
+
+export async function findPreviewShareByKey(
+  projectId: string,
+  shareKey: string,
+): Promise<ProjectPreviewShare | null> {
+  if (!shareKey.trim()) return null;
+  if (!db) {
+    const found = (memory.previewShares ?? []).find(
+      (item) => item.projectId === projectId && item.shareKey === shareKey.trim(),
+    );
+    if (!found) return null;
+    const { ownerId: _ignored, ...view } = found;
+    void _ignored;
+    return view;
+  }
+  const [row] = await db
+    .select()
+    .from(projectPreviewShares)
+    .where(
+      and(
+        eq(projectPreviewShares.projectId, projectId),
+        eq(projectPreviewShares.shareKey, shareKey.trim()),
+      ),
+    )
+    .limit(1);
+  return row ? mapPreviewShare(row) : null;
+}
+
+export async function findPreviewShareByEmail(
+  projectId: string,
+  email: string,
+): Promise<ProjectPreviewShare | null> {
+  const norm = normalizeInviteEmail(email);
+  if (!norm) return null;
+  if (!db) {
+    const found = (memory.previewShares ?? []).find(
+      (item) => item.projectId === projectId && item.email === norm,
+    );
+    if (!found) return null;
+    const { ownerId: _ignored, ...view } = found;
+    void _ignored;
+    return view;
+  }
+  const [row] = await db
+    .select()
+    .from(projectPreviewShares)
+    .where(and(eq(projectPreviewShares.projectId, projectId), eq(projectPreviewShares.email, norm)))
+    .limit(1);
+  return row ? mapPreviewShare(row) : null;
+}
+
+export async function recordPreviewShareAccess(shareId: string): Promise<void> {
+  const now = new Date();
+  if (!db) {
+    const item = (memory.previewShares ?? []).find((s) => s.id === shareId);
+    if (item) {
+      item.accessCount += 1;
+      item.lastAccessedAt = now.toISOString();
+    }
+    return;
+  }
+  await db
+    .update(projectPreviewShares)
+    .set({
+      accessCount: sql`${projectPreviewShares.accessCount} + 1`,
+      lastAccessedAt: now,
+    })
+    .where(eq(projectPreviewShares.id, shareId));
+}
+
+export async function touchProjectPreviewSession(projectId: string, leaseMs: number): Promise<string> {
+  const until = new Date(Date.now() + Math.max(15_000, leaseMs));
+  if (!db) {
+    const item = memory.projects.find((p) => p.id === projectId);
+    if (item) item.previewActiveUntil = until.toISOString();
+    return until.toISOString();
+  }
+  await db
+    .update(projects)
+    .set({ previewActiveUntil: until })
+    .where(eq(projects.id, projectId));
+  return until.toISOString();
+}
+
+export async function clearProjectPreviewSession(projectId: string, ownerId: string): Promise<void> {
+  if (!db) {
+    const item = memory.projects.find((p) => p.id === projectId && p.ownerId === ownerId);
+    if (item) item.previewActiveUntil = null;
+    return;
+  }
+  await db
+    .update(projects)
+    .set({ previewActiveUntil: null })
+    .where(and(eq(projects.id, projectId), eq(projects.ownerId, ownerId)));
+}
+
+export async function hasActivePrivatePreviewShare(projectId: string): Promise<boolean> {
+  const shares = await listProjectPreviewShares(projectId);
+  const nowMs = Date.now();
+  return shares.some((s) => !s.expiresAt || Date.parse(s.expiresAt) > nowMs);
+}
+
+export async function getProjectPreviewLeaseStatus(projectId: string): Promise<string | null> {
+  if (!db) {
+    return memory.projects.find((p) => p.id === projectId)?.previewActiveUntil ?? null;
+  }
+  const [row] = await db
+    .select({ previewActiveUntil: projects.previewActiveUntil })
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .limit(1);
+  return row?.previewActiveUntil?.toISOString() ?? null;
 }

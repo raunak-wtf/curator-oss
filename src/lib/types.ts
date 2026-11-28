@@ -1,5 +1,32 @@
 export type ProjectStatus = "draft" | "building" | "publishing" | "ready" | "published" | "error";
 
+/** Who can open a project's live preview URL (independent of Published website access). */
+export type PreviewAccessMode = "owner" | "public" | "private";
+
+export type ProjectPreviewShare = {
+  id: string;
+  projectId: string;
+  email: string;
+  shareKey: string;
+  note: string | null;
+  expiresAt: string | null;
+  lastAccessedAt: string | null;
+  accessCount: number;
+  createdAt: string;
+};
+
+export type PreviewAccessState = {
+  mode: PreviewAccessMode;
+  publicExpiresAt: string | null;
+  publicActive: boolean;
+  hasPasscode: boolean;
+  accessVersion: number;
+  activeUntil: string | null;
+  previewUrl: string | null;
+  isPublished: boolean;
+  shares: ProjectPreviewShare[];
+};
+
 /** "build" projects make apps; "security" projects review a GitHub repository without changing it. */
 export type ProjectMode = "build" | "security";
 
@@ -63,6 +90,12 @@ export type Project = {
   publishedAt: string | null;
   showBadge: boolean;
   publicRemix: boolean;
+  /** Preview URL access policy: owner-only by default, 24h public, or private email invites. */
+  previewAccessMode?: PreviewAccessMode;
+  previewPublicExpiresAt?: string | null;
+  previewHasPasscode?: boolean;
+  previewAccessVersion?: number;
+  previewActiveUntil?: string | null;
   /** Project-specific instructions ("Knowledge") automatically included in every Build/Plan prompt. */
   customInstructions?: string;
   mode: ProjectMode;
@@ -162,12 +195,131 @@ export type DomainSetup = {
   message: string | null;
 };
 
+export type AuthMethod = "password" | "oauth" | "passwordless" | "sso";
+
 export type Viewer = {
   id: string;
   email: string;
   emailVerified: boolean;
   name: string;
   picture?: string;
+  authProvider?: string;
+  authProviderLabel?: string;
+  authMethod?: AuthMethod;
+  authSubject?: string;
+  isAdmin?: boolean;
+};
+
+export type SubscriptionStatus = "inactive" | "active" | "on_hold" | "cancelled" | "expired" | "failed";
+
+export type CreditComplexityTier = "light" | "standard" | "heavy" | "extended";
+
+export type UserSubscription = {
+  userId: string;
+  planCode: string;
+  status: SubscriptionStatus;
+  priceCents: number;
+  currency: string;
+  dodoCustomerId: string | null;
+  dodoSubscriptionId: string | null;
+  dodoProductId: string | null;
+  monthlyCreditsHundredths: number;
+  creditsBalanceHundredths: number;
+  creditsUsedThisPeriodHundredths: number;
+  lifetimeCreditsUsedHundredths: number;
+  currentPeriodStart: string | null;
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+  lastPaymentId: string | null;
+  lastPaymentAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreditUsageEvent = {
+  id: string;
+  userId: string;
+  userEmail?: string;
+  userName?: string | null;
+  projectId: string | null;
+  projectTitle?: string | null;
+  messageId: string | null;
+  mode: "build" | "plan" | "security";
+  complexityTier: CreditComplexityTier;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  turns: number;
+  toolCalls: number;
+  filesChanged: number;
+  commandsRun: number;
+  cloudActions: number;
+  durationMs: number;
+  creditsHundredths: number;
+  description: string;
+  createdAt: string;
+};
+
+export type BillingSummary = {
+  planName: string;
+  priceCents: number;
+  currency: string;
+  monthlyCreditsHundredths: number;
+  hasActiveAccess: boolean;
+  isAdminBypass: boolean;
+  dodoConfigured: boolean;
+  subscription: UserSubscription;
+  recentUsage: CreditUsageEvent[];
+};
+
+export type AdminUserSummary = {
+  id: string;
+  email: string;
+  name: string | null;
+  avatarUrl: string | null;
+  authProvider: string;
+  authProviderLabel: string;
+  authMethod: AuthMethod;
+  isAdmin: boolean;
+  createdAt: string;
+  lastSeenAt: string;
+  subscriptionStatus: SubscriptionStatus;
+  dodoCustomerId: string | null;
+  dodoSubscriptionId: string | null;
+  creditsBalanceHundredths: number;
+  creditsUsedThisPeriodHundredths: number;
+  lifetimeCreditsUsedHundredths: number;
+  monthlyCreditsHundredths: number;
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+  projectCount: number;
+  agentRunCount: number;
+  totalTokens: number;
+};
+
+export type AdminOverviewStats = {
+  totalUsers: number;
+  newUsersLast7Days: number;
+  newUsersLast30Days: number;
+  activeSubscribers: number;
+  estimatedMrrCents: number;
+  totalProjects: number;
+  totalAgentRuns: number;
+  totalCreditsUsedHundredths: number;
+  totalTokens: number;
+  providerBreakdown: {
+    provider: string;
+    label: string;
+    method: AuthMethod;
+    count: number;
+    percentage: number;
+  }[];
+  methodBreakdown: {
+    method: AuthMethod;
+    label: string;
+    count: number;
+    percentage: number;
+  }[];
 };
 
 export type VisualElementSource = {
@@ -231,6 +383,9 @@ export type AgentEvent =
       github?: GitHubCommitInfo;
       chatMode?: BuildChatMode;
       runDurationMs?: number;
+      creditsChargedHundredths?: number;
+      complexityTier?: CreditComplexityTier;
+      totalTokens?: number;
     }
   | { type: "error"; message: string };
 

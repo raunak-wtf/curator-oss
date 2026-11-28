@@ -1,4 +1,5 @@
-import { ChevronDown, LogOut } from "lucide-react";
+import { ChevronDown, CreditCard, LogOut, Shield } from "lucide-react";
+import Link from "next/link";
 import type { Viewer } from "@/lib/types";
 import { UserAvatar } from "./user-avatar";
 
@@ -21,6 +22,14 @@ export function AccountMenu({ viewer }: { viewer: Viewer }) {
             <p className="mt-0.5 truncate text-[10px] text-white/42">{viewer.email}</p>
           </div>
         </div>
+        <Link href="/billing" className="account-action">
+          <CreditCard className="size-3.5" /> Billing &amp; credits
+        </Link>
+        {viewer.isAdmin ? (
+          <Link href="/admin" className="account-action">
+            <Shield className="size-3.5" /> Admin panel
+          </Link>
+        ) : null}
         <a href="/auth/logout" className="account-action">
           <LogOut className="size-3.5" /> Sign out
         </a>

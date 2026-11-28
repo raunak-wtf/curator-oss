@@ -62,9 +62,14 @@ describe("edge proxy routes", () => {
     vi.unstubAllEnvs();
   });
 
-  it("resolves Lovable-style random preview subdomains (<adj>-<noun>-<hex8>.curatorsite.in) to Daytona port 3000", async () => {
+  it("resolves Lovable-style random preview subdomains (<adj>-<noun>-<hex8>.curatorsite.in) to Daytona port 3000 when editor session is active", async () => {
     const previewSlug = previewSlugForProjectId(sampleUuid)!;
-    mocks.getProjectForEdgePreview.mockResolvedValue(sampleProject);
+    mocks.getProjectForEdgePreview.mockResolvedValue({
+      ...sampleProject,
+      previewAccessMode: "owner",
+      previewAccessVersion: 2,
+      previewActiveUntil: new Date(Date.now() + 120_000).toISOString(),
+    });
     mocks.getPreviewProxyTarget.mockResolvedValue({
       upstream: "https://3000-sbx-123.proxy.daytona.work",
       token: "preview-tok-3000",
@@ -80,8 +85,66 @@ describe("edge proxy routes", () => {
     expect(body.kind).toBe("preview");
     expect(body.upstream).toBe("https://3000-sbx-123.proxy.daytona.work");
     expect(body.badge).toBeNull();
+    expect(body.previewAccess).toMatchObject({
+      projectId: sampleUuid,
+      mode: "owner",
+      publicActive: false,
+      hasPasscode: false,
+      accessVersion: 2,
+    });
     expect(body.headers["X-Daytona-Preview-Token"]).toBe("preview-tok-3000");
     expect(body.headers["X-Forwarded-Host"]).toBe(`${previewSlug}.curatorsite.in`);
+  });
+
+  it("returns 423 preview_paused without waking Daytona when Curator is closed and preview is not public", async () => {
+    const previewSlug = previewSlugForProjectId(sampleUuid)!;
+    mocks.getProjectForEdgePreview.mockResolvedValue({
+      ...sampleProject,
+      previewAccessMode: "owner",
+      previewPublicExpiresAt: null,
+      previewActiveUntil: null,
+    });
+
+    const response = await resolveEdgeGet(
+      new Request(`http://127.0.0.1:3005/api/edge/resolve?host=${previewSlug}.curatorsite.in`, {
+        headers: { "x-cognix-edge-secret": "edge-secret-test" },
+      }),
+    );
+    expect(response.status).toBe(423);
+    const body = await response.json();
+    expect(body.kind).toBe("preview_paused");
+    expect(body.previewAccess.publicActive).toBe(false);
+    expect(mocks.getPreviewProxyTarget).not.toHaveBeenCalled();
+  });
+
+  it("allows waking preview when 24h public preview is active even if Curator editor is closed", async () => {
+    const previewSlug = previewSlugForProjectId(sampleUuid)!;
+    const expiresAt = new Date(Date.now() + 24 * 3600_000).toISOString();
+    mocks.getProjectForEdgePreview.mockResolvedValue({
+      ...sampleProject,
+      previewAccessMode: "public",
+      previewPublicExpiresAt: expiresAt,
+      previewHasPasscode: true,
+      previewActiveUntil: null,
+    });
+    mocks.getPreviewProxyTarget.mockResolvedValue({
+      upstream: "https://3000-sbx-123.proxy.daytona.work",
+      token: "preview-tok-public",
+    });
+
+    const response = await resolveEdgeGet(
+      new Request(`http://127.0.0.1:3005/api/edge/resolve?host=${previewSlug}.curatorsite.in`, {
+        headers: { "x-cognix-edge-secret": "edge-secret-test" },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.kind).toBe("preview");
+    expect(body.previewAccess).toMatchObject({
+      mode: "public",
+      publicActive: true,
+      hasPasscode: true,
+    });
   });
 
   it("resolves <name>.curatorsite.in to Daytona port 3001 with badge metadata", async () => {

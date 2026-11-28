@@ -9,14 +9,26 @@ export type AccumulatedToolCall = {
   truncatedJson?: boolean;
 };
 
+export type StreamUsage = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+};
+
 export type StreamTurnResult = {
   content: string;
   calls: AccumulatedToolCall[];
   finishReason: string | null;
   chunkCount: number;
+  usage: StreamUsage | null;
 };
 
 export type StreamChunkLike = {
+  usage?: {
+    prompt_tokens?: number | null;
+    completion_tokens?: number | null;
+    total_tokens?: number | null;
+  } | null;
   choices?: Array<{
     finish_reason?: string | null;
     delta?: {
@@ -219,6 +231,7 @@ export async function streamModelTurnWithRetry(options: StreamTurnOptions): Prom
       let content = "";
       let finishReason: string | null = null;
       let chunkCount = 0;
+      let usage: StreamUsage | null = null;
       const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
 
       let lastStatusLabel = "";
@@ -256,6 +269,19 @@ export async function streamModelTurnWithRetry(options: StreamTurnOptions): Prom
 
         if (step.done) break;
         chunkCount += 1;
+
+        if (step.value.usage) {
+          const promptTokens = Number(step.value.usage.prompt_tokens ?? 0);
+          const completionTokens = Number(step.value.usage.completion_tokens ?? 0);
+          const totalTokens = Number(step.value.usage.total_tokens ?? promptTokens + completionTokens);
+          if (promptTokens > 0 || completionTokens > 0 || totalTokens > 0) {
+            usage = {
+              promptTokens: Math.max(0, Math.trunc(promptTokens)),
+              completionTokens: Math.max(0, Math.trunc(completionTokens)),
+              totalTokens: Math.max(0, Math.trunc(totalTokens)),
+            };
+          }
+        }
 
         const choice = step.value.choices?.[0];
         if (choice?.finish_reason) {
@@ -316,6 +342,7 @@ export async function streamModelTurnWithRetry(options: StreamTurnOptions): Prom
         calls,
         finishReason,
         chunkCount,
+        usage,
       };
     } catch (error) {
       lastError = error;

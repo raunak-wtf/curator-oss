@@ -777,7 +777,7 @@ button:disabled { cursor: not-allowed; }
 .agent-activity-card > summary:hover { border-color: rgba(255,255,255,.14); background: rgba(255,255,255,.05); color: rgba(255,255,255,.7); }
 .agent-activity-card > summary:focus-visible { outline: 2px solid #8c7dff; outline-offset: 2px; }
 .activity-icon-strip { display: flex; align-items: center; }
-.activity-icon-strip .activity-icon + .activity-icon { margin-left: -4px; box-shadow: -2px 0 0 #1c1c1c; }
+.activity-icon-strip .activity-icon + .activity-icon { margin-left: -4px; box-shadow: -2px 0 0 #191919; }
 .activity-disclosure-icon { transition: transform 160ms ease; }
 .agent-activity-card[open] .activity-disclosure-icon { transform: rotate(180deg); }
 .agent-activity-list { max-width: 540px; max-height: 260px; overflow-y: auto; margin-top: 7px; border-left: 1px solid rgba(255,255,255,.09); padding: 6px 4px 2px 12px; }

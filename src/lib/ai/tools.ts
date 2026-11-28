@@ -507,6 +507,25 @@ export async function fetchPublicText(value: string, redirects = 0): Promise<{
   };
 }
 
+export function detectCloudStorageWarnings(content: string): string[] {
+  const warnings: string[] = [];
+  if (/\bnew\s+S3Client\s*\(/.test(content)) {
+    const hasReqChecksum = /requestChecksumCalculation\s*:\s*["']WHEN_REQUIRED["']/.test(content);
+    const hasResChecksum = /responseChecksumValidation\s*:\s*["']WHEN_REQUIRED["']/.test(content);
+    if (!hasReqChecksum || !hasResChecksum) {
+      warnings.push(
+        "WARNING: `new S3Client(...)` is missing `requestChecksumCalculation: \"WHEN_REQUIRED\"` and/or `responseChecksumValidation: \"WHEN_REQUIRED\"`. Without both flags, `@aws-sdk/client-s3` v3.729+ appends `x-amz-checksum-mode=ENABLED` to presigned URLs and triggers HTTP 403 `SignatureDoesNotMatch` on Cognix Cloud Storage. Add both flags immediately.",
+      );
+    }
+  }
+  if (/\bgetSignedUrl\s*\(/.test(content) && /\bResponseContent(?:Disposition|Type)\b/.test(content)) {
+    warnings.push(
+      "WARNING: Do not pass `ResponseContentDisposition` or `ResponseContentType` into `getSignedUrl(...)` — the Cognix Cloud Storage gateway rejects extra response-override query parameters with HTTP 403 `SignatureDoesNotMatch`. Serve downloads through a same-origin `/api/storage/file/[...key]?download=1` route handler instead.",
+    );
+  }
+  return warnings;
+}
+
 export async function executeAgentTool(
   project: Project,
   sandbox: Sandbox,
@@ -602,8 +621,10 @@ export async function executeAgentTool(
     await withSandboxRetry(() => sandbox.process.executeCommand(`mkdir -p ${shellQuote(directory)}`, root, undefined, 30));
     await withSandboxRetry(() => sandbox.fs.uploadFile(Buffer.from(input.content), fsTarget));
     await upsertProjectFile(project.id, relative, input.content);
+    const storageWarnings = enforceBuildStack && cloudEnabled ? detectCloudStorageWarnings(input.content) : [];
+    const baseOutput = `Wrote ${Buffer.byteLength(input.content)} bytes to ${input.path}`;
     return {
-      output: `Wrote ${Buffer.byteLength(input.content)} bytes to ${input.path}`,
+      output: storageWarnings.length ? `${baseOutput}\n\n${storageWarnings.join("\n")}` : baseOutput,
       summary: `Updated ${relative}`,
       changedPaths: [relative],
       fileChanges: [fileChangeSnapshot(relative, before, input.content)],
@@ -630,8 +651,10 @@ export async function executeAgentTool(
     }
     await withSandboxRetry(() => sandbox.fs.uploadFile(Buffer.from(edited.content), fsTarget));
     await upsertProjectFile(project.id, relative, edited.content);
+    const storageWarnings = enforceBuildStack && cloudEnabled ? detectCloudStorageWarnings(edited.content) : [];
+    const baseOutput = `Replaced ${edited.matches} exact ${edited.matches === 1 ? "match" : "matches"} in ${relative}`;
     return {
-      output: `Replaced ${edited.matches} exact ${edited.matches === 1 ? "match" : "matches"} in ${relative}`,
+      output: storageWarnings.length ? `${baseOutput}\n\n${storageWarnings.join("\n")}` : baseOutput,
       summary: `Edited ${relative}`,
       changedPaths: [relative],
       fileChanges: [fileChangeSnapshot(relative, before, edited.content)],

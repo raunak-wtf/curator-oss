@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, LogIn, LogOut, PanelLeft, Plus, Search } from "lucide-react";
+import { ChevronDown, CreditCard, LogIn, LogOut, PanelLeft, Plus, Search, Shield, Sparkles } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -9,7 +9,8 @@ import { toast } from "sonner";
 import { RemixDialog } from "@/components/remix-dialog";
 import { DeleteChatDialog, SidebarChatRow } from "@/components/sidebar-chat-row";
 import { UserAvatar } from "@/components/user-avatar";
-import type { Project, Viewer } from "@/lib/types";
+import { LOW_CREDITS_THRESHOLD_HUNDREDTHS, PRO_MONTHLY_CREDITS_HUNDREDTHS, formatCredits } from "@/lib/credits";
+import type { Project, SubscriptionStatus, Viewer } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const STORAGE_KEY = "cognix:sidebar";
@@ -54,6 +55,13 @@ const iconButton =
 const navRow =
   "flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-[13px] font-medium transition-colors [@media(pointer:coarse)]:h-11";
 
+export type SidebarBillingBadge = {
+  status: SubscriptionStatus;
+  hasActiveAccess: boolean;
+  creditsBalanceHundredths: number;
+  monthlyCreditsHundredths: number;
+};
+
 type HomeSidebarProps = {
   viewer: Viewer | null;
   projects: Project[];
@@ -64,6 +72,8 @@ type HomeSidebarProps = {
   defaultOpen?: boolean;
   /** The project open on this page, highlighted in the list. */
   activeProjectId?: string;
+  /** Compact credit / plan indicator shown at the bottom of the sidebar. */
+  billing?: SidebarBillingBadge | null;
 };
 
 export function HomeSidebar({
@@ -74,6 +84,7 @@ export function HomeSidebar({
   onNewChat,
   defaultOpen = true,
   activeProjectId,
+  billing = null,
 }: HomeSidebarProps) {
   const router = useRouter();
   const open = useSyncExternalStore(subscribe, () => readOpen(defaultOpen), () => defaultOpen);
@@ -296,8 +307,69 @@ export function HomeSidebar({
                 <span className="truncate">{viewer.name}</span>
                 <ChevronDown className="size-3.5 shrink-0 text-white/40" aria-hidden="true" />
               </summary>
-              <div className="absolute left-0 top-full z-50 mt-1 w-60 rounded-xl border border-white/10 bg-[#252525] p-1 shadow-2xl">
-                <p className="truncate px-2.5 py-2 text-[12px] text-white/45">{viewer.email}</p>
+              <div className="absolute left-0 top-full z-50 mt-1 w-64 rounded-xl border border-white/10 bg-[#252525] p-1.5 shadow-2xl">
+                <p className="truncate px-2 py-1.5 text-[12px] text-white/45">{viewer.email}</p>
+                {billing ? (() => {
+                  const monthly = Math.max(1, billing.monthlyCreditsHundredths || PRO_MONTHLY_CREDITS_HUNDREDTHS);
+                  const pct = Math.min(100, Math.round((billing.creditsBalanceHundredths / monthly) * 100));
+                  const isEmpty = billing.creditsBalanceHundredths <= 0;
+                  const isLow = billing.creditsBalanceHundredths < LOW_CREDITS_THRESHOLD_HUNDREDTHS;
+                  return (
+                    <Link
+                      href="/billing"
+                      className="mx-1 mb-1.5 block rounded-lg border border-white/[0.08] bg-white/[0.03] px-2.5 py-2 transition-colors hover:bg-white/[0.07]"
+                    >
+                      <div className="flex items-center justify-between gap-2 text-[11px]">
+                        <span className="font-medium text-white/85">
+                          {billing.status === "active" ? "Curator Pro" : "Credits"}
+                        </span>
+                        <span
+                          className={cn(
+                            "font-semibold tabular-nums",
+                            isEmpty ? "text-red-300" : isLow ? "text-amber-300" : "text-white",
+                          )}
+                        >
+                          {formatCredits(billing.creditsBalanceHundredths)} / {formatCredits(monthly)}
+                        </span>
+                      </div>
+                      <div
+                        className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-white/[0.09]"
+                        role="progressbar"
+                        aria-valuenow={pct}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-label="Remaining credits"
+                      >
+                        <div
+                          className={cn(
+                            "h-full rounded-full transition-[width] duration-300",
+                            isEmpty ? "bg-red-400" : isLow ? "bg-amber-400" : "bg-indigo-400",
+                          )}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                      {isLow ? (
+                        <p className={cn("mt-1 text-[10px]", isEmpty ? "text-red-300/90" : "text-amber-300/90")}>
+                          {isEmpty
+                            ? billing.status === "active"
+                              ? "No credits left this cycle"
+                              : "Subscribe for 90 monthly credits"
+                            : "Running low on credits"}
+                        </p>
+                      ) : null}
+                    </Link>
+                  );
+                })() : null}
+                <Link href="/billing" className={cn(navRow, "text-white/80 hover:bg-white/[0.07] hover:text-white")}>
+                  <CreditCard className="size-4" aria-hidden="true" />
+                  Billing &amp; credits
+                </Link>
+                {viewer.isAdmin ? (
+                  <Link href="/admin" className={cn(navRow, "text-indigo-200 hover:bg-indigo-500/15 hover:text-white")}>
+                    <Shield className="size-4" aria-hidden="true" />
+                    Admin panel
+                  </Link>
+                ) : null}
                 <a href="/auth/logout" className={cn(navRow, "text-white/80 hover:bg-white/[0.07] hover:text-white")}>
                   <LogOut className="size-4" aria-hidden="true" />
                   Sign out
@@ -393,6 +465,73 @@ export function HomeSidebar({
             )}
           </div>
         </div>
+
+        {viewer ? (
+          <div className="shrink-0 space-y-1 border-t border-white/[0.06] p-2">
+            <Link
+              href="/billing"
+              className="block rounded-lg border border-white/[0.08] bg-white/[0.03] px-2.5 py-2 transition-colors hover:bg-white/[0.07]"
+            >
+              <div className="flex items-center justify-between gap-2 text-[12px]">
+                <span className="flex items-center gap-1.5 font-medium text-white">
+                  <Sparkles className="size-3.5 text-indigo-300" aria-hidden="true" />
+                  {billing?.status === "active"
+                    ? "Curator Pro"
+                    : viewer.isAdmin
+                      ? "Admin access"
+                      : "Subscribe · $10/mo"}
+                </span>
+                {billing ? (
+                  <span
+                    className={cn(
+                      "text-[11px] font-medium tabular-nums",
+                      billing.creditsBalanceHundredths < LOW_CREDITS_THRESHOLD_HUNDREDTHS
+                        ? "text-amber-300"
+                        : "text-white/60",
+                    )}
+                  >
+                    {formatCredits(billing.creditsBalanceHundredths)} cr
+                  </span>
+                ) : null}
+              </div>
+              {billing && billing.status === "active" ? (
+                <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-white/[0.08]">
+                  <div
+                    className={cn(
+                      "h-full rounded-full",
+                      billing.creditsBalanceHundredths <= 0
+                        ? "bg-red-400"
+                        : billing.creditsBalanceHundredths < LOW_CREDITS_THRESHOLD_HUNDREDTHS
+                          ? "bg-amber-400"
+                          : "bg-indigo-400",
+                    )}
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        Math.round(
+                          (billing.creditsBalanceHundredths / Math.max(1, billing.monthlyCreditsHundredths)) * 100,
+                        ),
+                      )}%`,
+                    }}
+                  />
+                </div>
+              ) : (
+                <p className="mt-0.5 text-[11px] text-white/45">
+                  {viewer.isAdmin ? "Manage billing & usage" : "90 monthly credits · No free tier"}
+                </p>
+              )}
+            </Link>
+            {viewer.isAdmin ? (
+              <Link
+                href="/admin"
+                className={cn(navRow, "text-indigo-200/90 hover:bg-indigo-500/15 hover:text-white")}
+              >
+                <Shield className="size-3.5" aria-hidden="true" />
+                Admin panel
+              </Link>
+            ) : null}
+          </div>
+        ) : null}
       </aside>
 
       {remixing ? (
