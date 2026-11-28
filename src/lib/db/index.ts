@@ -1,15 +1,101 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { neon, neonConfig } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-http";
 import * as schema from "./schema";
 
 const RETRY_DELAYS_MS = [250, 750, 1_600] as const;
+const healingContext = new AsyncLocalStorage<boolean>();
 
-const IDEMPOTENT_SCHEMA_PATCHES = [
+export const IDEMPOTENT_SCHEMA_PATCHES = [
   `ALTER TABLE "projects" ADD COLUMN IF NOT EXISTS "show_badge" boolean DEFAULT true NOT NULL`,
   `ALTER TABLE "projects" ADD COLUMN IF NOT EXISTS "public_remix" boolean DEFAULT false NOT NULL`,
   `ALTER TABLE "projects" ADD COLUMN IF NOT EXISTS "custom_instructions" text DEFAULT '' NOT NULL`,
   `ALTER TABLE "projects" ADD COLUMN IF NOT EXISTS "mode" text DEFAULT 'build' NOT NULL`,
   `ALTER TABLE "projects" ADD COLUMN IF NOT EXISTS "security_source" jsonb`,
+  `CREATE TABLE IF NOT EXISTS "project_cloud" (
+    "project_id" uuid PRIMARY KEY NOT NULL REFERENCES "projects"("id") ON DELETE CASCADE,
+    "status" text DEFAULT 'disabled' NOT NULL,
+    "neon_project_id" text,
+    "neon_region" text,
+    "storage_enabled" boolean DEFAULT false NOT NULL,
+    "app_token_hash" text,
+    "auth_enabled" boolean DEFAULT false NOT NULL,
+    "last_error" text,
+    "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT now() NOT NULL
+  )`,
+  `ALTER TABLE "project_cloud" ADD COLUMN IF NOT EXISTS "storage_enabled" boolean DEFAULT false NOT NULL`,
+  `ALTER TABLE "project_cloud" ADD COLUMN IF NOT EXISTS "app_token_hash" text`,
+  `ALTER TABLE "project_cloud" ADD COLUMN IF NOT EXISTS "auth_enabled" boolean DEFAULT false NOT NULL`,
+  `CREATE TABLE IF NOT EXISTS "skills" (
+    "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+    "owner_id" text NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+    "name" text NOT NULL,
+    "description" text NOT NULL,
+    "body" text NOT NULL,
+    "source" text DEFAULT 'manual' NOT NULL,
+    "source_url" text,
+    "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT "skills_owner_name_unique" UNIQUE("owner_id", "name")
+  )`,
+  `CREATE TABLE IF NOT EXISTS "github_connections" (
+    "owner_id" text PRIMARY KEY NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+    "github_user_id" text NOT NULL,
+    "login" text NOT NULL,
+    "avatar_url" text,
+    "scopes" text DEFAULT '' NOT NULL,
+    "token_ciphertext" text NOT NULL,
+    "token_iv" text NOT NULL,
+    "token_auth_tag" text NOT NULL,
+    "token_expires_at" timestamp with time zone,
+    "refresh_ciphertext" text,
+    "refresh_iv" text,
+    "refresh_auth_tag" text,
+    "refresh_expires_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT now() NOT NULL
+  )`,
+  `ALTER TABLE "github_connections" ADD COLUMN IF NOT EXISTS "token_expires_at" timestamp with time zone`,
+  `ALTER TABLE "github_connections" ADD COLUMN IF NOT EXISTS "refresh_ciphertext" text`,
+  `ALTER TABLE "github_connections" ADD COLUMN IF NOT EXISTS "refresh_iv" text`,
+  `ALTER TABLE "github_connections" ADD COLUMN IF NOT EXISTS "refresh_auth_tag" text`,
+  `ALTER TABLE "github_connections" ADD COLUMN IF NOT EXISTS "refresh_expires_at" timestamp with time zone`,
+  `CREATE TABLE IF NOT EXISTS "project_repositories" (
+    "project_id" uuid PRIMARY KEY NOT NULL REFERENCES "projects"("id") ON DELETE CASCADE,
+    "owner_id" text NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+    "repo_id" text NOT NULL,
+    "full_name" text NOT NULL,
+    "html_url" text NOT NULL,
+    "default_branch" text NOT NULL,
+    "private" boolean DEFAULT true NOT NULL,
+    "auto_commit" boolean DEFAULT true NOT NULL,
+    "sync_base_sha" text,
+    "synced_paths" jsonb DEFAULT '[]'::jsonb NOT NULL,
+    "last_commit_sha" text,
+    "last_commit_url" text,
+    "last_pushed_at" timestamp with time zone,
+    "last_error" text,
+    "cached_sync" jsonb,
+    "cached_commits" jsonb,
+    "commits_fetched_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT now() NOT NULL
+  )`,
+  `ALTER TABLE "project_repositories" ADD COLUMN IF NOT EXISTS "cached_sync" jsonb`,
+  `ALTER TABLE "project_repositories" ADD COLUMN IF NOT EXISTS "cached_commits" jsonb`,
+  `ALTER TABLE "project_repositories" ADD COLUMN IF NOT EXISTS "commits_fetched_at" timestamp with time zone`,
+  `CREATE TABLE IF NOT EXISTS "agent_approvals" (
+    "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+    "project_id" uuid NOT NULL REFERENCES "projects"("id") ON DELETE CASCADE,
+    "owner_id" text NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
+    "items" jsonb NOT NULL,
+    "decisions" jsonb,
+    "status" text DEFAULT 'pending' NOT NULL,
+    "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+    "resolved_at" timestamp with time zone
+  )`,
+  `CREATE INDEX IF NOT EXISTS "agent_approvals_project_status_idx" ON "agent_approvals" ("project_id", "status")`,
   `CREATE TABLE IF NOT EXISTS "project_analytics_events" (
     "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
     "project_id" uuid NOT NULL REFERENCES "projects"("id") ON DELETE CASCADE,
@@ -43,14 +129,6 @@ const IDEMPOTENT_SCHEMA_PATCHES = [
   `ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "auth_subject" text`,
   `ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "last_seen_at" timestamp with time zone DEFAULT now() NOT NULL`,
   `CREATE INDEX IF NOT EXISTS "users_lower_email_idx" ON "users" (lower("email"))`,
-  `ALTER TABLE "github_connections" ADD COLUMN IF NOT EXISTS "token_expires_at" timestamp with time zone`,
-  `ALTER TABLE "github_connections" ADD COLUMN IF NOT EXISTS "refresh_ciphertext" text`,
-  `ALTER TABLE "github_connections" ADD COLUMN IF NOT EXISTS "refresh_iv" text`,
-  `ALTER TABLE "github_connections" ADD COLUMN IF NOT EXISTS "refresh_auth_tag" text`,
-  `ALTER TABLE "github_connections" ADD COLUMN IF NOT EXISTS "refresh_expires_at" timestamp with time zone`,
-  `ALTER TABLE "project_repositories" ADD COLUMN IF NOT EXISTS "cached_sync" jsonb`,
-  `ALTER TABLE "project_repositories" ADD COLUMN IF NOT EXISTS "cached_commits" jsonb`,
-  `ALTER TABLE "project_repositories" ADD COLUMN IF NOT EXISTS "commits_fetched_at" timestamp with time zone`,
   `CREATE TABLE IF NOT EXISTS "user_subscriptions" (
     "user_id" text PRIMARY KEY NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
     "plan_code" text DEFAULT 'pro_monthly' NOT NULL,
@@ -125,30 +203,28 @@ const IDEMPOTENT_SCHEMA_PATCHES = [
 ] as const;
 
 let schemaHealPromise: Promise<void> | null = null;
-let schemaHealingActive = false;
+let schemaHealCompleted = false;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function ensureHostSchemaUpToDate(connectionString: string): Promise<void> {
-  if (!schemaHealPromise) {
-    schemaHealPromise = (async () => {
-      schemaHealingActive = true;
-      try {
-        const rawSql = neon(connectionString, { fetchOptions: { cache: "no-store" } });
-        for (const ddl of IDEMPOTENT_SCHEMA_PATCHES) {
-          await rawSql.query(ddl);
-        }
-      } finally {
-        schemaHealingActive = false;
-      }
-    })().catch((err) => {
-      schemaHealPromise = null;
-      throw err;
-    });
+function readHeader(headers: HeadersInit | undefined, name: string): string | null {
+  if (!headers) return null;
+  const target = name.toLowerCase();
+  if (headers instanceof Headers) {
+    return headers.get(name);
   }
-  return schemaHealPromise;
+  if (Array.isArray(headers)) {
+    for (const [k, v] of headers) {
+      if (k.toLowerCase() === target) return v;
+    }
+    return null;
+  }
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === target && typeof v === "string") return v;
+  }
+  return null;
 }
 
 function extractHostname(value: string | URL | Request): string {
@@ -161,21 +237,68 @@ function extractHostname(value: string | URL | Request): string {
   }
 }
 
+export async function ensureHostSchemaUpToDate(
+  connectionString: string,
+  options?: { force?: boolean },
+): Promise<void> {
+  if (options?.force && schemaHealCompleted) {
+    schemaHealPromise = null;
+    schemaHealCompleted = false;
+  }
+  if (!schemaHealPromise) {
+    schemaHealPromise = healingContext
+      .run(true, async () => {
+        const rawSql = neon(connectionString, { fetchOptions: { cache: "no-store" } });
+        try {
+          await rawSql.transaction(IDEMPOTENT_SCHEMA_PATCHES.map((ddl) => rawSql.query(ddl)));
+        } catch {
+          for (const ddl of IDEMPOTENT_SCHEMA_PATCHES) {
+            try {
+              await rawSql.query(ddl);
+            } catch (err) {
+              console.error("[db] Failed applying idempotent schema patch:", err);
+            }
+          }
+        }
+        schemaHealCompleted = true;
+      })
+      .catch((err) => {
+        schemaHealPromise = null;
+        schemaHealCompleted = false;
+        throw err;
+      });
+  }
+  return schemaHealPromise;
+}
+
 export function createResilientNeonFetch(
   connectionString: string,
   baseFetch: typeof fetch = globalThis.fetch,
+  healFn: (conn: string, opts?: { force?: boolean }) => Promise<void> = ensureHostSchemaUpToDate,
 ): typeof fetch {
+  const normalizedHostConn = connectionString.trim();
   const hostDbHostname = (() => {
     try {
-      return connectionString ? new URL(connectionString).hostname.toLowerCase() : "";
+      if (!normalizedHostConn) return "";
+      const protoEnd = normalizedHostConn.indexOf(":");
+      const httpLike = protoEnd > 0 ? `http:${normalizedHostConn.slice(protoEnd + 1)}` : normalizedHostConn;
+      return new URL(httpLike).hostname.toLowerCase();
     } catch {
       return "";
     }
   })();
 
   return async (input, init) => {
+    const isInternalHeal = Boolean(healingContext.getStore());
+    // `@neondatabase/serverless` rewrites `ep-*.<region>.aws.neon.tech` to `https://api.<region>.aws.neon.tech/sql`
+    // and passes the exact DSN in `Neon-Connection-String`. Matching that header isolates the host DB from
+    // customer Neon databases even when both live in the exact same AWS region.
+    const neonConnHeader = readHeader(init?.headers, "neon-connection-string")?.trim();
     const reqHost = extractHostname(input);
-    const isHostDbRequest = !hostDbHostname || !reqHost || reqHost === hostDbHostname;
+    const isHostDbRequest = neonConnHeader
+      ? neonConnHeader === normalizedHostConn
+      : !hostDbHostname || !reqHost || reqHost === hostDbHostname;
+
     let healedSchema = false;
 
     for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
@@ -190,12 +313,14 @@ export function createResilientNeonFetch(
           continue;
         }
 
-        if (isHostDbRequest && response.status === 400 && !healedSchema && !schemaHealingActive && connectionString) {
+        if (isHostDbRequest && !isInternalHeal && response.status === 400 && !healedSchema && normalizedHostConn) {
           const clonedText = await response.clone().text().catch(() => "");
           // PostgreSQL 42703 = undefined_column, 42P01 = undefined_table
           if (/"code"\s*:\s*"(?:42703|42P01)"/.test(clonedText)) {
             healedSchema = true;
-            await ensureHostSchemaUpToDate(connectionString).catch(() => undefined);
+            await healFn(normalizedHostConn, { force: schemaHealCompleted }).catch((err) => {
+              console.error("[db] Host schema auto-heal error:", err);
+            });
             continue;
           }
         }

@@ -374,6 +374,7 @@ export const creditUsageEvents = pgTable(
   },
   (table) => [
     index("credit_usage_events_user_created_idx").on(table.userId, table.createdAt),
+    index("credit_usage_events_project_idx").on(table.projectId),
     index("credit_usage_events_created_idx").on(table.createdAt),
   ],
 );
