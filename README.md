@@ -267,6 +267,8 @@ All secrets remain strictly server-side (`AGENTS.md`). Never expose provider key
 | `COGNIX_PERF_ONE_BUILD` | Recommended | Prevents redundant production builds when no source file changed after a passing build |
 | `COGNIX_SCAFFOLD_VERSION` | Recommended | Pins the generated-app template manifest; current production template is `1.1.0` |
 
+The public `/api/health` response exposes this non-sensitive architecture version and flag state alongside provider readiness, making production rollout verification possible without exposing credentials.
+
 ### Wildcard Previews, Custom Domains & Edge Routing
 | Variable | Required | Description |
 | :--- | :---: | :--- |
