@@ -1,4 +1,5 @@
 import type { AgentEvent, TerminalCommand, TerminalCommandSource } from "../types";
+import { isProductionBuildCommand } from "./agent-policy";
 
 /** Characters of output kept per command. The tail is kept because errors usually appear at the end. */
 export const TERMINAL_OUTPUT_LIMIT = 4_000;
@@ -9,6 +10,29 @@ const REDACTION = "••••••";
 // Matches ANSI colour and cursor sequences so the read-only terminal shows plain text.
 const ANSI_PATTERN = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 
+export function isDependencyInstallCommand(command: string): boolean {
+  return /(?:^|[;&|]\s*)(?:npm|pnpm|yarn|bun)\s+(?:install|i|add|ci)(?:\s|$)/i.test(command);
+}
+
+export function isPreviewStartCommand(command: string, background = true): boolean {
+  return (
+    background
+    && /\b(?:next\s+(?:dev|start)|npm\s+run\s+(?:dev|start)|pnpm\s+(?:run\s+)?(?:dev|start)|yarn\s+(?:dev|start)|bun\s+(?:run\s+)?(?:dev|start))\b/i.test(
+      command,
+    )
+  );
+}
+
+export type TerminalCommandStats = {
+  count: number;
+  failed: number;
+  durationMs: number;
+  background: number;
+  productionBuilds: number;
+  installs: number;
+  previewStarts: number;
+};
+
 /**
  * Records the commands a build runs so the owner can watch them in a read-only terminal.
  * Secret values are replaced before anything is emitted or saved.
@@ -17,6 +41,15 @@ export function createTerminalLog(emit: (event: AgentEvent) => void | Promise<vo
   // Short values would redact ordinary words, so only mask values long enough to be credentials.
   let secrets = [...new Set(secretValues.filter((value) => value.length >= 6))].sort((a, b) => b.length - a.length);
   const commands: TerminalCommand[] = [];
+  const stats: TerminalCommandStats = {
+    count: 0,
+    failed: 0,
+    durationMs: 0,
+    background: 0,
+    productionBuilds: 0,
+    installs: 0,
+    previewStarts: 0,
+  };
 
   function addSecrets(values: string[]) {
     secrets = [...new Set([...secrets, ...values.filter((value) => value.length >= 6)])].sort(
@@ -57,6 +90,15 @@ export function createTerminalLog(emit: (event: AgentEvent) => void | Promise<vo
       startedAt: new Date(entry.startedAt).toISOString(),
       durationMs: Date.now() - entry.startedAt,
     };
+    stats.count += 1;
+    stats.durationMs += command.durationMs;
+    if (command.failed) stats.failed += 1;
+    if (command.background) stats.background += 1;
+    if (isProductionBuildCommand(entry.command)) stats.productionBuilds += 1;
+    if (isDependencyInstallCommand(entry.command)) stats.installs += 1;
+    if (isPreviewStartCommand(entry.command, command.background)) {
+      stats.previewStarts += 1;
+    }
     commands.push(command);
     if (commands.length > TERMINAL_COMMANDS_LIMIT) commands.shift();
     await emit({
@@ -69,7 +111,7 @@ export function createTerminalLog(emit: (event: AgentEvent) => void | Promise<vo
     });
   }
 
-  return { start, end, redact, addSecrets, commands };
+  return { start, end, redact, addSecrets, commands, stats };
 }
 
 /** Reads the exit code and output from a run_command tool result. */

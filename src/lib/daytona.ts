@@ -223,9 +223,13 @@ async function writeProjectEnvFiles(sandbox: Sandbox, project: Project, root: st
   const { getDecryptedSecrets, upsertSecret } = await import("./store");
   const { renderEnvFile } = await import("./env-files");
   const { rewriteLegacyBucketlineUrl } = await import("./cloud/bucketline");
+  const { deriveServerActionsEncryptionKey } = await import("./secrets-crypto");
 
   const secrets = await getDecryptedSecrets(project.id);
   const effectiveSecrets = { ...secrets };
+  if (project.mode !== "security" && !effectiveSecrets.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY) {
+    effectiveSecrets.NEXT_SERVER_ACTIONS_ENCRYPTION_KEY = deriveServerActionsEncryptionKey(project.id);
+  }
   for (const [key, value] of Object.entries(effectiveSecrets)) {
     const migrated = rewriteLegacyBucketlineUrl(value);
     if (migrated !== value) {

@@ -260,6 +260,85 @@ export type CreditUsageEvent = {
   createdAt: string;
 };
 
+export type AgentRunStage =
+  | "sandbox"
+  | "setup"
+  | "scaffold"
+  | "cloud"
+  | "agent"
+  | "model"
+  | "tool"
+  | "install"
+  | "build"
+  | "preview"
+  | "probe"
+  | "approval"
+  | "verification"
+  | "github"
+  | "persistence";
+
+export type AgentRunTurnMetric = {
+  index: number;
+  durationMs: number;
+  attempts: number;
+  messageChars: number;
+  promptTokens: number;
+  cachedPromptTokens: number;
+  completionTokens: number;
+  toolCalls: number;
+};
+
+export type AgentRunPerformance = {
+  schemaVersion: 1;
+  timeToFirstPreviewMs: number | null;
+  stages: Partial<Record<AgentRunStage, number>>;
+  model: {
+    turns: number;
+    attempts: number;
+    durationMs: number;
+    contextRefreshes: number;
+    turnMetrics: AgentRunTurnMetric[];
+  };
+  tools: {
+    calls: number;
+    errors: number;
+    durationMs: number;
+    unchangedFileRereads?: number;
+    byName: Record<string, { calls: number; errors: number; durationMs: number }>;
+  };
+  commands: {
+    count: number;
+    failed: number;
+    durationMs: number;
+    background: number;
+    productionBuilds: number;
+    installs: number;
+    previewStarts: number;
+    previewRestarts?: number;
+  };
+  architecture?: {
+    scaffoldVersion: string;
+    flags: Record<string, boolean>;
+  };
+};
+
+export type AgentRunMetricStatus = "completed" | "checkpoint" | "awaiting_user" | "error";
+
+export type AgentRunMetric = {
+  id: string;
+  projectId: string | null;
+  userId: string;
+  messageId: string | null;
+  mode: "build" | "plan" | "security";
+  status: AgentRunMetricStatus;
+  errorCategory: string | null;
+  startedAt: string;
+  completedAt: string;
+  totalDurationMs: number;
+  performance: AgentRunPerformance;
+  createdAt: string;
+};
+
 export type BillingSummary = {
   planName: string;
   priceCents: number;

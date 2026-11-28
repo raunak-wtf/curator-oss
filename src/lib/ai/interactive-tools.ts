@@ -2,7 +2,7 @@ import { z } from "zod";
 import { CLOUD_FEATURES, type CloudFeature } from "../cloud-features";
 import type { AgentQuestionRequest } from "../types";
 import { CLOUD_GUIDES } from "./cloud-guides";
-import { DESIGN_GUIDES, DESIGN_GUIDE_LABELS, DESIGN_GUIDE_TOPICS } from "./design-guides";
+import { DESIGN_GUIDES, DESIGN_GUIDE_LABELS, DESIGN_GUIDE_TOPICS } from "./skills/design-intelligence/guides";
 
 /**
  * Tools that talk to the user or to Cognix rather than the sandbox. `ask_user` and
@@ -83,7 +83,7 @@ export const interactiveTools = [
     function: {
       name: "read_design_guide",
       description:
-        "Read Cognix's internal design-to-code playbook for art direction, image/screenshot reference forensics, semantic color & surface systems, typography & fonts, interface craft, motion, or visual verification. Always available in Build and Plan modes.",
+        "Read Cognix's internal design playbook for art direction, image/screenshot reference forensics, semantic color & surface systems, typography & fonts, interface craft, motion, design critique & refinement, distinctive identity & theme curation, or visual verification. Always available in Build and Plan modes.",
       parameters: {
         type: "object",
         properties: { topic: { type: "string", enum: [...DESIGN_GUIDE_TOPICS] } },

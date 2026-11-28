@@ -58,7 +58,7 @@ export function runPullRequestProposal(rawInput: unknown, alreadyAsked: boolean)
 }
 
 /** Tools that change files or run code. In Request review mode each call waits for the user's approval. */
-export const APPROVAL_TOOLS = new Set(["write_file", "edit_file", "move_file", "delete_file", "run_command"]);
+export const APPROVAL_TOOLS = new Set(["write_file", "edit_file", "batch_edit_files", "move_file", "delete_file", "run_command"]);
 
 const MAX_DETAIL = 4_000;
 
@@ -83,6 +83,17 @@ export function describeApproval(callId: string, tool: string, rawInput: unknown
       ? `${before.split("\n").map((line) => `- ${line}`).join("\n")}\n${after.split("\n").map((line) => `+ ${line}`).join("\n")}`
       : JSON.stringify(input, null, 2);
     return { callId, tool, kind: "edit", title: `Edit ${text("path") || "a file"}`, detail: clip(detail) };
+  }
+  if (tool === "batch_edit_files") {
+    const edits = Array.isArray(input.edits) ? input.edits : [];
+    const paths = [...new Set(edits.map((entry) => (entry && typeof entry === "object" && "path" in entry ? String((entry as { path: unknown }).path) : "")).filter(Boolean))];
+    return {
+      callId,
+      tool,
+      kind: "edit",
+      title: `Batch-edit ${paths.length || edits.length} ${paths.length === 1 ? "file" : "files"}`,
+      detail: clip(paths.length ? paths.join("\n") : JSON.stringify(input, null, 2)),
+    };
   }
   if (tool === "move_file") {
     const from = text("from") || text("source") || text("path");

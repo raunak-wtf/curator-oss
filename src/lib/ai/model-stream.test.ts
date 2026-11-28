@@ -18,6 +18,7 @@ describe("model-stream resilience & retries", () => {
   it("retries automatically when a stream stalls mid-flight and succeeds on the next attempt", async () => {
     let calls = 0;
     const statuses: string[] = [];
+    const attempts: number[] = [];
 
     const result = await streamModelTurnWithRetry({
       maxAttempts: 3,
@@ -27,6 +28,9 @@ describe("model-stream resilience & retries", () => {
       statusThrottleMs: 0,
       onStatus: (label) => {
         statuses.push(label);
+      },
+      onAttempt: (attempt) => {
+        attempts.push(attempt);
       },
       createStream: async () => {
         calls += 1;
@@ -74,11 +78,36 @@ describe("model-stream resilience & retries", () => {
     });
 
     expect(calls).toBe(2);
+    expect(attempts).toEqual([1, 2]);
     expect(result.calls).toHaveLength(1);
     expect(result.calls[0]?.function.name).toBe("write_file");
     expect(statuses.some((s) => s.includes("Drafting package.json"))).toBe(true);
     expect(statuses.some((s) => s.includes("Model stream stalled — retrying (2/3)"))).toBe(true);
     expect(statuses.some((s) => s.includes("Drafting src/lib/db.ts"))).toBe(true);
+  });
+
+  it("captures provider-reported cached prompt tokens", async () => {
+    const result = await streamModelTurnWithRetry({
+      createStream: async () => chunksFromArray([
+        { choices: [{ delta: { content: "Done" }, finish_reason: "stop" }] },
+        {
+          choices: [],
+          usage: {
+            prompt_tokens: 1_200,
+            prompt_tokens_details: { cached_tokens: 900 },
+            completion_tokens: 40,
+            total_tokens: 1_240,
+          },
+        },
+      ]),
+    });
+
+    expect(result.usage).toEqual({
+      promptTokens: 1_200,
+      cachedPromptTokens: 900,
+      completionTokens: 40,
+      totalTokens: 1_240,
+    });
   });
 
   it("retries empty ghost streams and transient 502/503/429 errors, but does not retry 401 auth errors", async () => {

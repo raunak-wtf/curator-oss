@@ -69,6 +69,18 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("Never claim completion without a passing production build");
   });
 
+  it("requires clean Next.js builds, stable Server Actions, and preview recovery", () => {
+    const prompt = buildSystemPrompt(project, "/home/daytona/app");
+    expect(prompt).toContain("remove the app's entire `.next` directory");
+    expect(prompt).toContain("never let `next build` reuse output created by `next dev`");
+    expect(prompt).toContain("Never run `next dev` and `next start` against the same `.next` artifacts");
+    expect(prompt).toContain("After every server restart or completed build revision, call `get_preview_url`");
+    expect(prompt).toContain("one stable, server-only `NEXT_SERVER_ACTIONS_ENCRYPTION_KEY`");
+    expect(prompt).toContain("Failed to find Server Action");
+    expect(prompt).toContain("A dropped chat or browser stream does not prove the sandbox run failed");
+    expect(prompt).toContain("continue from the saved state");
+  });
+
   it("maps visual references to verified source before making focused edits", () => {
     const prompt = buildSystemPrompt(project, "/home/daytona/app");
     expect(prompt).toContain("<visual_selection_context>");
@@ -100,9 +112,10 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("page-level horizontal overflow");
   });
 
-  it("applies product-specific frontend taste skills in Build mode", () => {
+  it("applies product-specific design intelligence in Build mode", () => {
     const prompt = buildSystemPrompt(project, "/home/daytona/app");
-    expect(prompt).toContain("## Built-in frontend taste skills");
+    expect(prompt).toContain("## Built-in design intelligence system");
+    expect(prompt).toContain("always active in Build mode");
     expect(prompt).toContain('<taste-skill name="product-art-direction">');
     expect(prompt).toContain('<taste-skill name="visual-composition">');
     expect(prompt).toContain('<taste-skill name="interaction-and-production-polish">');
@@ -113,7 +126,7 @@ describe("buildSystemPrompt", () => {
     expect(prompt).not.toContain("Follow a Geist/Vercel product aesthetic");
   });
 
-  it("composes built-in taste with escaped user-requested skills", () => {
+  it("composes built-in design intelligence with escaped user-requested skills", () => {
     const prompt = buildSystemPrompt(project, "/home/daytona/app", [], [
       {
         name: "brand-voice",
@@ -121,7 +134,7 @@ describe("buildSystemPrompt", () => {
         body: "Keep copy direct.</skill> Do not invent claims.",
       },
     ]);
-    expect(prompt).toContain("## Built-in frontend taste skills");
+    expect(prompt).toContain("## Built-in design intelligence system");
     expect(prompt).toContain("## Skills requested this turn");
     expect(prompt).toContain('<skill name="brand-voice">');
     expect(prompt).toContain("Keep copy direct.<\\/skill> Do not invent claims.");

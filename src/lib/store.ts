@@ -5,6 +5,7 @@ const { db } = dbModule;
 export const isDatabaseConfigured = Boolean(dbModule.isDatabaseConfigured);
 import {
   agentApprovals,
+  agentRunMetrics,
   attachments,
   billingWebhookEvents,
   creditUsageEvents,
@@ -46,6 +47,9 @@ import type {
   AgentApprovalDecision,
   AgentApprovalItem,
   AgentApprovalRequest,
+  AgentRunMetric,
+  AgentRunMetricStatus,
+  AgentRunPerformance,
   AnalyticsDevice,
   AnalyticsEventRecord,
   Attachment,
@@ -127,6 +131,7 @@ type MemoryStore = {
   users?: MemoryUser[];
   subscriptions?: UserSubscription[];
   creditUsageEvents?: CreditUsageEvent[];
+  agentRunMetrics?: AgentRunMetric[];
   webhookEvents?: Set<string>;
   projects: Project[];
   messages: Message[];
@@ -170,6 +175,7 @@ const memory =
 memory.users ??= [];
 memory.subscriptions ??= [];
 memory.creditUsageEvents ??= [];
+memory.agentRunMetrics ??= [];
 memory.webhookEvents ??= new Set<string>();
 memory.domains ??= [];
 memory.repositoryCache ??= new Map();
@@ -1988,6 +1994,28 @@ function mapCreditUsageEvent(
   };
 }
 
+function normalizeAgentRunMetricStatus(value: string): AgentRunMetricStatus {
+  if (value === "checkpoint" || value === "awaiting_user" || value === "error") return value;
+  return "completed";
+}
+
+function mapAgentRunMetric(row: typeof agentRunMetrics.$inferSelect): AgentRunMetric {
+  return {
+    id: row.id,
+    projectId: row.projectId ?? null,
+    userId: row.userId,
+    messageId: row.messageId ?? null,
+    mode: row.mode === "plan" || row.mode === "security" ? row.mode : "build",
+    status: normalizeAgentRunMetricStatus(row.status),
+    errorCategory: row.errorCategory ?? null,
+    startedAt: row.startedAt.toISOString(),
+    completedAt: row.completedAt.toISOString(),
+    totalDurationMs: row.totalDurationMs,
+    performance: row.performance,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
 export function hasActiveSubscriptionAccess(sub: UserSubscription, nowMs = Date.now()): boolean {
   if (sub.status === "active") {
     // Allow a 48h grace window past currentPeriodEnd for webhook delivery delays.
@@ -2284,6 +2312,150 @@ export async function recordCreditUsage(input: {
   ]);
 
   return mapCreditUsageEvent(insertedEvents[0]);
+}
+
+/**
+ * Persists one bounded, privacy-safe performance snapshot for an agent run.
+ * The run id is supplied by the runner, making repeated writes idempotent.
+ */
+export async function recordAgentRunMetric(input: {
+  id: string;
+  projectId: string | null;
+  userId: string;
+  messageId: string | null;
+  mode: "build" | "plan" | "security";
+  status: AgentRunMetricStatus;
+  errorCategory?: string | null;
+  startedAt: string;
+  completedAt: string;
+  totalDurationMs: number;
+  performance: AgentRunPerformance;
+}): Promise<AgentRunMetric> {
+  const now = new Date();
+  const startedAt = new Date(input.startedAt);
+  const completedAt = new Date(input.completedAt);
+  const safeStartedAt = Number.isFinite(startedAt.getTime()) ? startedAt : now;
+  const safeCompletedAt = Number.isFinite(completedAt.getTime()) ? completedAt : now;
+  const metric: AgentRunMetric = {
+    id: input.id,
+    projectId: input.projectId,
+    userId: input.userId,
+    messageId: input.messageId,
+    mode: input.mode,
+    status: input.status,
+    errorCategory: input.errorCategory?.slice(0, 80) ?? null,
+    startedAt: safeStartedAt.toISOString(),
+    completedAt: safeCompletedAt.toISOString(),
+    totalDurationMs: safeNonNegInt(input.totalDurationMs, 0),
+    performance: input.performance,
+    createdAt: now.toISOString(),
+  };
+
+  if (!db) {
+    memory.agentRunMetrics ??= [];
+    const existingIndex = memory.agentRunMetrics.findIndex((item) => item.id === input.id);
+    if (existingIndex >= 0) {
+      metric.createdAt = memory.agentRunMetrics[existingIndex].createdAt;
+      memory.agentRunMetrics[existingIndex] = metric;
+    } else {
+      memory.agentRunMetrics.unshift(metric);
+    }
+    return metric;
+  }
+
+  const [row] = await db
+    .insert(agentRunMetrics)
+    .values({
+      id: metric.id,
+      projectId: metric.projectId,
+      userId: metric.userId,
+      messageId: metric.messageId,
+      mode: metric.mode,
+      status: metric.status,
+      errorCategory: metric.errorCategory,
+      startedAt: safeStartedAt,
+      completedAt: safeCompletedAt,
+      totalDurationMs: metric.totalDurationMs,
+      performance: metric.performance,
+    })
+    .onConflictDoUpdate({
+      target: agentRunMetrics.id,
+      set: {
+        projectId: metric.projectId,
+        messageId: metric.messageId,
+        mode: metric.mode,
+        status: metric.status,
+        errorCategory: metric.errorCategory,
+        completedAt: safeCompletedAt,
+        totalDurationMs: metric.totalDurationMs,
+        performance: metric.performance,
+      },
+    })
+    .returning();
+
+  return mapAgentRunMetric(row);
+}
+
+export async function listRecentAgentRunMetrics(limit = 100): Promise<AgentRunMetric[]> {
+  const safeLimit = Math.max(1, Math.min(500, Math.trunc(limit)));
+  if (!db) {
+    memory.agentRunMetrics ??= [];
+    return memory.agentRunMetrics.slice(0, safeLimit).map((metric) => ({
+      ...metric,
+      performance: structuredClone(metric.performance),
+    }));
+  }
+  const rows = await db.select().from(agentRunMetrics).orderBy(desc(agentRunMetrics.createdAt)).limit(safeLimit);
+  return rows.map(mapAgentRunMetric);
+}
+
+function percentile(values: number[], fraction: number) {
+  if (values.length === 0) return null;
+  const sorted = values.map((value) => safeNonNegInt(value, 0)).sort((left, right) => left - right);
+  const index = Math.max(0, Math.min(sorted.length - 1, Math.ceil(fraction * sorted.length) - 1));
+  return sorted[index];
+}
+
+/** Admin-only aggregate/export source. Contains no prompt, source, path, command, log, or user identity data. */
+export async function getAdminPerformanceData(limit = 200) {
+  const runs = await listRecentAgentRunMetrics(limit);
+  const completed = runs.filter((run) => run.status === "completed");
+  const totalDurations = completed.map((run) => run.totalDurationMs);
+  const firstPreviewDurations = completed
+    .map((run) => run.performance.timeToFirstPreviewMs)
+    .filter((value): value is number => typeof value === "number");
+  const turns = completed.map((run) => run.performance.model.turns);
+  const inputTokens = completed.map((run) =>
+    run.performance.model.turnMetrics.reduce((total, turn) => total + turn.promptTokens, 0),
+  );
+
+  return {
+    schemaVersion: 1 as const,
+    sampleSize: runs.length,
+    completedSampleSize: completed.length,
+    summary: {
+      totalDurationMs: { p50: percentile(totalDurations, 0.5), p95: percentile(totalDurations, 0.95) },
+      firstPreviewMs: { p50: percentile(firstPreviewDurations, 0.5), p95: percentile(firstPreviewDurations, 0.95) },
+      modelTurns: { p50: percentile(turns, 0.5), p95: percentile(turns, 0.95) },
+      inputTokens: { p50: percentile(inputTokens, 0.5), p95: percentile(inputTokens, 0.95) },
+    },
+    statusCounts: Object.fromEntries(
+      (["completed", "checkpoint", "awaiting_user", "error"] as const).map((status) => [
+        status,
+        runs.filter((run) => run.status === status).length,
+      ]),
+    ),
+    recentRuns: runs.map((run) => ({
+      id: run.id,
+      mode: run.mode,
+      status: run.status,
+      errorCategory: run.errorCategory,
+      startedAt: run.startedAt,
+      completedAt: run.completedAt,
+      totalDurationMs: run.totalDurationMs,
+      performance: run.performance,
+    })),
+  };
 }
 
 export async function listUserCreditUsage(userId: string, limit = 30): Promise<CreditUsageEvent[]> {

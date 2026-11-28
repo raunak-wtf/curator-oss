@@ -11,6 +11,7 @@ export type AccumulatedToolCall = {
 
 export type StreamUsage = {
   promptTokens: number;
+  cachedPromptTokens: number;
   completionTokens: number;
   totalTokens: number;
 };
@@ -26,6 +27,7 @@ export type StreamTurnResult = {
 export type StreamChunkLike = {
   usage?: {
     prompt_tokens?: number | null;
+    prompt_tokens_details?: { cached_tokens?: number | null } | null;
     completion_tokens?: number | null;
     total_tokens?: number | null;
   } | null;
@@ -181,6 +183,7 @@ async function nextWithTimeout<T>(
 export type StreamTurnOptions = {
   createStream: (signal: AbortSignal) => Promise<AsyncIterable<StreamChunkLike>>;
   onStatus?: (label: string) => void | Promise<void>;
+  onAttempt?: (attempt: number) => void | Promise<void>;
   maxAttempts?: number;
   firstChunkTimeoutMs?: number;
   chunkStallTimeoutMs?: number;
@@ -202,6 +205,7 @@ export async function streamModelTurnWithRetry(options: StreamTurnOptions): Prom
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    await options.onAttempt?.(attempt);
     const controller = new AbortController();
     const turnDeadlineTimer = setTimeout(() => {
       controller.abort(
@@ -274,11 +278,13 @@ export async function streamModelTurnWithRetry(options: StreamTurnOptions): Prom
 
           if (step.value.usage) {
             const promptTokens = Number(step.value.usage.prompt_tokens ?? 0);
+            const cachedPromptTokens = Number(step.value.usage.prompt_tokens_details?.cached_tokens ?? 0);
             const completionTokens = Number(step.value.usage.completion_tokens ?? 0);
             const totalTokens = Number(step.value.usage.total_tokens ?? promptTokens + completionTokens);
             if (promptTokens > 0 || completionTokens > 0 || totalTokens > 0) {
               usage = {
                 promptTokens: Math.max(0, Math.trunc(promptTokens)),
+                cachedPromptTokens: Math.max(0, Math.trunc(cachedPromptTokens)),
                 completionTokens: Math.max(0, Math.trunc(completionTokens)),
                 totalTokens: Math.max(0, Math.trunc(totalTokens)),
               };

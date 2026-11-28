@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createResilientNeonFetch } from "./index";
+import { createResilientNeonFetch, IDEMPOTENT_SCHEMA_PATCHES } from "./index";
 
 describe("createResilientNeonFetch", () => {
   it("retries transient network failures and 503 responses before succeeding", async () => {
@@ -64,5 +64,13 @@ describe("createResilientNeonFetch", () => {
     });
     expect(customerRes.status).toBe(400);
     expect(healFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("runtime schema patches", () => {
+  it("creates the agent run performance table and indexes idempotently", () => {
+    const ddl = IDEMPOTENT_SCHEMA_PATCHES.join("\n");
+    expect(ddl).toContain('CREATE TABLE IF NOT EXISTS "agent_run_metrics"');
+    expect(ddl).toContain('CREATE INDEX IF NOT EXISTS "agent_run_metrics_created_idx"');
   });
 });

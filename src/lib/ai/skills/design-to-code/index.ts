@@ -1,12 +1,10 @@
-export type InternalDesignSkill = {
-  name: string;
-  description: string;
-  instructions: readonly string[];
-};
+import { renderInternalDesignSkill, type InternalDesignSkill } from "../internal-skill";
 
 /**
  * First-party internal `design-to-code` intelligence (modeled after `cloud-skills.ts`).
- * These skills are NEVER exposed in the public `/` skills menu or database `skills` table—
+ * Adapted from the MIT-licensed `design-to-code` skill by Atharvsinh-codez
+ * (https://github.com/Atharvsinh-codez/skills) for Cognix's internal Next.js workspace.
+ * These skills are NEVER exposed in the public `/skills` menu or database `skills` table—
  * they run automatically inside Cognix's Build and Plan prompts so the agent consistently picks
  * cohesive color palettes, design systems, typography, responsive layouts, and executes
  * high-fidelity image/design-to-code builds on its own.
@@ -19,7 +17,7 @@ export const DESIGN_TO_CODE_SKILLS: readonly InternalDesignSkill[] = [
       "Before writing UI code, silently dispatch into one **source mode** (`Reference reconstruction` when screenshots/mockups/designs are provided; `Greenfield art direction` for new visual apps; `Hybrid expansion` when extending a reference with new sections/routes/breakpoints; `Retrofit or repair` for targeted UI fixes) and one **surface track** (`Marketing or brand`, `Product or operational`, or `Mixed product`—never blend marketing hero furniture into authenticated dashboards).",
       "Resolve design conflicts in strict authority order: explicit user requirements → supplied assets/copy (`/user-uploads/...`) → observable pixels/behavior in attached references → existing app design system → surface-track defaults. Distinguish **Observed**, **Inferred**, and **Substituted** choices—never silently invent a new layout when an authoritative reference image was supplied.",
       "Whenever the user attaches a screenshot, Figma export, mockup, or design image, visually inspect it at full detail before coding: extract viewport/fold, container max-widths, gutters, column grid, section rhythm, typography classification & glyph cues, semantic color roles, image crop/focal points, and interactive states. Never paste a screenshot behind the page or build a flattened image UI.",
-      "Use `read_design_guide` automatically on demand (never ask the user to invoke a skill): call `reference-forensics` + `typography-and-fonts` when translating attached images/mockups into code; call `art-direction` + `typography-and-fonts` + `interface-craft` when creating a new app or redesigning a theme/color system; call `motion` when designing animations or interactive transitions; call `verification` before final QA on complex interfaces.",
+      "Call `read_design_guide` automatically on demand per the playbook routing (never ask the user to invoke a skill); on complex interfaces read `verification` before final QA.",
     ],
   },
   {
@@ -46,34 +44,10 @@ export const DESIGN_TO_CODE_SKILLS: readonly InternalDesignSkill[] = [
   },
 ];
 
-function renderDesignSkill(skill: InternalDesignSkill): string {
-  return `<design-skill name="${skill.name}">\nDescription: ${skill.description}\n\n${skill.instructions.map((line) => `- ${line}`).join("\n")}\n</design-skill>`;
-}
-
-export function designToCodeContext(options: { hasImageAttachments?: boolean } = {}): string {
-  const blocks = DESIGN_TO_CODE_SKILLS.map(renderDesignSkill).join("\n\n");
+export function designToCodeSection(options: { hasImageAttachments?: boolean } = {}): string {
+  const blocks = DESIGN_TO_CODE_SKILLS.map((skill) => renderInternalDesignSkill("design-skill", skill)).join("\n\n");
   const imagePriority = options.hasImageAttachments
     ? `\n<image_to_code_priority>\nThis turn includes one or more visual image attachments. Treat them as primary visual design evidence: inspect every attached image closely, call \`read_design_guide({ topic: "reference-forensics" })\` (plus \`typography-and-fonts\` and \`interface-craft\` as needed) before writing UI code, extract the observed layout grid, color tokens, typography scale, surfaces, and states, and rebuild the interface faithfully in real responsive semantic code (replacing any emojis with crisp SVG icons).\n</image_to_code_priority>\n`
     : "";
-
-  return `## Built-in design-to-code system
-
-These internal Cognix design-engineering skills are always active automatically in Build mode (the user never needs to invoke a slash skill). Use them alongside \`read_design_guide\` (\`core\`, \`art-direction\`, \`reference-forensics\`, \`typography-and-fonts\`, \`interface-craft\`, \`motion\`, \`verification\`) to choose clean, cohesive color themes, typography, layouts, and execute high-fidelity image/design-to-code builds.
-${imagePriority}
-${blocks}
-
-`;
-}
-
-export function planDesignToCodeContext(options: { hasImageAttachments?: boolean } = {}): string {
-  const imageNote = options.hasImageAttachments
-    ? " Visual image attachments are present this turn: inspect them at full detail and call `read_design_guide({ topic: \"reference-forensics\" })` so your plan captures exact observed layout geometry, semantic color roles, typography, responsive transforms, and SVG icon substitutions."
-    : "";
-
-  return `## Built-in design-to-code planning intelligence
-
-- Design plans automatically follow Cognix's internal **design-to-code** system: lock a domain-appropriate semantic color token palette (tinted neutrals + one clear accent + status/focus roles), purposeful typography pairing (max 2 open-licensed families + optional mono, Geist superfamily fallback), lightest-sufficient surface hierarchy (whitespace → divider → tonal well → card), responsive recomposition across 390px / 768px / 1440px, strict **SVG-only iconography with zero emojis**, and purposeful \`< 300ms\` compositor-only motion.
-- You may call \`read_design_guide\` (\`core\`, \`art-direction\`, \`reference-forensics\`, \`typography-and-fonts\`, \`interface-craft\`, \`motion\`, \`verification\`) in Plan mode to align design details before writing the plan.${imageNote}
-
-`;
+  return `### Design-to-code reconstruction skills\n\n${blocks}${imagePriority}`;
 }

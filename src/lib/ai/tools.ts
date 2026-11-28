@@ -72,6 +72,36 @@ export const agentTools = [
   {
     type: "function" as const,
     function: {
+      name: "read_files",
+      description:
+        "Read up to 12 UTF-8 text files in one batched call (capped at 180 KB total). Prefer this over repeated single read_file calls during initial discovery.",
+      parameters: {
+        type: "object",
+        properties: {
+          files: {
+            type: "array",
+            minItems: 1,
+            maxItems: 12,
+            items: {
+              type: "object",
+              properties: {
+                path: { type: "string", description: "Project-relative file path." },
+                startLine: { type: "integer", minimum: 1 },
+                endLine: { type: "integer", minimum: 1 },
+              },
+              required: ["path"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["files"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "write_file",
       description: "Create or completely replace a UTF-8 text file in the project.",
       parameters: {
@@ -99,6 +129,37 @@ export const agentTools = [
           replaceAll: { type: "boolean", description: "Replace every exact match. Defaults to false and requires one unique match." },
         },
         required: ["path", "oldText", "newText"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "batch_edit_files",
+      description:
+        "Transactionally apply up to 10 exact text edits across one or more existing UTF-8 files. All matches are validated before any file is written; if any edit has stale context, no files are modified.",
+      parameters: {
+        type: "object",
+        properties: {
+          edits: {
+            type: "array",
+            minItems: 1,
+            maxItems: 10,
+            items: {
+              type: "object",
+              properties: {
+                path: { type: "string", description: "Project-relative existing file path." },
+                oldText: { type: "string", description: "Exact text currently in the file." },
+                newText: { type: "string", description: "Replacement text." },
+                replaceAll: { type: "boolean", description: "Replace every exact match in this file. Defaults to false." },
+              },
+              required: ["path", "oldText", "newText"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["edits"],
         additionalProperties: false,
       },
     },
@@ -358,6 +419,55 @@ async function withSandboxRetry<T>(fn: () => Promise<T>): Promise<T> {
   throw lastError instanceof Error ? lastError : new Error("Sandbox operation failed.");
 }
 
+export const READ_FILES_LIMITS = {
+  maxFiles: 12,
+  maxTotalBytes: 180_000,
+  maxLinesPerFile: 1_200,
+} as const;
+
+export type TransactionalEditInput = {
+  path: string;
+  oldText: string;
+  newText: string;
+  replaceAll?: boolean;
+};
+
+export function applyTransactionalEdits(
+  initialFiles: Map<string, string>,
+  edits: TransactionalEditInput[],
+): {
+  updatedFiles: Map<string, { before: string; after: string; matches: number }>;
+} {
+  const working = new Map<string, string>(initialFiles);
+  const matchCounts = new Map<string, number>();
+
+  for (let index = 0; index < edits.length; index += 1) {
+    const edit = edits[index];
+    const current = working.get(edit.path);
+    if (current === undefined) {
+      throw new Error(`Batch edit #${index + 1} (${edit.path}) failed: file does not exist. No files were modified.`);
+    }
+    try {
+      const applied = applyExactEdit(current, edit.oldText, edit.newText, edit.replaceAll === true);
+      working.set(edit.path, applied.content);
+      matchCounts.set(edit.path, (matchCounts.get(edit.path) ?? 0) + applied.matches);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Edit failed.";
+      throw new Error(`Batch edit #${index + 1} (${edit.path}) failed: ${detail} No files were modified.`);
+    }
+  }
+
+  const updatedFiles = new Map<string, { before: string; after: string; matches: number }>();
+  for (const [filePath, matches] of matchCounts.entries()) {
+    updatedFiles.set(filePath, {
+      before: initialFiles.get(filePath) ?? "",
+      after: working.get(filePath) ?? "",
+      matches,
+    });
+  }
+  return { updatedFiles };
+}
+
 export function applyExactEdit(content: string, oldText: string, newText: string, replaceAll = false) {
   if (!oldText) throw new Error("oldText must not be empty.");
   const matches = content.split(oldText).length - 1;
@@ -614,6 +724,140 @@ export async function executeAgentTool(
     };
   }
 
+  if (name === "read_files") {
+    const input = z
+      .object({
+        files: z
+          .array(
+            z
+              .object({
+                path: relativePathSchema,
+                startLine: z.number().int().min(1).optional().default(1),
+                endLine: z.number().int().min(1).optional(),
+              })
+              .refine((value) => value.endLine === undefined || value.endLine >= value.startLine, {
+                message: "endLine must be greater than or equal to startLine.",
+              }),
+          )
+          .min(1)
+          .max(READ_FILES_LIMITS.maxFiles),
+      })
+      .parse(rawInput);
+
+    let remainingBytes: number = READ_FILES_LIMITS.maxTotalBytes;
+    const results: Array<
+      | { path: string; startLine: number; endLine: number; totalLines: number; content: string; truncated?: boolean }
+      | { path: string; error: string }
+    > = [];
+
+    for (const item of input.files) {
+      const relative = projectRelativePath(root, item.path);
+      if (remainingBytes <= 0) {
+        results.push({ path: relative, error: "Skipped: batch read byte budget (180 KB) exhausted. Read remaining files in a narrower call." });
+        continue;
+      }
+      try {
+        const buffer = await withSandboxRetry(() => sandbox.fs.downloadFile(remotePath(fsRoot, relative)));
+        const decoded = textFileContent(buffer, relative);
+        const lines = decoded.split("\n");
+        const endLine = Math.min(item.endLine ?? lines.length, item.startLine + READ_FILES_LIMITS.maxLinesPerFile - 1, lines.length);
+        let content = lines.slice(item.startLine - 1, endLine).join("\n");
+        let truncated = endLine < lines.length;
+        if (Buffer.byteLength(content, "utf8") > remainingBytes) {
+          content = content.slice(0, Math.max(0, remainingBytes));
+          truncated = true;
+        }
+        remainingBytes = Math.max(0, remainingBytes - Buffer.byteLength(content, "utf8"));
+        results.push({
+          path: relative,
+          startLine: item.startLine,
+          endLine,
+          totalLines: lines.length,
+          content,
+          ...(truncated ? { truncated: true } : {}),
+        });
+      } catch (error) {
+        results.push({
+          path: relative,
+          error: error instanceof Error ? error.message : "Could not read file.",
+        });
+      }
+    }
+
+    const okCount = results.filter((entry) => "content" in entry).length;
+    return {
+      output: JSON.stringify({ files: results, budgetRemainingBytes: remainingBytes }),
+      summary: `Read ${okCount} ${okCount === 1 ? "file" : "files"} in batch`,
+    };
+  }
+
+  if (name === "batch_edit_files") {
+    const input = z
+      .object({
+        edits: z
+          .array(
+            z.object({
+              path: relativePathSchema,
+              oldText: z.string().min(1).max(500_000),
+              newText: z.string().max(500_000),
+              replaceAll: z.boolean().optional().default(false),
+            }),
+          )
+          .min(1)
+          .max(10),
+      })
+      .parse(rawInput);
+
+    const normalizedEdits = input.edits.map((edit) => ({
+      ...edit,
+      path: projectRelativePath(root, edit.path),
+    }));
+    const uniquePaths = [...new Set(normalizedEdits.map((edit) => edit.path))];
+    const initialFiles = new Map<string, string>();
+    for (const relative of uniquePaths) {
+      const buffer = await withSandboxRetry(() => sandbox.fs.downloadFile(remotePath(fsRoot, relative)));
+      initialFiles.set(relative, textFileContent(buffer, relative));
+    }
+
+    const { updatedFiles } = applyTransactionalEdits(initialFiles, normalizedEdits);
+    if (enforceBuildStack) {
+      for (const [relative, change] of updatedFiles.entries()) {
+        assertBuildModeFileChangeAllowed({ path: relative, before: change.before, after: change.after, cloudEnabled });
+      }
+    }
+
+    const changedPaths: string[] = [];
+    const fileChanges: FileChangeSnapshot[] = [];
+    const perFileSummary: Array<{ path: string; matches: number; linesBefore: number; linesAfter: number }> = [];
+    const storageWarnings: string[] = [];
+
+    for (const [relative, change] of updatedFiles.entries()) {
+      await withSandboxRetry(() => sandbox.fs.uploadFile(Buffer.from(change.after), remotePath(fsRoot, relative)));
+      await upsertProjectFile(project.id, relative, change.after);
+      changedPaths.push(relative);
+      fileChanges.push(fileChangeSnapshot(relative, change.before, change.after));
+      perFileSummary.push({
+        path: relative,
+        matches: change.matches,
+        linesBefore: change.before.split("\n").length,
+        linesAfter: change.after.split("\n").length,
+      });
+      if (enforceBuildStack && cloudEnabled) {
+        storageWarnings.push(...detectCloudStorageWarnings(change.after));
+      }
+    }
+
+    return {
+      output: JSON.stringify({
+        updated: perFileSummary,
+        ...(storageWarnings.length ? { warnings: storageWarnings } : {}),
+      }),
+      summary: `Batch-edited ${changedPaths.length} ${changedPaths.length === 1 ? "file" : "files"}`,
+      changedPaths,
+      fileChanges,
+    };
+  }
+
   if (name === "write_file") {
     const input = z.object({ path: relativePathSchema, content: z.string().max(1_000_000) }).parse(rawInput);
     const relative = projectRelativePath(root, input.path);
@@ -801,13 +1045,16 @@ export async function executeAgentTool(
         summary: `Started background command: ${input.command.slice(0, 60)}`,
       };
     }
-    // Free port-3000 server RAM and prevent `.next` corruption before running a production build inside 1 GiB sandboxes.
-    if (isProductionBuildCommand(input.command)) {
+    const commandDirectory = remotePath(root, directory);
+    // Free port-3000 server RAM and guarantee that a production build cannot reuse artifacts
+    // emitted by `next dev` or an earlier build inside the same sandbox.
+    if (enforceBuildStack && isProductionBuildCommand(input.command)) {
       await stopDevelopmentPreview(sandbox, project, root).catch(() => undefined);
+      await sandbox.process.executeCommand("rm -rf -- .next", commandDirectory, undefined, 30);
     }
     const response = await sandbox.process.executeCommand(
       input.command,
-      remotePath(root, directory),
+      commandDirectory,
       { CI: "1", COGNIX_HOSTED_PREVIEW: "1", NEXT_TELEMETRY_DISABLED: "1", NODE_OPTIONS: boundedNodeOptions },
       input.timeoutSeconds,
     );

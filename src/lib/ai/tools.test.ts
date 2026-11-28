@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { agentTools, applyExactEdit, detectCloudStorageWarnings, isPrivateNetworkAddress, projectRelativePath } from "./tools";
+import {
+  agentTools,
+  applyExactEdit,
+  applyTransactionalEdits,
+  detectCloudStorageWarnings,
+  isPrivateNetworkAddress,
+  projectRelativePath,
+} from "./tools";
 
 describe("agent tool contract", () => {
   it("exposes discovery, editing, terminal, process, preview, and web tools", () => {
@@ -8,8 +15,10 @@ describe("agent tool contract", () => {
       "find_files",
       "search_files",
       "read_file",
+      "read_files",
       "write_file",
       "edit_file",
+      "batch_edit_files",
       "move_file",
       "delete_file",
       "run_command",
@@ -63,6 +72,29 @@ describe("applyExactEdit", () => {
 
   it("rejects stale text instead of overwriting the file", () => {
     expect(() => applyExactEdit("current", "stale", "new")).toThrow("exact text was not found");
+  });
+
+  it("applies multi-file transactional edits atomically and fails cleanly on stale context", () => {
+    const initial = new Map<string, string>([
+      ["src/a.ts", "export const a = 1;\nexport const b = 2;"],
+      ["src/b.ts", "export const title = 'Old';"],
+    ]);
+
+    const committed = applyTransactionalEdits(initial, [
+      { path: "src/a.ts", oldText: "a = 1", newText: "a = 10" },
+      { path: "src/a.ts", oldText: "b = 2", newText: "b = 20" },
+      { path: "src/b.ts", oldText: "'Old'", newText: "'New'" },
+    ]);
+    expect(committed.updatedFiles.get("src/a.ts")?.after).toBe("export const a = 10;\nexport const b = 20;");
+    expect(committed.updatedFiles.get("src/a.ts")?.matches).toBe(2);
+    expect(committed.updatedFiles.get("src/b.ts")?.after).toBe("export const title = 'New';");
+
+    expect(() =>
+      applyTransactionalEdits(initial, [
+        { path: "src/a.ts", oldText: "a = 1", newText: "a = 99" },
+        { path: "src/b.ts", oldText: "missing", newText: "nope" },
+      ]),
+    ).toThrow(/No files were modified/);
   });
 });
 

@@ -1,10 +1,11 @@
 /**
  * Internal design-to-code playbooks the build and plan agents read with the `read_design_guide` tool.
- * Adapted from the MIT-licensed `design-to-code` skill suite for Cognix's internal Next.js workspace.
- * They are NEVER listed with user `/skills` or exposed in the public skills database. Import only from server code.
+ * Adapted from the MIT-licensed `design-to-code` skill suite (Atharvsinh-codez/skills) for
+ * Cognix's internal Next.js workspace. They are NEVER listed with user `/skills` or exposed in
+ * the public skills database. Import only from server code (via `skills/design-intelligence/guides`).
  */
 
-export const DESIGN_GUIDE_TOPICS = [
+export const CORE_DESIGN_GUIDE_TOPICS = [
   "core",
   "art-direction",
   "reference-forensics",
@@ -14,9 +15,9 @@ export const DESIGN_GUIDE_TOPICS = [
   "verification",
 ] as const;
 
-export type DesignGuideTopic = (typeof DESIGN_GUIDE_TOPICS)[number];
+export type CoreDesignGuideTopic = (typeof CORE_DESIGN_GUIDE_TOPICS)[number];
 
-export const DESIGN_GUIDE_LABELS: Record<DesignGuideTopic, string> = {
+export const CORE_DESIGN_GUIDE_LABELS: Record<CoreDesignGuideTopic, string> = {
   core: "design-to-code core",
   "art-direction": "art direction",
   "reference-forensics": "reference forensics",
@@ -630,7 +631,7 @@ Before finishing every Build turn:
 3. **Live preview & console gate:** Ensure the dev server runs on \`0.0.0.0:3000\`, run \`read_preview_console\` (with \`probeRoutes\` covering key pages and API routes) and \`inspect_preview\` to verify HTTP 2xx/3xx responses, zero console/hydration errors, zero failed local assets, and working auth/data routes, then call \`get_preview_url\`.
 4. **Honest evidence reporting:** Never claim pixel-by-pixel visual screenshot comparison when only HTML/HTTP/console inspection was executed. Report clearly what was verified and any documented substitutions (e.g., open-licensed font match or SVG replacement of a mockup emoji).`;
 
-export const DESIGN_GUIDES: Record<DesignGuideTopic, string> = {
+export const CORE_DESIGN_GUIDES: Record<CoreDesignGuideTopic, string> = {
   core: CORE_GUIDE,
   "art-direction": ART_DIRECTION_GUIDE,
   "reference-forensics": REFERENCE_FORENSICS_GUIDE,

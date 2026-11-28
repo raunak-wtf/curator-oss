@@ -29,6 +29,7 @@ import {
   getProjectRepository,
   listProjectConsoleLogs,
   listSecretNames,
+  recordAgentRunMetric,
   recordCreditUsage,
   refundReservedCredits,
   updateAttachmentSandboxPath,
@@ -63,7 +64,25 @@ import { inferPromptCloudFeatures } from "./cloud-intent";
 import { streamModelTurnWithRetry } from "./model-stream";
 import { buildPlanSystemPrompt, buildSystemPrompt, type PromptCloudState } from "./system-prompt";
 import { buildMultimodalUserContent, hasNativeFileParts } from "./multimodal";
-import { createTerminalLog, parseRunCommandOutput } from "./terminal-log";
+import {
+  createTerminalLog,
+  isDependencyInstallCommand,
+  isPreviewStartCommand,
+  parseRunCommandOutput,
+} from "./terminal-log";
+import {
+  getPerformanceArchitectureMetadata,
+  isBoundedAgentEnabled,
+  isContextCompactionEnabled,
+  isOneBuildPolicyEnabled,
+  isScaffoldBootstrapEnabled,
+} from "../feature-flags";
+import { materializeProjectScaffold } from "../scaffold/bootstrap";
+import { buildDeterministicCommitMessage } from "./autofix";
+import { compactAgentMessages, shouldCompactContext, truncateCommandOutputDeterministically } from "./context-compaction";
+import { parseBuildDiagnostics } from "./diagnostic-parser";
+import { createAgentLoopGuard, resolveAdaptiveTurnBudget } from "./loop-guard";
+import { createRunPerformanceTracker } from "./run-performance";
 import { interactiveTools, isInteractiveTool, runInteractiveTool } from "./interactive-tools";
 import { cloudProviderTools, executeCloudProviderTool, isCloudProviderTool } from "./cloud-tools";
 import { GITHUB_TOOL_NAME, githubTool, runGitHubCommit } from "./github-tool";
@@ -110,6 +129,18 @@ function isNativeFileCompatibilityError(error: unknown) {
   const message = error instanceof Error ? error.message : "";
   return [400, 415, 422].includes(status ?? 0)
     || /unsupported.*file|file.*unsupported|invalid.*content.*type|content.*type.*file/i.test(message);
+}
+
+function runErrorCategory(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  if (error instanceof Error && error.name === "ModelStreamTimeoutError") return "model_timeout";
+  if (/rate limit|too many requests|\b429\b/i.test(message)) return "model_rate_limit";
+  if (/sandbox|workspace/i.test(message)) return "sandbox";
+  if (/dependency installation failed|npm install/i.test(message)) return "dependency_install";
+  if (/production build failed|npm run build/i.test(message)) return "production_build";
+  if (/development server|preview/i.test(message)) return "preview";
+  if (/database|drizzle|migration/i.test(message)) return "database";
+  return "unknown";
 }
 
 function withFastTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
@@ -184,9 +215,35 @@ export async function runAgent(input: {
   emit: Emit;
 }) {
   const { emit, prompt } = input;
+  const runStartedAt = Date.now();
+  const runMetricId = crypto.randomUUID();
+  const runPerformance = createRunPerformanceTracker(runStartedAt);
+  runPerformance.setArchitecture(getPerformanceArchitectureMetadata());
+  runPerformance.enterStage("sandbox", runStartedAt);
   const approvalMode: ApprovalMode = input.approvalMode ?? "auto";
   const planMode = input.project.mode !== "security" && input.chatMode === "plan";
+  const requestedRunMode: "build" | "plan" | "security" = input.project.mode === "security" ? "security" : planMode ? "plan" : "build";
   const reservedHold = Math.max(0, Math.trunc(input.reservedCreditsHundredths ?? 0));
+  async function persistEarlyRunMetric(messageId: string | null, errorCategory: string) {
+    const completedAt = new Date();
+    await recordAgentRunMetric({
+      id: runMetricId,
+      projectId: input.project.id,
+      userId: input.project.ownerId,
+      messageId,
+      mode: requestedRunMode,
+      status: "error",
+      errorCategory,
+      startedAt: new Date(runStartedAt).toISOString(),
+      completedAt: completedAt.toISOString(),
+      totalDurationMs: completedAt.getTime() - runStartedAt,
+      performance: runPerformance.snapshot({
+        activities: [],
+        commands: { count: 0, failed: 0, durationMs: 0, background: 0, productionBuilds: 0, installs: 0, previewStarts: 0 },
+        nowMs: completedAt.getTime(),
+      }),
+    }).catch(() => undefined);
+  }
 
   if (!isAgentConfigured) {
     if (reservedHold > 0) {
@@ -200,6 +257,7 @@ export async function runAgent(input: {
     }
     const message = await createMessage(input.project.id, "assistant", content, { configurationRequired: true });
     await emit({ type: "done", messageId: message.id });
+    await persistEarlyRunMetric(message.id, "model_not_configured");
     return message;
   }
 
@@ -216,6 +274,7 @@ export async function runAgent(input: {
         if (reservedHold > 0) {
           await refundReservedCredits(input.project.ownerId, reservedHold).catch(() => undefined);
         }
+        await persistEarlyRunMetric(null, "sandbox");
         throw error;
       }
       await emit({ type: "status", label: `Reconnecting workspace (attempt ${sandboxAttempt + 1}/3)…` });
@@ -223,6 +282,7 @@ export async function runAgent(input: {
     }
   }
   if (!ensured) throw (lastSandboxError instanceof Error ? lastSandboxError : new Error("Could not start workspace."));
+  runPerformance.enterStage("setup");
   const { sandbox, project: sandboxProject } = ensured;
   let project = sandboxProject;
   const security = project.mode === "security";
@@ -246,10 +306,30 @@ export async function runAgent(input: {
   if (input.skills?.length) {
     await emit({ type: "status", label: `Applying ${input.skills.map((skill) => `/${skill.name}`).join(", ")}` });
   }
-  const runStartedAt = Date.now();
   const runActivity: AgentRunActivity[] = [];
   let decryptedSecrets = await getDecryptedSecrets(project.id).catch(() => ({} as Record<string, string>));
   const terminal = createTerminalLog(emit, Object.values(decryptedSecrets));
+  const runMode = requestedRunMode;
+  async function persistRunMetric(
+    status: "completed" | "checkpoint" | "awaiting_user" | "error",
+    messageId: string | null,
+    errorCategory: string | null = null,
+  ) {
+    const completedAt = new Date();
+    await recordAgentRunMetric({
+      id: runMetricId,
+      projectId: project.id,
+      userId: project.ownerId,
+      messageId,
+      mode: runMode,
+      status,
+      errorCategory,
+      startedAt: new Date(runStartedAt).toISOString(),
+      completedAt: completedAt.toISOString(),
+      totalDurationMs: completedAt.getTime() - runStartedAt,
+      performance: runPerformance.snapshot({ activities: runActivity, commands: terminal.stats, nowMs: completedAt.getTime() }),
+    }).catch(() => undefined);
+  }
   const [cloud, secretNames, linkedRepository, recentConsoleEntries] = await Promise.all([
     getProjectCloud(project.id).catch(() => null),
     listSecretNames(project.id).then((items) => items.map((item) => item.name)).catch(() => [] as string[]),
@@ -278,58 +358,90 @@ export async function runAgent(input: {
   if (canAutoEnableCloud && !cloudState.enabled) {
     const inferredFeatures = inferPromptCloudFeatures(prompt);
     if (inferredFeatures.length > 0) {
-      await emit({ type: "status", label: "Provisioning Cognix Cloud" });
-      await updateProjectCloud(project.id, {
-        status: "ready",
-        storageEnabled: true,
-        authEnabled: true,
-        lastError: null,
-      }).catch(() => undefined);
-      cloudState.enabled = true;
-      await emit({ type: "cloud_status", enabled: true });
+      await runPerformance.withStage("cloud", async () => {
+        await emit({ type: "status", label: "Provisioning Cognix Cloud" });
+        await updateProjectCloud(project.id, {
+          status: "ready",
+          storageEnabled: true,
+          authEnabled: true,
+          lastError: null,
+        }).catch(() => undefined);
+        cloudState.enabled = true;
+        await emit({ type: "cloud_status", enabled: true });
+      });
     }
   }
   if (!security && cloudState.enabled && isSecretsEncryptionConfigured) {
-    let autoProvisioned = false;
-    if (!cloudState.secretNames.includes("BETTER_AUTH_SECRET")) {
-      await upsertSecret(project.id, "BETTER_AUTH_SECRET", randomBytes(32).toString("base64url"), "cloud").catch(() => undefined);
-      autoProvisioned = true;
-    }
-    if ((!cloudState.secretNames.includes("DATABASE_URL") || !cloud?.neonProjectId) && isNeonApiConfigured()) {
-      await emit({ type: "status", label: "Provisioning Cloud Database" });
-      try {
-        await ensureProjectNeonDatabase(project);
+    await runPerformance.withStage("cloud", async () => {
+      let autoProvisioned = false;
+      if (!cloudState.secretNames.includes("BETTER_AUTH_SECRET")) {
+        await upsertSecret(project.id, "BETTER_AUTH_SECRET", randomBytes(32).toString("base64url"), "cloud").catch(() => undefined);
         autoProvisioned = true;
-      } catch {
-        // Keep running; the agent can inspect status or retry via cloud tools if needed.
       }
-    }
-    if (!cloudState.secretNames.includes("S3_BUCKET") && isBucketlineConfigured()) {
-      await emit({ type: "status", label: "Provisioning Cloud Storage" });
-      try {
-        await ensureProjectStorageBucket(project);
-        autoProvisioned = true;
-      } catch {
-        // Keep running; storage tool can report details if needed.
+      if ((!cloudState.secretNames.includes("DATABASE_URL") || !cloud?.neonProjectId) && isNeonApiConfigured()) {
+        await emit({ type: "status", label: "Provisioning Cloud Database" });
+        try {
+          await ensureProjectNeonDatabase(project);
+          autoProvisioned = true;
+        } catch {
+          // Keep running; the agent can inspect status or retry via cloud tools if needed.
+        }
       }
-    }
-    if (autoProvisioned) {
-      const [freshSecrets, freshNames] = await Promise.all([
-        getDecryptedSecrets(project.id).catch(() => ({} as Record<string, string>)),
-        listSecretNames(project.id).then((items) => items.map((item) => item.name)).catch(() => cloudState.secretNames),
-      ]);
-      decryptedSecrets = freshSecrets;
-      terminal.addSecrets(Object.values(freshSecrets));
-      cloudState.secretNames = freshNames;
-    }
+      if (!cloudState.secretNames.includes("S3_BUCKET") && isBucketlineConfigured()) {
+        await emit({ type: "status", label: "Provisioning Cloud Storage" });
+        try {
+          await ensureProjectStorageBucket(project);
+          autoProvisioned = true;
+        } catch {
+          // Keep running; storage tool can report details if needed.
+        }
+      }
+      if (autoProvisioned) {
+        const [freshSecrets, freshNames] = await Promise.all([
+          getDecryptedSecrets(project.id).catch(() => ({} as Record<string, string>)),
+          listSecretNames(project.id).then((items) => items.map((item) => item.name)).catch(() => cloudState.secretNames),
+        ]);
+        decryptedSecrets = freshSecrets;
+        terminal.addSecrets(Object.values(freshSecrets));
+        cloudState.secretNames = freshNames;
+      }
+    });
   }
   if (!security && cloudState.secretNames.length > 0) {
-    await syncProjectEnv(project).catch(() => undefined);
+    await runPerformance.withStage("cloud", async () => {
+      await syncProjectEnv(project).catch(() => undefined);
+    });
   }
   if (!security && cloudState.enabled) {
-    const liveSummaries = await loadLiveCloudSummaries(project, decryptedSecrets);
-    cloudState.liveDatabaseSummary = liveSummaries.liveDatabaseSummary;
-    cloudState.liveStorageSummary = liveSummaries.liveStorageSummary;
+    await runPerformance.withStage("cloud", async () => {
+      const liveSummaries = await loadLiveCloudSummaries(project, decryptedSecrets);
+      cloudState.liveDatabaseSummary = liveSummaries.liveDatabaseSummary;
+      cloudState.liveStorageSummary = liveSummaries.liveStorageSummary;
+    });
+  }
+  let scaffoldAppliedNote = "";
+  if (!security && !planMode && isScaffoldBootstrapEnabled()) {
+    const bootstrapped = await runPerformance.withStage("scaffold", () =>
+      materializeProjectScaffold({
+        project,
+        sandbox,
+        projectRoot,
+        projectFsRoot,
+        prompt,
+        cloudEnabled: cloudState.enabled,
+        onStatus: (label) => emit({ type: "status", label }),
+      }).catch(() => ({ applied: false as const, reason: "failed" as const })),
+    );
+    if (bootstrapped.applied) {
+      if (bootstrapped.previewUrl) {
+        runPerformance.markFirstPreview();
+        await updateProject(project.id, project.ownerId, {
+          previewUrl: bootstrapped.previewUrl,
+        }).catch(() => undefined);
+        await emit({ type: "preview", url: bootstrapped.previewUrl, sandboxId: sandbox.id });
+      }
+      scaffoldAppliedNote = `Cognix pre-scaffolded this new project (template v${bootstrapped.manifest.templateVersion}, profiles: ${bootstrapped.manifest.profiles.join(", ")}) with dependencies installed and a live preview running on port 3000. Do NOT rewrite package.json, tsconfig.json, next.config.ts, or postcss.config.mjs unless you need an additional package; build the requested product UI, schema, and routes directly on top of the scaffolded files.`;
+    }
   }
   let githubInfo: GitHubCommitInfo | undefined;
 
@@ -422,7 +534,7 @@ export async function runAgent(input: {
         })
       : planMode
         ? buildPlanSystemPrompt(project, projectRoot, stagedAttachments.map((item) => item.attachment), input.skills, cloudState)
-        : `${buildSystemPrompt(project, projectRoot, stagedAttachments.map((item) => item.attachment), input.skills, cloudState, repository)}${githubSyncNote ? `\n\n${githubSyncNote}` : ""}`;
+        : `${buildSystemPrompt(project, projectRoot, stagedAttachments.map((item) => item.attachment), input.skills, cloudState, repository)}${githubSyncNote ? `\n\n${githubSyncNote}` : ""}${scaffoldAppliedNote ? `\n\n${scaffoldAppliedNote}` : ""}`;
 
   let messages: ChatCompletionMessageParam[] = [
     {
@@ -484,7 +596,7 @@ export async function runAgent(input: {
       turns: Math.max(1, modelTurnsExecuted),
       toolCalls: usedTools.length,
       filesChanged: changedPaths.size,
-      commandsRun: terminal.commands.length,
+      commandsRun: terminal.stats.count,
       cloudActions,
       durationMs,
     });
@@ -501,7 +613,7 @@ export async function runAgent(input: {
       turns: Math.max(1, modelTurnsExecuted),
       toolCalls: usedTools.length,
       filesChanged: changedPaths.size,
-      commandsRun: terminal.commands.length,
+      commandsRun: terminal.stats.count,
       cloudActions,
       durationMs,
       creditsHundredths: calc.creditsHundredths,
@@ -521,6 +633,7 @@ export async function runAgent(input: {
 
   /** Saves the turn and stops before the preview steps, because the agent is waiting for the user. */
   async function finishWithQuestions(request: AgentQuestionRequest) {
+    runPerformance.enterStage("persistence");
     const content = finalContent.trim()
       || (request.kind === "enable_cloud" ? "This needs Cognix Cloud. Turn it on to continue." : "Before I continue, I need a quick answer.");
     await emit({ type: "token", value: content });
@@ -557,6 +670,7 @@ export async function runAgent(input: {
       runDurationMs,
       ...usageMeta,
     });
+    await persistRunMetric("awaiting_user", message.id);
     return message;
   }
 
@@ -565,7 +679,20 @@ export async function runAgent(input: {
   let devServerFreshSinceLastBuild = false;
   let runtimeVerifiedClean = false;
   let completionNudges = 0;
-  const maxAgentTurns = resolveAgentMaxTurns();
+  const boundedAgentEnabled = isBoundedAgentEnabled();
+  const contextCompactionEnabled = isContextCompactionEnabled();
+  const oneBuildPolicyEnabled = isOneBuildPolicyEnabled();
+  const inferredCloudCount = inferPromptCloudFeatures(prompt).length;
+  const isNewProjectBuild = !project.previewUrl && input.history.length === 0;
+  const adaptiveBudget = resolveAdaptiveTurnBudget({
+    mode: runMode,
+    prompt,
+    isNewProject: isNewProjectBuild,
+    cloudFeaturesCount: inferredCloudCount,
+    hasVisualSelections: input.visualSelections.length > 0,
+    isErrorRepair: promptAlreadyContainsErrors,
+  });
+  const maxAgentTurns = boundedAgentEnabled ? adaptiveBudget.hardBudget : resolveAgentMaxTurns();
   // Security mode: the build tools minus the preview, plus ask_user and the pull request proposal. No commit tool.
   const securityTools = [
     ...agentTools.filter((tool) => tool.type === "function" && !SECURITY_EXCLUDED_TOOLS.has(tool.function.name)),
@@ -577,6 +704,7 @@ export async function runAgent(input: {
     "list_files",
     "find_files",
     "read_file",
+    "read_files",
     "search_files",
     "get_process_logs",
     "list_processes",
@@ -598,22 +726,24 @@ export async function runAgent(input: {
 
   /** Waits for the user to allow or deny tool calls. Polls the database so it works across server instances. */
   async function waitForApproval(items: ReturnType<typeof describeApproval>[]): Promise<AgentApprovalDecision[]> {
-    const approval = await createAgentApproval(project.id, project.ownerId, items);
-    await emit({ type: "approval_request", approval });
-    await emit({ type: "status", label: items.length === 1 ? "Waiting for your approval" : `Waiting for your approval of ${items.length} actions` });
-    const deadline = Date.now() + APPROVAL_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      const decisions = await getAgentApprovalDecisions(approval.id);
-      if (decisions) {
-        await emit({ type: "approval_resolved", id: approval.id, decisions });
-        return decisions;
+    return runPerformance.withStage("approval", async () => {
+      const approval = await createAgentApproval(project.id, project.ownerId, items);
+      await emit({ type: "approval_request", approval });
+      await emit({ type: "status", label: items.length === 1 ? "Waiting for your approval" : `Waiting for your approval of ${items.length} actions` });
+      const deadline = Date.now() + APPROVAL_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        const decisions = await getAgentApprovalDecisions(approval.id);
+        if (decisions) {
+          await emit({ type: "approval_resolved", id: approval.id, decisions });
+          return decisions;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
       }
-      await new Promise((resolve) => setTimeout(resolve, 1_500));
-    }
-    await expireAgentApproval(approval.id);
-    const expired = items.map((item) => ({ callId: item.callId, decision: "deny" as const, note: "No answer in time. Stop and ask the user to continue when they're back." }));
-    await emit({ type: "approval_resolved", id: approval.id, decisions: expired });
-    return expired;
+      await expireAgentApproval(approval.id);
+      const expired = items.map((item) => ({ callId: item.callId, decision: "deny" as const, note: "No answer in time. Stop and ask the user to continue when they're back." }));
+      await emit({ type: "approval_resolved", id: approval.id, decisions: expired });
+      return expired;
+    });
   }
 
   /**
@@ -673,79 +803,120 @@ export async function runAgent(input: {
    */
   async function verifyFullStackRuntime(): Promise<string | null> {
     if (changedPaths.size > 0 && !devServerFreshSinceLastBuild) {
-      await emit({ type: "status", label: "Restarting preview server cleanly" });
-      await restartDevelopmentPreview(sandbox, project, projectRoot).catch(() => undefined);
+      await runPerformance.withStage("preview", async () => {
+        await emit({ type: "status", label: "Restarting preview server cleanly" });
+        await restartDevelopmentPreview(sandbox, project, projectRoot).catch(() => undefined);
+        runPerformance.recordPreviewRestart();
+      });
       devServerFreshSinceLastBuild = true;
       previewReady = true;
     }
 
-    const discoverCmd = [
-      "routes='/'",
-      "if [ -f src/app/api/auth/\\[...all\\]/route.ts ] || [ -f app/api/auth/\\[...all\\]/route.ts ]; then routes=\"$routes /api/auth/get-session\"; fi",
-      "if [ -f src/app/sign-in/page.tsx ] || [ -f app/sign-in/page.tsx ] || [ -f 'src/app/(auth)/sign-in/page.tsx' ] || [ -f 'app/(auth)/sign-in/page.tsx' ]; then routes=\"$routes /sign-in\"; fi",
-      "if [ -f src/app/sign-up/page.tsx ] || [ -f app/sign-up/page.tsx ] || [ -f 'src/app/(auth)/sign-up/page.tsx' ] || [ -f 'app/(auth)/sign-up/page.tsx' ]; then routes=\"$routes /sign-up\"; fi",
-      "printf '%s' \"$routes\"",
-    ].join("; ");
+    return runPerformance.withStage("probe", async () => {
+      const discoverCmd = [
+        "routes='/'",
+        "if [ -f src/app/api/auth/\\[...all\\]/route.ts ] || [ -f app/api/auth/\\[...all\\]/route.ts ]; then routes=\"$routes /api/auth/get-session\"; fi",
+        "if [ -f src/app/sign-in/page.tsx ] || [ -f app/sign-in/page.tsx ] || [ -f 'src/app/(auth)/sign-in/page.tsx' ] || [ -f 'app/(auth)/sign-in/page.tsx' ]; then routes=\"$routes /sign-in\"; fi",
+        "if [ -f src/app/sign-up/page.tsx ] || [ -f app/sign-up/page.tsx ] || [ -f 'src/app/(auth)/sign-up/page.tsx' ] || [ -f 'app/(auth)/sign-up/page.tsx' ]; then routes=\"$routes /sign-up\"; fi",
+        "printf '%s' \"$routes\"",
+      ].join("; ");
 
-    const discovered = await sandbox.process
-      .executeCommand(discoverCmd, projectRoot, undefined, 10)
-      .catch(() => ({ exitCode: 0, result: "/" }));
-    const probeRoutes = (discovered.result || "/")
-      .trim()
-      .split(/\s+/)
-      .filter((r) => r.startsWith("/"));
+      const discovered = await sandbox.process
+        .executeCommand(discoverCmd, projectRoot, undefined, 10)
+        .catch(() => ({ exitCode: 0, result: "/" }));
+      const probeRoutes = (discovered.result || "/")
+        .trim()
+        .split(/\s+/)
+        .filter((r) => r.startsWith("/"));
 
-    const failedRoutes: string[] = [];
-    for (const route of probeRoutes) {
-      const probeRes = await sandbox.process
-        .executeCommand(
-          `code=$(curl -sS -o /tmp/.cognix-probe-body -w '%{http_code}' --max-time 10 'http://127.0.0.1:3000${route}' || printf '000'); printf 'STATUS=%s\\n' "$code"; head -c 600 /tmp/.cognix-probe-body 2>/dev/null || true`,
-          projectRoot,
-          undefined,
-          15,
-        )
-        .catch(() => ({ exitCode: 1, result: "STATUS=000\nProbe timed out" }));
+      const failedRoutes: string[] = [];
+      for (const route of probeRoutes) {
+        const probeRes = await sandbox.process
+          .executeCommand(
+            `code=$(curl -sS -o /tmp/.cognix-probe-body -w '%{http_code}' --max-time 10 'http://127.0.0.1:3000${route}' || printf '000'); printf 'STATUS=%s\\n' "$code"; head -c 600 /tmp/.cognix-probe-body 2>/dev/null || true`,
+            projectRoot,
+            undefined,
+            15,
+          )
+          .catch(() => ({ exitCode: 1, result: "STATUS=000\nProbe timed out" }));
 
-      const statusMatch = probeRes.result.match(/^STATUS=(\d{3})/m);
-      const status = Number(statusMatch?.[1] ?? "000");
-      const bodySnippet = probeRes.result.replace(/^STATUS=\d{3}\r?\n?/, "").trim().slice(0, 400);
-      if (status === 0 || status >= 500) {
-        failedRoutes.push(
-          `- \`GET ${route}\` returned HTTP ${status === 0 ? "000 (server unreachable / crashed)" : status}${bodySnippet ? `\n  Response: ${bodySnippet}` : ""}`,
-        );
-      }
-    }
-
-    const runtimeSnapshot = await readSandboxRuntimeLogs(project, { maxLines: 70 });
-    const recentServerTail = runtimeSnapshot.serverLogs.split("\n").slice(-55).join("\n");
-    const detectedRuntimeErrors = extractServerErrorsFromLog(recentServerTail);
-
-    if (failedRoutes.length > 0 || detectedRuntimeErrors.length > 0) {
-      const details: string[] = [];
-      if (failedRoutes.length > 0) {
-        details.push(`Failing live routes:\n${failedRoutes.join("\n")}`);
-      }
-      if (detectedRuntimeErrors.length > 0) {
-        details.push(
-          `Server runtime errors:\n${detectedRuntimeErrors
-            .slice(-3)
-            .map((err) => `- ${err.message}${err.stack ? `\n${err.stack.slice(0, 900)}` : ""}`)
-            .join("\n\n")}`,
-        );
-      } else if (recentServerTail.trim()) {
-        details.push(`Recent server output:\n\`\`\`\n${recentServerTail.slice(-1500)}\n\`\`\``);
+        const statusMatch = probeRes.result.match(/^STATUS=(\d{3})/m);
+        const status = Number(statusMatch?.[1] ?? "000");
+        const bodySnippet = probeRes.result.replace(/^STATUS=\d{3}\r?\n?/, "").trim().slice(0, 400);
+        if (status === 0 || status >= 500) {
+          failedRoutes.push(
+            `- \`GET ${route}\` returned HTTP ${status === 0 ? "000 (server unreachable / crashed)" : status}${bodySnippet ? `\n  Response: ${bodySnippet}` : ""}`,
+          );
+        }
       }
 
-      return `The production build passed, and live smoke verification detected runtime issues:\n\n${details.join("\n\n")}\n\nDiagnose and fix the root cause (check database connection/schema, Better Auth adapter/secrets, or SSR code), run \`npm run build\`, restart/verify the dev server on \`0.0.0.0:3000\`, confirm with \`read_preview_console\`, and call \`get_preview_url\`.`;
-    }
+      const runtimeSnapshot = await readSandboxRuntimeLogs(project, { maxLines: 70 });
+      const recentServerTail = runtimeSnapshot.serverLogs.split("\n").slice(-55).join("\n");
+      const detectedRuntimeErrors = extractServerErrorsFromLog(recentServerTail);
 
-    return null;
+      if (failedRoutes.length > 0 || detectedRuntimeErrors.length > 0) {
+        const details: string[] = [];
+        if (failedRoutes.length > 0) {
+          details.push(`Failing live routes:\n${failedRoutes.join("\n")}`);
+        }
+        if (detectedRuntimeErrors.length > 0) {
+          details.push(
+            `Server runtime errors:\n${detectedRuntimeErrors
+              .slice(-3)
+              .map((err) => `- ${err.message}${err.stack ? `\n${err.stack.slice(0, 900)}` : ""}`)
+              .join("\n\n")}`,
+          );
+        } else if (recentServerTail.trim()) {
+          details.push(`Recent server output:\n\`\`\`\n${recentServerTail.slice(-1500)}\n\`\`\``);
+        }
+
+        return `The production build passed, and live smoke verification detected runtime issues:\n\n${details.join("\n\n")}\n\nDiagnose and fix the root cause (check database connection/schema, Better Auth adapter/secrets, or SSR code), run \`npm run build\`, restart/verify the dev server on \`0.0.0.0:3000\`, confirm with \`read_preview_console\`, and call \`get_preview_url\`.`;
+      }
+
+      return null;
+    });
   }
 
+  const loopGuard = createAgentLoopGuard();
+  const unresolvedErrors: string[] = [];
+  let turnsSinceLastCompaction = 0;
+  let lastToolResultChars = 0;
+  runPerformance.enterStage("agent");
   try {
   let completedNaturally = false;
   for (let turn = 0; turn < maxAgentTurns; turn += 1) {
-    if (shouldRefreshAgentContext(turn)) {
+    const estimatedChars = approximateMessageChars(messages);
+    if (
+      contextCompactionEnabled
+      && shouldCompactContext({
+        turn,
+        turnsSinceLastCompaction,
+        estimatedChars,
+        lastToolResultChars,
+      })
+    ) {
+      runPerformance.recordContextRefresh();
+      messages[0] = { role: "system", content: computeSystemPromptContent() };
+      const verifiedChecks: string[] = [];
+      if (productionBuildPassed) verifiedChecks.push("Production build (`npm run build`) passed");
+      if (previewReady) verifiedChecks.push("Live preview URL verified healthy on port 3000");
+      if (runtimeVerifiedClean) verifiedChecks.push("Runtime route probes and server logs verified clean");
+      messages = compactAgentMessages(
+        messages,
+        {
+          originalPrompt: prompt,
+          mode: runMode,
+          changedFiles: [...changedPaths].slice(-80).map((filePath) => ({ path: filePath })),
+          unresolvedErrors: unresolvedErrors.slice(-6),
+          verifiedChecks,
+        },
+        4,
+      );
+      turnsSinceLastCompaction = 0;
+      lastToolResultChars = 0;
+      await emit({ type: "status", label: security ? "Compacting review context" : "Compacting build context" });
+    } else if (!contextCompactionEnabled && shouldRefreshAgentContext(turn)) {
+      runPerformance.recordContextRefresh();
       const changedFiles = [...changedPaths];
       messages[0] = { role: "system", content: computeSystemPromptContent() };
       messages = [
@@ -768,8 +939,10 @@ export async function runAgent(input: {
         },
       ];
       completionNudges = 0;
+      turnsSinceLastCompaction = 0;
       await emit({ type: "status", label: security ? "Continuing with a focused review context" : "Continuing with a focused build context" });
     }
+    turnsSinceLastCompaction += 1;
 
     const planTools = getPlanTools();
     const planToolNames = new Set(planTools.map((tool) => tool.function.name));
@@ -793,49 +966,60 @@ export async function runAgent(input: {
         { signal },
       );
 
-    let turnResult;
-    try {
-      turnResult = await streamModelTurnWithRetry({
-        createStream,
-        onStatus: (label) => emit({ type: "status", label }),
-      });
-    } catch (error) {
-      const errMsg = error instanceof Error ? error.message : "";
-      if (streamUsageOptionsSupported && /stream_options|include_usage|unknown field|extra_forbidden|unrecognized/i.test(errMsg)) {
-        streamUsageOptionsSupported = false;
-        turnResult = await streamModelTurnWithRetry({
+    const modelTurnStartedAt = Date.now();
+    const modelMessageChars = approximateMessageChars(messages);
+    const turnResult = await runPerformance.withStage("model", async () => {
+      try {
+        return await streamModelTurnWithRetry({
           createStream,
           onStatus: (label) => emit({ type: "status", label }),
+          onAttempt: () => runPerformance.recordModelAttempt(),
         });
-      } else if (nativeFilePartsEnabled && turn === 0 && isNativeFileCompatibilityError(error)) {
-        nativeFilePartsEnabled = false;
-        messages[currentUserMessageIndex] = {
-          role: "user",
-          content: buildMultimodalUserContent(effectivePrompt, stagedAttachments, {
-            includeNativeFiles: false,
-            visualSelections: input.visualSelections,
-          }),
-        };
-        await emit({ type: "status", label: "Opening attachments in compatibility mode" });
-        turnResult = await streamModelTurnWithRetry({
-          createStream,
-          onStatus: (label) => emit({ type: "status", label }),
-        });
-      } else {
-        throw error;
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : "";
+        if (streamUsageOptionsSupported && /stream_options|include_usage|unknown field|extra_forbidden|unrecognized/i.test(errMsg)) {
+          streamUsageOptionsSupported = false;
+          return await streamModelTurnWithRetry({
+            createStream,
+            onStatus: (label) => emit({ type: "status", label }),
+            onAttempt: () => runPerformance.recordModelAttempt(),
+          });
+        } else if (nativeFilePartsEnabled && turn === 0 && isNativeFileCompatibilityError(error)) {
+          nativeFilePartsEnabled = false;
+          messages[currentUserMessageIndex] = {
+            role: "user",
+            content: buildMultimodalUserContent(effectivePrompt, stagedAttachments, {
+              includeNativeFiles: false,
+              visualSelections: input.visualSelections,
+            }),
+          };
+          await emit({ type: "status", label: "Opening attachments in compatibility mode" });
+          return await streamModelTurnWithRetry({
+            createStream,
+            onStatus: (label) => emit({ type: "status", label }),
+            onAttempt: () => runPerformance.recordModelAttempt(),
+          });
+        } else {
+          throw error;
+        }
       }
-    }
+    });
 
     const { content, calls, usage } = turnResult;
     modelTurnsExecuted += 1;
-    if (usage) {
-      totalPromptTokens += usage.promptTokens;
-      totalCompletionTokens += usage.completionTokens;
-    } else {
-      totalPromptTokens += estimateTokensFromChars(approximateMessageChars(messages));
-      const toolArgChars = calls.reduce((acc, c) => acc + c.function.name.length + c.function.arguments.length, 0);
-      totalCompletionTokens += estimateTokensFromChars(content.length + toolArgChars);
-    }
+    const toolArgChars = calls.reduce((acc, c) => acc + c.function.name.length + c.function.arguments.length, 0);
+    const turnPromptTokens = usage?.promptTokens ?? estimateTokensFromChars(modelMessageChars);
+    const turnCompletionTokens = usage?.completionTokens ?? estimateTokensFromChars(content.length + toolArgChars);
+    totalPromptTokens += turnPromptTokens;
+    totalCompletionTokens += turnCompletionTokens;
+    runPerformance.recordModelTurn({
+      durationMs: Date.now() - modelTurnStartedAt,
+      messageChars: modelMessageChars,
+      promptTokens: turnPromptTokens,
+      cachedPromptTokens: usage?.cachedPromptTokens ?? 0,
+      completionTokens: turnCompletionTokens,
+      toolCalls: calls.length,
+    });
 
     messages.push({
       role: "assistant",
@@ -920,6 +1104,7 @@ export async function runAgent(input: {
     const mutatingTools = new Set([
       "write_file",
       "edit_file",
+      "batch_edit_files",
       "move_file",
       "delete_file",
       "run_command",
@@ -1207,21 +1392,66 @@ export async function runAgent(input: {
       const commandInput = call.function.name === "run_command" && typeof toolInput === "object" && toolInput !== null
         ? (toolInput as { command?: unknown; background?: unknown })
         : null;
+      const commandText = commandInput ? String(commandInput.command ?? "") : "";
+      const toolStage =
+        call.function.name === "run_command"
+          ? isProductionBuildCommand(commandText)
+            ? "build"
+            : isDependencyInstallCommand(commandText)
+              ? "install"
+              : isPreviewStartCommand(commandText, commandInput?.background === true)
+                ? "preview"
+                : "tool"
+          : call.function.name === "inspect_preview" || call.function.name === "read_preview_console"
+            ? "probe"
+            : call.function.name === "get_preview_url"
+              ? "preview"
+              : "tool";
       const terminalEntry = commandInput
-        ? await terminal.start(String(commandInput.command ?? ""), "agent", commandInput.background === true)
+        ? await terminal.start(commandText, "agent", commandInput.background === true)
         : null;
 
       let toolOutput: string;
       try {
-        const result = await executeAgentTool(project, sandbox, call.function.name, toolInput, {
-          cloudEnabled: cloudState.enabled,
-        });
+        const result = await runPerformance.withStage(toolStage, () =>
+          executeAgentTool(project, sandbox, call.function.name, toolInput, {
+            cloudEnabled: cloudState.enabled,
+          }),
+        );
         if (terminalEntry) await terminal.end(terminalEntry, parseRunCommandOutput(result.output));
-        if (["write_file", "edit_file", "move_file", "delete_file", "run_command"].includes(call.function.name)) {
+        if (call.function.name === "read_file" && typeof toolInput === "object" && toolInput !== null && "path" in toolInput) {
+          const readPath = String((toolInput as { path?: unknown }).path ?? "");
+          const startLine = "startLine" in toolInput ? String((toolInput as { startLine?: unknown }).startLine ?? "") : "";
+          const endLine = "endLine" in toolInput ? String((toolInput as { endLine?: unknown }).endLine ?? "") : "";
+          const readCheck = loopGuard.recordFileRead(readPath, result.output, `${startLine}:${endLine}`);
+          if (readCheck.isUnchangedReread) {
+            runPerformance.recordUnchangedFileReread();
+            if (boundedAgentEnabled && readCheck.warning) {
+              result.output = `${result.output}\n\n[Loop guard] ${readCheck.warning}`;
+            }
+          }
+        }
+        if (call.function.name === "inspect_preview" && typeof toolInput === "object" && toolInput !== null && "routes" in toolInput) {
+          const routes = Array.isArray((toolInput as { routes?: unknown }).routes)
+            ? ((toolInput as { routes: unknown[] }).routes.map((route) => String(route)))
+            : [];
+          const previewCheck = loopGuard.recordPreviewCheck(routes);
+          if (boundedAgentEnabled && previewCheck.warning) {
+            result.output = `${result.output}\n\n[Loop guard] ${previewCheck.warning}`;
+          }
+        }
+        if (["write_file", "edit_file", "batch_edit_files", "move_file", "delete_file"].includes(call.function.name)) {
+          for (const touched of result.changedPaths ?? []) {
+            loopGuard.invalidateFile(touched);
+          }
+        } else if (call.function.name === "run_command") {
+          loopGuard.invalidateAllFiles();
+        }
+        if (["write_file", "edit_file", "batch_edit_files", "move_file", "delete_file", "run_command"].includes(call.function.name)) {
           previewReady = false;
           runtimeVerifiedClean = false;
         }
-        if (["write_file", "edit_file", "move_file", "delete_file"].includes(call.function.name)) {
+        if (["write_file", "edit_file", "batch_edit_files", "move_file", "delete_file"].includes(call.function.name)) {
           productionBuildPassed = false;
           devServerFreshSinceLastBuild = false;
         }
@@ -1229,13 +1459,33 @@ export async function runAgent(input: {
           const command = typeof toolInput === "object" && toolInput && "command" in toolInput
             ? String(toolInput.command)
             : "";
+          const parsedCmd = parseRunCommandOutput(result.output);
+          const cmdDiagnostics = parsedCmd.exitCode && parsedCmd.exitCode !== 0 ? parseBuildDiagnostics(parsedCmd.output, 6) : [];
+          const errorSig = cmdDiagnostics[0] ? `${cmdDiagnostics[0].category}:${cmdDiagnostics[0].code}:${cmdDiagnostics[0].filePath ?? ""}` : undefined;
+          const cmdCheck = loopGuard.recordCommand(command, parsedCmd.exitCode, errorSig);
+          if (parsedCmd.exitCode && parsedCmd.exitCode !== 0) {
+            if (cmdDiagnostics.length > 0) {
+              for (const diag of cmdDiagnostics.slice(0, 3)) {
+                unresolvedErrors.push(`${diag.code}${diag.filePath ? ` (${diag.filePath}${diag.line ? `:${diag.line}` : ""})` : ""}: ${diag.message}`);
+              }
+            } else {
+              unresolvedErrors.push(`Command exited ${parsedCmd.exitCode}: ${command.slice(0, 120)}`);
+            }
+          } else if (parsedCmd.exitCode === 0 && isProductionBuildCommand(command)) {
+            unresolvedErrors.length = 0;
+          }
+
           if (isProductionBuildCommand(command)) {
+            const wasAlreadyPassing = productionBuildPassed;
             devServerFreshSinceLastBuild = false;
             try {
               const commandResult = JSON.parse(result.output) as { exitCode?: number };
               productionBuildPassed = commandResult.exitCode === 0;
             } catch {
               productionBuildPassed = false;
+            }
+            if (oneBuildPolicyEnabled && wasAlreadyPassing && productionBuildPassed) {
+              result.output = `${result.output}\n\n[One-build policy] Build already passed with no file changes since the last build. Proceed directly to preview verification and completion.`;
             }
           } else if (
             commandInput?.background === true &&
@@ -1244,8 +1494,27 @@ export async function runAgent(input: {
           ) {
             devServerFreshSinceLastBuild = true;
           }
+
+          if (contextCompactionEnabled && parsedCmd.output.length > 6_000) {
+            const compactOutput = truncateCommandOutputDeterministically(parsedCmd.output, 6_000);
+            result.output = JSON.stringify({
+              exitCode: parsedCmd.exitCode,
+              output: compactOutput,
+              ...(cmdDiagnostics.length ? { diagnostics: cmdDiagnostics } : {}),
+              ...(boundedAgentEnabled && cmdCheck.warning ? { loopWarning: cmdCheck.warning } : {}),
+            });
+          } else if (boundedAgentEnabled && (cmdCheck.warning || cmdDiagnostics.length > 0)) {
+            const extraNotes = [
+              ...(cmdDiagnostics.length
+                ? [`Parsed diagnostics:\n${cmdDiagnostics.map((d) => `- [${d.code}] ${d.suggestedFix}`).join("\n")}`]
+                : []),
+              ...(cmdCheck.warning ? [`[Loop guard] ${cmdCheck.warning}`] : []),
+            ].join("\n");
+            result.output = `${result.output}\n\n${extraNotes}`;
+          }
         }
         toolOutput = result.output;
+        lastToolResultChars = Math.max(lastToolResultChars, toolOutput.length);
         result.changedPaths?.forEach((filePath) => changedPaths.add(filePath));
         result.fileChanges?.forEach((change) => {
           const existing = fileChanges.get(change.path);
@@ -1260,8 +1529,11 @@ export async function runAgent(input: {
         });
         await emit({ type: "tool_result", id: activityId, name: call.function.name, summary: result.summary });
         if (result.changedPaths?.length) await emit({ type: "files_changed", paths: result.changedPaths });
-        if (result.previewUrl) await emit({ type: "preview", url: result.previewUrl, sandboxId: sandbox.id });
-        if (result.previewUrl) previewReady = true;
+        if (result.previewUrl) {
+          runPerformance.markFirstPreview();
+          await emit({ type: "preview", url: result.previewUrl, sandboxId: sandbox.id });
+          previewReady = true;
+        }
         runActivity.push({
           id: activityId,
           name: call.function.name,
@@ -1308,6 +1580,7 @@ export async function runAgent(input: {
   }
 
   if (planMode) {
+    runPerformance.enterStage("persistence");
     if (!finalContent.trim()) {
       finalContent = completedNaturally
         ? "## Plan\n\nI inspected the project, but no written plan was produced. Ask a follow-up question to refine the plan."
@@ -1337,10 +1610,12 @@ export async function runAgent(input: {
       runDurationMs,
       ...usageMeta,
     });
+    await persistRunMetric(completedNaturally ? "completed" : "checkpoint", message.id);
     return message;
   }
 
   if (security) {
+    runPerformance.enterStage("persistence");
     if (!finalContent.trim()) {
       finalContent = completedNaturally
         ? "## Done\n\nThe run finished without a written summary. Ask a follow-up question, such as \"Summarize the findings\", to get one."
@@ -1376,6 +1651,7 @@ export async function runAgent(input: {
       runDurationMs,
       ...usageMeta,
     });
+    await persistRunMetric(completedNaturally ? "completed" : "checkpoint", message.id);
     return message;
   }
 
@@ -1390,6 +1666,7 @@ export async function runAgent(input: {
     ].join("\n");
   }
 
+  runPerformance.enterStage("verification");
   await emit({ type: "status", label: "Finishing the live preview" });
   const packageCheck = await sandbox.process.executeCommand("test -f package.json", projectRoot, undefined, 10);
   if (packageCheck.exitCode !== 0) throw new Error("The generated app is missing package.json. Ask Cognix to repair the project and try again.");
@@ -1402,68 +1679,83 @@ export async function runAgent(input: {
     await verifyCloudDatabaseMigrations().catch(() => null);
   }
   if (changedPaths.size > 0 && !devServerFreshSinceLastBuild) {
-    await restartDevelopmentPreview(sandbox, project, projectRoot).catch(() => undefined);
+    await runPerformance.withStage("preview", async () => {
+      await restartDevelopmentPreview(sandbox, project, projectRoot).catch(() => undefined);
+      runPerformance.recordPreviewRestart();
+    });
     devServerFreshSinceLastBuild = true;
   }
 
-  let health = await getPreviewHealth(sandbox, 3000);
+  let health = await runPerformance.withStage("probe", () => getPreviewHealth(sandbox, 3000));
   if (!health.healthy) {
-    await emit({ type: "status", label: "Installing app dependencies" });
-    const installCommand = "npm install --include=dev --no-audit --no-fund";
-    const installEntry = await terminal.start(installCommand, "system");
-    const install = await sandbox.process.executeCommand(installCommand, projectRoot, { CI: "1" }, 360);
-    await terminal.end(installEntry, { exitCode: install.exitCode, output: install.result });
-    if (install.exitCode !== 0) throw new Error(`Dependency installation failed:\n${install.result.slice(-4000)}`);
-    health = await getPreviewHealth(sandbox, 3000);
+    const manifestChanged = changedPaths.has("package.json") || changedPaths.has("package-lock.json");
+    const nodeModulesReady = oneBuildPolicyEnabled && !manifestChanged
+      ? (await sandbox.process.executeCommand("test -d node_modules", projectRoot, undefined, 10)).exitCode === 0
+      : false;
+    if (!nodeModulesReady) {
+      await runPerformance.withStage("install", async () => {
+        await emit({ type: "status", label: "Installing app dependencies" });
+        const installCommand = "npm install --include=dev --no-audit --no-fund";
+        const installEntry = await terminal.start(installCommand, "system");
+        const install = await sandbox.process.executeCommand(installCommand, projectRoot, { CI: "1" }, 360);
+        await terminal.end(installEntry, { exitCode: install.exitCode, output: install.result });
+        if (install.exitCode !== 0) throw new Error(`Dependency installation failed:\n${install.result.slice(-4000)}`);
+      });
+    }
+    health = await runPerformance.withStage("probe", () => getPreviewHealth(sandbox, 3000));
 
     if (health.reachable && !health.healthy) {
-      await sandbox.process.executeCommand(
-        "for i in $(seq 1 15); do status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:3000/ || true); case \"$status\" in 2*|3*) exit 0 ;; 000) exit 1 ;; esac; sleep 2; done; exit 1",
-        projectRoot,
-        undefined,
-        40,
-      );
-      health = await getPreviewHealth(sandbox, 3000);
+      await runPerformance.withStage("probe", async () => {
+        await sandbox.process.executeCommand(
+          "for i in $(seq 1 15); do status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:3000/ || true); case \"$status\" in 2*|3*) exit 0 ;; 000) exit 1 ;; esac; sleep 2; done; exit 1",
+          projectRoot,
+          undefined,
+          40,
+        );
+        health = await getPreviewHealth(sandbox, 3000);
+      });
       if (health.reachable && !health.healthy) {
         throw new Error(`The development server is running but its home page returns HTTP ${health.status}. Fix the runtime error before publishing a preview.`);
       }
     }
 
     if (!health.healthy) {
-      const sessionId = `cognix-preview-${project.id.slice(0, 12)}`;
-      try {
-        await sandbox.process.getSession(sessionId);
-      } catch {
-        await sandbox.process.createSession(sessionId);
-      }
-      await emit({ type: "status", label: "Starting the development server" });
-      const devEntry = await terminal.start("npm run dev -- --hostname 0.0.0.0 --port 3000", "system", true);
-      const command = await sandbox.process.executeSessionCommand(
-        sessionId,
-        {
-          command: buildDevServerCommand(projectRoot, 3000),
-          runAsync: true,
-          suppressInputEcho: true,
-        },
-        30,
-      );
-      const healthWait = await sandbox.process.executeCommand(
-        "for i in $(seq 1 50); do status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:3000/ || true); case \"$status\" in 2*|3*) exit 0 ;; esac; sleep 2; done; exit 1",
-        projectRoot,
-        undefined,
-        110,
-      );
-      if (healthWait.exitCode !== 0) {
-        const logs = await sandbox.process.getSessionCommandLogs(sessionId, command.cmdId);
-        const output = [logs.stdout, logs.stderr, logs.output].filter(Boolean).join("\n").slice(-5000);
-        await terminal.end(devEntry, { exitCode: null, output: output || "No server output was captured.", failed: true });
-        throw new Error(`The development server did not start:\n${output || "No server output was captured."}`);
-      }
-      await terminal.end(devEntry, { exitCode: null, output: "Development server is running on port 3000." });
-      health = await getPreviewHealth(sandbox, 3000);
-      if (!health.healthy) {
-        throw new Error(`The development server started but its home page returns HTTP ${health.status}.`);
-      }
+      await runPerformance.withStage("preview", async () => {
+        const sessionId = `cognix-preview-${project.id.slice(0, 12)}`;
+        try {
+          await sandbox.process.getSession(sessionId);
+        } catch {
+          await sandbox.process.createSession(sessionId);
+        }
+        await emit({ type: "status", label: "Starting the development server" });
+        const devEntry = await terminal.start("npm run dev -- --hostname 0.0.0.0 --port 3000", "system", true);
+        const command = await sandbox.process.executeSessionCommand(
+          sessionId,
+          {
+            command: buildDevServerCommand(projectRoot, 3000),
+            runAsync: true,
+            suppressInputEcho: true,
+          },
+          30,
+        );
+        const healthWait = await sandbox.process.executeCommand(
+          "for i in $(seq 1 50); do status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:3000/ || true); case \"$status\" in 2*|3*) exit 0 ;; esac; sleep 2; done; exit 1",
+          projectRoot,
+          undefined,
+          110,
+        );
+        if (healthWait.exitCode !== 0) {
+          const logs = await sandbox.process.getSessionCommandLogs(sessionId, command.cmdId);
+          const output = [logs.stdout, logs.stderr, logs.output].filter(Boolean).join("\n").slice(-5000);
+          await terminal.end(devEntry, { exitCode: null, output: output || "No server output was captured.", failed: true });
+          throw new Error(`The development server did not start:\n${output || "No server output was captured."}`);
+        }
+        await terminal.end(devEntry, { exitCode: null, output: "Development server is running on port 3000." });
+        health = await getPreviewHealth(sandbox, 3000);
+        if (!health.healthy) {
+          throw new Error(`The development server started but its home page returns HTTP ${health.status}.`);
+        }
+      });
     }
   }
 
@@ -1473,6 +1765,7 @@ export async function runAgent(input: {
     previewUrl,
     status: project.publishedAt ? "published" : "ready",
   });
+  runPerformance.markFirstPreview();
   await emit({ type: "preview", url: previewUrl, sandboxId: sandbox.id });
   previewReady = true;
 
@@ -1490,15 +1783,20 @@ export async function runAgent(input: {
   }
 
   // The task is finished and verified: save it to GitHub. No confirmation needed; a failed push never fails the build.
+  runPerformance.enterStage("github");
   if (repository && changedPaths.size > 0) {
     await emit({ type: "status", label: `Committing to ${repository.fullName}` });
     const commitStartedAt = Date.now();
-    await emit({ type: "status", label: "Writing the commit message" });
-    const message = await writeCommitMessage({
-      request: prompt,
-      summary: finalContent,
-      changes: changesFromSnapshots([...changedPaths], [...fileChanges.values()]),
-    });
+    const message = boundedAgentEnabled
+      ? buildDeterministicCommitMessage({ request: prompt, changedPaths: [...changedPaths] })
+      : await (async () => {
+          await emit({ type: "status", label: "Writing the commit message" });
+          return writeCommitMessage({
+            request: prompt,
+            summary: finalContent,
+            changes: changesFromSnapshots([...changedPaths], [...fileChanges.values()]),
+          });
+        })();
     await emit({ type: "status", label: `Committing to ${repository.fullName}` });
     const result = await runGitHubCommit(project, { message });
     if (!(result.info.status === "unchanged" && githubInfo?.status === "committed")) githubInfo = result.info;
@@ -1510,6 +1808,8 @@ export async function runAgent(input: {
       durationMs: Date.now() - commitStartedAt,
     });
   }
+
+  runPerformance.enterStage("persistence");
 
   if (!finalContent.trim()) {
     finalContent = "## What changed\n\nThe requested update is implemented in the existing app.\n\n## Checks\n\n- The development server is healthy.\n- The live preview is ready.";
@@ -1549,8 +1849,10 @@ export async function runAgent(input: {
     runDurationMs,
     ...usageMeta,
   });
+  await persistRunMetric(completedNaturally ? "completed" : "checkpoint", message.id);
   return message;
   } catch (runError) {
+    runPerformance.enterStage("persistence");
     if (!creditsSettled) {
       if (modelTurnsExecuted > 0) {
         await chargeRunCredits(null, Date.now() - runStartedAt).catch(() => undefined);
@@ -1559,6 +1861,7 @@ export async function runAgent(input: {
         await refundReservedCredits(project.ownerId, reservedHold).catch(() => undefined);
       }
     }
+    await persistRunMetric("error", null, runErrorCategory(runError));
     throw runError;
   }
 }

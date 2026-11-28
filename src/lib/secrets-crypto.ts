@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
 
 /**
  * AES-256-GCM encryption for project secrets at rest.
@@ -39,4 +39,15 @@ export function decryptSecret(secret: EncryptedSecret, key?: Buffer): string {
   const decipher = createDecipheriv("aes-256-gcm", requireKey(key), Buffer.from(secret.iv, "base64"));
   decipher.setAuthTag(Buffer.from(secret.authTag, "base64"));
   return Buffer.concat([decipher.update(Buffer.from(secret.ciphertext, "base64")), decipher.final()]).toString("utf8");
+}
+
+/**
+ * Produces the stable 32-byte base64 key Next.js expects for Server Action encryption.
+ * It is scoped to one project and derived only on the server, so it never needs a
+ * second stored secret or changes between sandbox builds and published revisions.
+ */
+export function deriveServerActionsEncryptionKey(projectId: string, key?: Buffer): string {
+  return createHmac("sha256", requireKey(key))
+    .update(`cognix:server-actions:${projectId}`, "utf8")
+    .digest("base64");
 }

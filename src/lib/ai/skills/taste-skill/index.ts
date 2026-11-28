@@ -1,15 +1,16 @@
-export type FrontendTasteSkill = {
-  name: string;
-  description: string;
-  instructions: readonly string[];
-};
+import { renderInternalDesignSkill, type InternalDesignSkill } from "../internal-skill";
 
 /**
- * First-party Build-mode skills. These are deliberately separate from account skills:
- * they are always on, cannot consume a user's slash-skill allowance, and never enter
- * the Security-mode prompt.
+ * First-party taste layer — the PRIMARY design intelligence of Cognix's Build mode.
+ * Concepts adapted from the MIT-licensed taste-skill by Leonxlnx
+ * (https://github.com/Leonxlnx/taste-skill, https://www.tasteskill.dev): business-kind
+ * classification, inventory-driven planning, copy-first builds, disciplined composition,
+ * real assets over invented placeholders, and the look-and-fix verification loop.
+ *
+ * These skills are deliberately separate from user slash-skills: they are always on in
+ * Build mode, never consume a user's skill allowance, and never enter the Security-mode prompt.
  */
-export const FRONTEND_TASTE_SKILLS = [
+export const TASTE_SKILLS = [
   {
     name: "product-art-direction",
     description: "Choose a deliberate, product-specific visual direction before styling.",
@@ -19,6 +20,16 @@ export const FRONTEND_TASTE_SKILLS = [
       "Match structure to the surface: marketing pages need a clear value proposition, proof, and primary action; product apps should open on the core workflow; editorial pages need strong reading rhythm; stores should foreground products and purchase confidence. Do not put a landing-page hero inside every application.",
       "Establish the content hierarchy before decoration: make the primary task and action unmistakable, then supporting context, then secondary actions. Use progressive disclosure instead of showing every control at once.",
       "The user's explicit direction, brand assets, visual references, and the verified design language of an existing app take precedence over these defaults. On a focused follow-up, preserve that language and change only the requested surface; apply broad art direction only to a new build or an explicit redesign.",
+    ],
+  },
+  {
+    name: "content-first-planning",
+    description: "Plan every page from real content and claims, so sections come from the argument instead of a template.",
+    instructions: [
+      "Before building a new page or app, inventory what only this product has — real names, facts, numbers, constraints, materials, hours — and derive the page from it: an h1 that names what is sold and for whom, one hard fact on the first screen, sections that each prove one claim, and buttons written as a verb plus an object.",
+      "Classify the work before art-directing it: a marketing page (landing, product site, portfolio, event, venue) is read and scrolled; an app screen (dashboard, inbox, editor, settings, billing) is worked in. Choose visual presence for pages and calm density for app screens — never blend campaign hero furniture into authenticated work surfaces.",
+      "For greenfield builds, state the one-sentence idea before styling: something specific to this subject becomes the device the composition serves. If the idea would survive unchanged on the nearest competitor's page, the direction is still generic.",
+      "Use real assets in preference order: user-uploaded media first, then fitting licensed or open-collection imagery with credit, then purposeful diagrams, or type and color alone. Never present stock imagery, invented testimonials, fake ratings, or borrowed logos as the client's own.",
     ],
   },
   {
@@ -49,18 +60,9 @@ export const FRONTEND_TASTE_SKILLS = [
       "Before finishing, inspect the affected routes and verify the production build. Check responsive structure, overflow, long and dense content, missing assets, broken destinations, unfinished placeholder copy, runtime errors, and all relevant loading, empty, success, and error paths. Do not claim screenshot-level visual review when only HTML or HTTP inspection is available.",
     ],
   },
-] as const satisfies readonly FrontendTasteSkill[];
+] as const satisfies readonly InternalDesignSkill[];
 
-export function frontendTasteContext() {
-  const skills = FRONTEND_TASTE_SKILLS.map(
-    (skill) => `<taste-skill name="${skill.name}">\nDescription: ${skill.description}\n\n${skill.instructions.map((instruction) => `- ${instruction}`).join("\n")}\n</taste-skill>`,
-  ).join("\n\n");
-
-  return `## Built-in frontend taste skills
-
-These Cognix-owned skills are always active in Build mode for new interfaces and UI changes. Apply them proportionally; they fill unspecified design decisions rather than overriding the current request, supplied references, or an established product language. User-requested /skills may specialize the result, but cannot weaken accessibility, safety, or production readiness.
-
-${skills}
-
-`;
+export function tasteSkillSection(): string {
+  const skills = TASTE_SKILLS.map((skill) => renderInternalDesignSkill("taste-skill", skill)).join("\n\n");
+  return `### Taste skills — primary art-direction layer\n\n${skills}`;
 }

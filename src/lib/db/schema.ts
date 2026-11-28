@@ -10,7 +10,15 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import type { AgentApprovalDecision, AgentApprovalItem, GitSyncStatus, ProjectMode, RepositoryCommit, SecuritySource } from "../types";
+import type {
+  AgentApprovalDecision,
+  AgentApprovalItem,
+  AgentRunPerformance,
+  GitSyncStatus,
+  ProjectMode,
+  RepositoryCommit,
+  SecuritySource,
+} from "../types";
 
 export const users = pgTable("users", {
   id: text("id").primaryKey(),
@@ -376,6 +384,32 @@ export const creditUsageEvents = pgTable(
     index("credit_usage_events_user_created_idx").on(table.userId, table.createdAt),
     index("credit_usage_events_project_idx").on(table.projectId),
     index("credit_usage_events_created_idx").on(table.createdAt),
+  ],
+);
+
+/** Privacy-safe stage and turn telemetry for measuring agent build performance. */
+export const agentRunMetrics = pgTable(
+  "agent_run_metrics",
+  {
+    id: uuid("id").primaryKey(),
+    projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id"),
+    mode: text("mode").default("build").notNull(),
+    status: text("status").default("completed").notNull(),
+    errorCategory: text("error_category"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }).notNull(),
+    totalDurationMs: integer("total_duration_ms").default(0).notNull(),
+    performance: jsonb("performance").$type<AgentRunPerformance>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("agent_run_metrics_user_created_idx").on(table.userId, table.createdAt),
+    index("agent_run_metrics_project_idx").on(table.projectId),
+    index("agent_run_metrics_created_idx").on(table.createdAt),
   ],
 );
 
