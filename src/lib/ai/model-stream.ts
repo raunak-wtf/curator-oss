@@ -81,6 +81,7 @@ const RETRYABLE_HTTP_STATUSES = new Set([
 export function isRetryableModelError(error: unknown): boolean {
   if (error instanceof ModelStreamTimeoutError) return true;
   if (!error || typeof error !== "object") return false;
+  if (error instanceof Error && error.name === "AbortError") return false;
 
   const status = "status" in error && typeof error.status === "number" ? error.status : undefined;
   if (status !== undefined) {
@@ -94,7 +95,7 @@ export function isRetryableModelError(error: unknown): boolean {
       : "";
   const combined = `${message} ${cause}`;
 
-  return /fetch failed|network|econnreset|etimedout|epipe|eai_again|enotfound|und_err_socket|socket hang up|premature close|other side closed|terminated|aborted|timeout|timed out|bodytimeouterror|headerstimeouterror|overloaded|rate limit|too many requests|502|503|504|522|524|unexpected end of json/i.test(
+  return /fetch failed|network|econnreset|etimedout|epipe|eai_again|enotfound|und_err_socket|socket hang up|premature close|other side closed|terminated|timeout|timed out|bodytimeouterror|headerstimeouterror|overloaded|rate limit|too many requests|502|503|504|522|524|unexpected end of json/i.test(
     combined,
   );
 }
@@ -248,70 +249,74 @@ export async function streamModelTurnWithRetry(options: StreamTurnOptions): Prom
         await options.onStatus(label);
       };
 
-      while (true) {
-        if (controller.signal.aborted) {
-          throw controller.signal.reason instanceof Error
-            ? controller.signal.reason
-            : new ModelStreamTimeoutError("turn_timeout", "Model turn timed out.");
-        }
+      try {
+        while (true) {
+          if (controller.signal.aborted) {
+            throw controller.signal.reason instanceof Error
+              ? controller.signal.reason
+              : new ModelStreamTimeoutError("turn_timeout", "Model turn timed out.");
+          }
 
-        const waitMs = chunkCount === 0 ? firstChunkTimeoutMs : chunkStallTimeoutMs;
-        const step = await nextWithTimeout(iterator, waitMs, () => {
-          const err = new ModelStreamTimeoutError(
-            chunkCount === 0 ? "first_chunk_timeout" : "chunk_stall_timeout",
-            chunkCount === 0
-              ? `Model sent no output within ${Math.round(firstChunkTimeoutMs / 1000)}s.`
-              : `Model stream stalled for ${Math.round(chunkStallTimeoutMs / 1000)}s without new tokens.`,
-          );
-          controller.abort(err);
-          return err;
-        });
+          const waitMs = chunkCount === 0 ? firstChunkTimeoutMs : chunkStallTimeoutMs;
+          const step = await nextWithTimeout(iterator, waitMs, () => {
+            const err = new ModelStreamTimeoutError(
+              chunkCount === 0 ? "first_chunk_timeout" : "chunk_stall_timeout",
+              chunkCount === 0
+                ? `Model sent no output within ${Math.round(firstChunkTimeoutMs / 1000)}s.`
+                : `Model stream stalled for ${Math.round(chunkStallTimeoutMs / 1000)}s without new tokens.`,
+            );
+            controller.abort(err);
+            return err;
+          });
 
-        if (step.done) break;
-        chunkCount += 1;
+          if (step.done) break;
+          chunkCount += 1;
 
-        if (step.value.usage) {
-          const promptTokens = Number(step.value.usage.prompt_tokens ?? 0);
-          const completionTokens = Number(step.value.usage.completion_tokens ?? 0);
-          const totalTokens = Number(step.value.usage.total_tokens ?? promptTokens + completionTokens);
-          if (promptTokens > 0 || completionTokens > 0 || totalTokens > 0) {
-            usage = {
-              promptTokens: Math.max(0, Math.trunc(promptTokens)),
-              completionTokens: Math.max(0, Math.trunc(completionTokens)),
-              totalTokens: Math.max(0, Math.trunc(totalTokens)),
-            };
+          if (step.value.usage) {
+            const promptTokens = Number(step.value.usage.prompt_tokens ?? 0);
+            const completionTokens = Number(step.value.usage.completion_tokens ?? 0);
+            const totalTokens = Number(step.value.usage.total_tokens ?? promptTokens + completionTokens);
+            if (promptTokens > 0 || completionTokens > 0 || totalTokens > 0) {
+              usage = {
+                promptTokens: Math.max(0, Math.trunc(promptTokens)),
+                completionTokens: Math.max(0, Math.trunc(completionTokens)),
+                totalTokens: Math.max(0, Math.trunc(totalTokens)),
+              };
+            }
+          }
+
+          const choice = step.value.choices?.[0];
+          if (choice?.finish_reason) {
+            finishReason = choice.finish_reason;
+          }
+          const delta = choice?.delta;
+          if (!delta) continue;
+
+          if (delta.content) {
+            content += delta.content;
+          }
+
+          const hasReasoning = Boolean(delta.reasoning_content || delta.reasoning);
+          if (hasReasoning && !emittedReasoningHint && toolCalls.size === 0 && Date.now() - streamStartedAt > 3_000) {
+            emittedReasoningHint = true;
+            await maybeEmitStatus("Planning next build steps");
+          }
+
+          for (const toolDelta of delta.tool_calls ?? []) {
+            const current = toolCalls.get(toolDelta.index) ?? { id: "", name: "", arguments: "" };
+            current.id += toolDelta.id ?? "";
+            current.name += toolDelta.function?.name ?? "";
+            current.arguments += toolDelta.function?.arguments ?? "";
+            toolCalls.set(toolDelta.index, current);
+
+            const liveLabel = extractStreamingActivityLabel(current.name, current.arguments);
+            if (liveLabel) {
+              await maybeEmitStatus(liveLabel);
+            }
           }
         }
-
-        const choice = step.value.choices?.[0];
-        if (choice?.finish_reason) {
-          finishReason = choice.finish_reason;
-        }
-        const delta = choice?.delta;
-        if (!delta) continue;
-
-        if (delta.content) {
-          content += delta.content;
-        }
-
-        const hasReasoning = Boolean(delta.reasoning_content || delta.reasoning);
-        if (hasReasoning && !emittedReasoningHint && toolCalls.size === 0 && Date.now() - streamStartedAt > 3_000) {
-          emittedReasoningHint = true;
-          await maybeEmitStatus("Planning next build steps");
-        }
-
-        for (const toolDelta of delta.tool_calls ?? []) {
-          const current = toolCalls.get(toolDelta.index) ?? { id: "", name: "", arguments: "" };
-          current.id += toolDelta.id ?? "";
-          current.name += toolDelta.function?.name ?? "";
-          current.arguments += toolDelta.function?.arguments ?? "";
-          toolCalls.set(toolDelta.index, current);
-
-          const liveLabel = extractStreamingActivityLabel(current.name, current.arguments);
-          if (liveLabel) {
-            await maybeEmitStatus(liveLabel);
-          }
-        }
+      } finally {
+        void iterator.return?.().catch(() => undefined);
       }
 
       // Guard against custom proxy "empty 200 OK" streams where upstream closed before emitting anything.

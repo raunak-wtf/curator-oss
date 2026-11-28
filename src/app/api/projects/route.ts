@@ -3,18 +3,7 @@ import { generateProjectName } from "@/lib/ai/project-name";
 import { requireViewer } from "@/lib/auth0";
 import { githubErrorResponse } from "@/lib/github/http";
 import { resolveSecuritySource } from "@/lib/github/security-source";
-import { errorResponse } from "@/lib/http";
-import { checkUserAgentEntitlement, createProject, ensureUser, listProjects } from "@/lib/store";
-
-export async function GET() {
-  try {
-    const viewer = await requireViewer();
-    await ensureUser(viewer);
-    return Response.json({ projects: await listProjects(viewer.id) });
-  } catch (error) {
-    return errorResponse(error);
-  }
-}
+import { checkUserAgentEntitlement, createProject } from "@/lib/store";
 
 const createSchema = z.object({
   prompt: z.string().trim().min(2).max(12_000),

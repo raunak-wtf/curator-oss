@@ -1,5 +1,6 @@
 import path from "node:path";
 import { CodeLanguage, Daytona, DaytonaNotFoundError, type Sandbox } from "@daytona/sdk";
+export type { Sandbox } from "@daytona/sdk";
 import { appsDomain, directPreviewUrl, type DomainEnv } from "./domains";
 import { redactConsoleSecrets } from "./preview-console";
 import type { Project } from "./types";
@@ -41,7 +42,13 @@ const publishedRuntimes = globalThis.__cognixPublishedRuntimes ?? (globalThis.__
 const publishedRuntimeLookups =
   globalThis.__cognixPublishedRuntimeLookups ?? (globalThis.__cognixPublishedRuntimeLookups = new Map());
 
+const MAX_RUNTIME_CACHE_ENTRIES = 500;
+
 function rememberPublishedRuntime(projectId: string, url: string) {
+  if (publishedRuntimes.size >= MAX_RUNTIME_CACHE_ENTRIES && !publishedRuntimes.has(projectId)) {
+    const oldest = publishedRuntimes.keys().next().value;
+    if (oldest) publishedRuntimes.delete(oldest);
+  }
   const now = Date.now();
   publishedRuntimes.set(projectId, { url, issuedAt: now, checkedAt: now });
 }
@@ -410,7 +417,7 @@ async function pauseDevelopmentPreview(sandbox: Sandbox, project: Project, root:
   }
   if (health.reachable) {
     await sandbox.process.executeCommand(
-      "if command -v fuser >/dev/null 2>&1; then fuser -k 3000/tcp >/dev/null 2>&1 || true; fi",
+      "if command -v fuser >/dev/null 2>&1; then fuser -k 3000/tcp >/dev/null 2>&1 || true; else pkill -f 'next-server|next dev|--port 3000' >/dev/null 2>&1 || true; fi",
       root,
       undefined,
       20,
@@ -554,7 +561,7 @@ export async function deployPublishedApp(project: Project) {
         `mkdir -p ${shellQuote(paths.base)}`,
         `find ${shellQuote(paths.base)} -mindepth 1 -maxdepth 1 -type d -name 'staging-*' -exec rm -rf -- {} +`,
         `mkdir -p ${shellQuote(paths.staging)}`,
-        `tar --exclude='./node_modules' --exclude='./.next' --exclude='./.git' -cf - . | tar -xf - -C ${shellQuote(paths.staging)}`,
+        `tar --warning=no-file-changed --ignore-failed-read --exclude='./node_modules' --exclude='./.next' --exclude='./.git' --exclude='./.cognix-*' --exclude='./uploads' -cf - . | tar -xf - -C ${shellQuote(paths.staging)}`,
         clonePublishedDependenciesCommand(sourceNodeModules, stagingNodeModules),
       ].join(" && "),
       root,
@@ -730,6 +737,10 @@ function forgetPreviewProxyTarget(projectId: string) {
 }
 
 function rememberPreviewProxyTarget(projectId: string, target: PublishedProxyTarget) {
+  if (previewProxyTargets.size >= MAX_RUNTIME_CACHE_ENTRIES && !previewProxyTargets.has(projectId)) {
+    const oldest = previewProxyTargets.keys().next().value;
+    if (oldest) previewProxyTargets.delete(oldest);
+  }
   const now = Date.now();
   previewProxyTargets.set(projectId, { ...target, issuedAt: now, checkedAt: now });
 }
@@ -840,6 +851,10 @@ export async function getPublishedProxyTarget(project: Project, options: { fresh
     lookup = resolvePublishedProxyTarget(project)
       .then((target) => {
         if (target) {
+          if (publishedProxyTargets.size >= MAX_RUNTIME_CACHE_ENTRIES && !publishedProxyTargets.has(project.id)) {
+            const oldest = publishedProxyTargets.keys().next().value;
+            if (oldest) publishedProxyTargets.delete(oldest);
+          }
           const now = Date.now();
           publishedProxyTargets.set(project.id, { ...target, issuedAt: now, checkedAt: now });
         }
@@ -857,9 +872,35 @@ export async function stopPublishedApp(project: Project) {
   const sandbox = await getSandbox(project);
   if (!sandbox) return;
   await stopPublishedSession(sandbox, project);
-  await sandbox.setAutostopInterval(30);
+  await sandbox.setAutostopInterval(5);
   await sandbox.setAutoArchiveInterval(1440);
   await sandbox.setAutoDeleteInterval(-1);
+}
+
+/**
+ * Packs a downloadable `.tar.gz` source archive of the project workspace while excluding
+ * `node_modules`, `.next`, `.git`, logs, internal snapshots, and `.env*` files at every directory depth.
+ */
+export async function exportProjectArchive(project: Project): Promise<Buffer | null> {
+  const sandbox = await getSandbox(project);
+  if (!sandbox) return null;
+  const root = await getProjectRoot(sandbox);
+  const archiveName = `.cognix-export-${project.id.replace(/[^a-zA-Z0-9_-]/g, "")}.tar.gz`;
+  const result = await sandbox.process.executeCommand(
+    `tar --warning=no-file-changed --ignore-failed-read --exclude='./node_modules' --exclude='./.next' --exclude='./.git' --exclude='./.cognix-*' --exclude='.env*' --exclude='*.log' -czf ${shellQuote(archiveName)} .`,
+    root,
+    undefined,
+    150,
+  );
+  if (result.exitCode !== 0 && result.exitCode !== 1) {
+    throw new Error(`The project archive could not be created:\n${result.result.slice(-2000)}`);
+  }
+  const remotePath = `${getProjectFsRoot()}/${archiveName}`;
+  try {
+    return await sandbox.fs.downloadFile(remotePath);
+  } finally {
+    await sandbox.fs.deleteFile(remotePath).catch(() => undefined);
+  }
 }
 
 /** Permanently deletes the project's sandbox, including its development preview and published runtime. */

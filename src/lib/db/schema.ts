@@ -15,6 +15,7 @@ import type { AgentApprovalDecision, AgentApprovalItem, GitSyncStatus, ProjectMo
 export const users = pgTable("users", {
   id: text("id").primaryKey(),
   email: text("email").notNull(),
+  emailVerified: boolean("email_verified").default(false).notNull(),
   name: text("name"),
   avatarUrl: text("avatar_url"),
   authProvider: text("auth_provider").default("unknown").notNull(),

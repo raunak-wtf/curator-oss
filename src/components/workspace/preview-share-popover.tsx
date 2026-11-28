@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  AlertCircle,
   Check,
   Clock,
   Copy,
@@ -15,7 +16,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import type { PreviewAccessState } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -42,6 +43,15 @@ function formatTimeRemaining(expiresAt: string | null): string | null {
   }
   if (hours > 0) return `${hours}h ${mins}m left`;
   return `${Math.max(1, mins)}m left`;
+}
+
+function formatCompactRemainingBadge(expiresAt: string | null): string {
+  if (!expiresAt) return "Public";
+  const diffMs = Date.parse(expiresAt) - Date.now();
+  if (!Number.isFinite(diffMs) || diffMs <= 0) return "Public";
+  const hours = Math.ceil(diffMs / 3_600_000);
+  if (hours >= 24) return `${Math.round(hours / 24)}d`;
+  return `${Math.max(1, hours)}h`;
 }
 
 function buildShareHref(previewUrl: string | null, shareKey: string): string {
@@ -76,6 +86,22 @@ export function PreviewSharePopover({
   const [passcodeInput, setPasscodeInput] = useState("");
   const [showPasscodeBox, setShowPasscodeBox] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  const loadAccess = useCallback(async () => {
+    setLoadFailed(false);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/preview/access`, { cache: "no-store" });
+      const payload = await res.json();
+      if (res.ok && payload.access) {
+        setAccess(payload.access as PreviewAccessState);
+        setLoadFailed(false);
+      } else {
+        setLoadFailed(true);
+      }
+    } catch {
+      setLoadFailed(true);
+    }
+  }, [projectId]);
 
   useEffect(() => {
     if (!open) return;
@@ -158,6 +184,10 @@ export function PreviewSharePopover({
 
   async function savePasscode(passcode: string | null) {
     if (saving) return;
+    if (passcode !== null && passcode.trim().length < 4) {
+      toast.error("Passcode must be at least 4 characters.");
+      return;
+    }
     setSaving(true);
     try {
       const res = await fetch(`/api/projects/${projectId}/preview/access`, {
@@ -250,6 +280,7 @@ export function PreviewSharePopover({
   const publicActive = Boolean(access?.publicActive);
   const shareCount = access?.shares.length ?? 0;
   const remainingLabel = formatTimeRemaining(access?.publicExpiresAt ?? null);
+  const compactBadge = formatCompactRemainingBadge(access?.publicExpiresAt ?? null);
 
   return (
     <div ref={containerRef} className="relative">
@@ -277,8 +308,8 @@ export function PreviewSharePopover({
         )}
         <span className="hidden sm:inline text-[11px] font-medium">Share</span>
         {publicActive ? (
-          <span className="hidden md:inline rounded-full bg-emerald-500/20 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-200 leading-none">
-            24h
+          <span className="hidden md:inline rounded-full bg-emerald-500/20 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-200 tabular-nums leading-none">
+            {compactBadge}
           </span>
         ) : shareCount > 0 ? (
           <span className="rounded-full bg-indigo-500/25 px-1.5 py-0.5 text-[9.5px] font-semibold text-indigo-100 tabular-nums leading-none">
@@ -301,17 +332,19 @@ export function PreviewSharePopover({
                 <h3 className="text-[13px] font-semibold text-white">Preview access</h3>
               </div>
               <p className="mt-0.5 text-[11px] text-white/50">
-                {publicActive
-                  ? `Public preview active (${remainingLabel ?? "24h limit"}).`
-                  : shareCount > 0
-                    ? `Private — only you and ${shareCount} invited ${shareCount === 1 ? "person" : "people"}.`
-                    : "Owner only — nobody else can view this preview."}
+                {loadFailed && !access
+                  ? "Could not load current preview access settings."
+                  : publicActive
+                    ? `Public preview active (${remainingLabel ?? "24h limit"}).`
+                    : shareCount > 0
+                      ? `Private — only you and ${shareCount} invited ${shareCount === 1 ? "person" : "people"}.`
+                      : "Owner only — nobody else can view this preview."}
               </p>
             </div>
             <button
               type="button"
               onClick={() => onOpenChange(false)}
-              className="grid size-7 place-items-center rounded-md text-white/50 hover:bg-white/[0.08] hover:text-white"
+              className="grid size-8 place-items-center rounded-md text-white/50 hover:bg-white/[0.08] hover:text-white [@media(pointer:coarse)]:size-11"
               aria-label="Close share menu"
             >
               <X className="size-3.5" />
@@ -324,7 +357,7 @@ export function PreviewSharePopover({
               type="button"
               onClick={() => setSection("public")}
               className={cn(
-                "flex h-7 items-center justify-center gap-1.5 rounded-md font-medium transition-colors",
+                "flex h-8 items-center justify-center gap-1.5 rounded-md font-medium transition-colors",
                 section === "public" ? "bg-white/[0.12] text-white" : "text-white/55 hover:text-white",
               )}
             >
@@ -335,7 +368,7 @@ export function PreviewSharePopover({
               type="button"
               onClick={() => setSection("private")}
               className={cn(
-                "flex h-7 items-center justify-center gap-1.5 rounded-md font-medium transition-colors",
+                "flex h-8 items-center justify-center gap-1.5 rounded-md font-medium transition-colors",
                 section === "private" ? "bg-white/[0.12] text-white" : "text-white/55 hover:text-white",
               )}
             >
@@ -347,8 +380,22 @@ export function PreviewSharePopover({
             </button>
           </div>
 
-          {loading && !access ? (
+          {loading ? (
             <p className="py-6 text-center text-[12px] text-white/50">Loading access settings…</p>
+          ) : loadFailed && !access ? (
+            <div role="alert" className="mt-3 space-y-2.5 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-[12px] text-red-200">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="size-4 shrink-0" aria-hidden="true" />
+                <span>Could not load preview access settings.</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => void loadAccess()}
+                className="inline-flex h-8 items-center rounded-md border border-red-400/35 px-3 text-[11.5px] font-medium text-red-100 hover:bg-red-500/20"
+              >
+                Retry
+              </button>
+            </div>
           ) : section === "public" ? (
             <div className="mt-3 space-y-3">
               {/* Public 24h Toggle */}
@@ -363,6 +410,7 @@ export function PreviewSharePopover({
                   type="button"
                   role="switch"
                   aria-checked={publicActive}
+                  aria-label="Make preview public for 24 hours"
                   disabled={saving}
                   onClick={() => void togglePublicPreview(!publicActive, 24)}
                   className={cn(
@@ -402,7 +450,7 @@ export function PreviewSharePopover({
                       readOnly
                       value={previewUrl}
                       aria-label="Public preview URL"
-                      className="h-8 min-w-0 flex-1 rounded-md border border-white/10 bg-[#141414] px-2 font-mono text-[11px] text-white/85 outline-none"
+                      className="h-8 min-w-0 flex-1 rounded-md border border-white/10 bg-[#141414] px-2 font-mono text-[11px] text-white/85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#9f94ff]"
                     />
                     <button
                       type="button"
@@ -446,13 +494,13 @@ export function PreviewSharePopover({
                           type="password"
                           value={passcodeInput}
                           onChange={(e) => setPasscodeInput(e.target.value)}
-                          placeholder="Set a passcode…"
+                          placeholder="Min 4 chars…"
                           aria-label="Preview passcode"
-                          className="h-8 min-w-0 flex-1 rounded-md border border-white/15 bg-[#141414] px-2 text-[12px] text-white outline-none focus:border-white/30"
+                          className="h-8 min-w-0 flex-1 rounded-md border border-white/15 bg-[#141414] px-2 text-[12px] text-white focus:border-white/30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#9f94ff]"
                         />
                         <button
                           type="button"
-                          disabled={saving || !passcodeInput.trim()}
+                          disabled={saving || passcodeInput.trim().length < 4}
                           onClick={() => void savePasscode(passcodeInput.trim())}
                           className="h-8 rounded-md bg-white/15 px-2.5 text-[11px] font-medium text-white hover:bg-white/25 disabled:opacity-40"
                         >
@@ -498,13 +546,13 @@ export function PreviewSharePopover({
                     onChange={(e) => setInviteEmail(e.target.value)}
                     placeholder="teammate@company.com"
                     aria-label="Recipient email address"
-                    className="h-8 min-w-0 flex-1 rounded-md border border-white/15 bg-[#121212] px-2.5 text-[12px] text-white placeholder:text-white/35 outline-none focus:border-white/30"
+                    className="h-8 min-w-0 flex-1 rounded-md border border-white/15 bg-[#121212] px-2.5 text-[12px] text-white placeholder:text-white/35 focus:border-white/30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#9f94ff]"
                   />
                   <select
                     aria-label="Invite expiry"
                     value={inviteExpiryHours}
                     onChange={(e) => setInviteExpiryHours(e.target.value)}
-                    className="h-8 rounded-md border border-white/15 bg-[#121212] px-1.5 text-[11px] text-white/85 outline-none"
+                    className="h-8 rounded-md border border-white/15 bg-[#121212] px-1.5 text-[11px] text-white/85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#9f94ff]"
                   >
                     <option value="24">24h</option>
                     <option value="168">7d</option>
@@ -520,14 +568,14 @@ export function PreviewSharePopover({
                   {saving ? "Generating link…" : "Add email & copy /auth link"}
                 </button>
                 <p className="text-[10.5px] leading-relaxed text-white/45">
-                  Generates a unique <code className="text-white/70">/auth?key=…</code> link. They must sign in to Curator with this exact email.
+                  Generates a unique <code className="text-white/70">/auth?key=…</code> link. They must sign in to Curator with this exact verified email.
                 </p>
               </form>
 
               {/* Active Private Invites List */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-[11px] text-white/50">
-                  <span>Invited reviewers ({shareCount})</span>
+                  <span className="tabular-nums">Invited reviewers ({shareCount})</span>
                   {shareCount > 0 ? (
                     <button
                       type="button"
@@ -565,7 +613,7 @@ export function PreviewSharePopover({
                             <button
                               type="button"
                               onClick={() => void copyText(shareUrl, share.id, `Copied private link for ${share.email}`)}
-                              className="inline-flex h-7 items-center gap-1 rounded-md border border-white/10 bg-white/[0.05] px-2 text-[10.5px] font-medium text-white/85 hover:bg-white/[0.1]"
+                              className="inline-flex h-8 items-center gap-1 rounded-md border border-white/10 bg-white/[0.05] px-2 text-[10.5px] font-medium text-white/85 hover:bg-white/[0.1]"
                               title="Copy /auth?key=… link"
                             >
                               {copiedKey === share.id ? <Check className="size-3 text-emerald-300" /> : <Copy className="size-3" />}
@@ -575,11 +623,11 @@ export function PreviewSharePopover({
                               type="button"
                               disabled={saving}
                               onClick={() => void revokeInvite(share.id, share.email)}
-                              className="grid size-7 place-items-center rounded-md text-white/45 hover:bg-rose-500/15 hover:text-rose-300"
+                              className="grid size-8 place-items-center rounded-md text-white/45 hover:bg-rose-500/15 hover:text-rose-300 [@media(pointer:coarse)]:size-11"
                               title={`Revoke ${share.email}`}
                               aria-label={`Revoke access for ${share.email}`}
                             >
-                              <Trash2 className="size-3" />
+                              <Trash2 className="size-3.5" />
                             </button>
                           </div>
                         </li>
@@ -602,7 +650,7 @@ export function PreviewSharePopover({
                 onOpenChange(false);
                 onOpenPublish();
               }}
-              className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-white/15 bg-white/[0.06] px-2.5 text-[11px] font-medium text-white hover:bg-white/[0.12]"
+              className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md border border-white/15 bg-white/[0.06] px-2.5 text-[11px] font-medium text-white hover:bg-white/[0.12]"
             >
               <Rocket className="size-3" aria-hidden="true" />
               {isPublished ? "Manage" : "Publish"}

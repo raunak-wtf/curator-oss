@@ -3,6 +3,7 @@ import { completeText } from "@/lib/ai/complete";
 import { requireViewer } from "@/lib/auth0";
 import { errorResponse } from "@/lib/http";
 import { SKILL_BODY_MAX, SKILL_COMMANDS, SKILL_DESCRIPTION_MAX, SKILL_NAME_MAX, parseSkillMarkdown, stripCodeFence } from "@/lib/skills";
+import { checkUserAgentEntitlement } from "@/lib/store";
 import type { SkillDraft } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -39,7 +40,17 @@ function modelErrorMessage(error: unknown) {
 
 export async function POST(request: Request) {
   try {
-    await requireViewer();
+    const viewer = await requireViewer();
+    const entitlement = await checkUserAgentEntitlement(viewer);
+    if (!entitlement.allowed) {
+      return Response.json(
+        {
+          error: entitlement.message ?? "An active Curator Pro subscription ($10/month) is required.",
+          code: entitlement.reason === "credits_exhausted" ? "CREDITS_EXHAUSTED" : "SUBSCRIPTION_REQUIRED",
+        },
+        { status: 402 },
+      );
+    }
     const { request: description } = z
       .object({ request: z.string().trim().min(3, "Describe the skill after /create-skill.").max(2_000) })
       .parse(await request.json());

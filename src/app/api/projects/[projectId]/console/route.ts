@@ -45,14 +45,10 @@ export async function GET(request: Request, context: Context) {
     if (runtimeLogs.serverLogs) {
       const serverErrors = extractServerErrorsFromLog(runtimeLogs.serverLogs);
       if (serverErrors.length > 0) {
-        const knownFingerprints = new Set(persisted.map((item) => item.fingerprint));
-        const freshServerErrors = serverErrors.filter((item) => {
-          // Only append newly discovered server errors so polling GET remains idempotent
-          for (const existing of persisted) {
-            if (existing.source === "server" && existing.message === item.message) return false;
-          }
-          return knownFingerprints.size >= 0;
-        });
+        // Only append newly discovered server errors so polling GET remains idempotent
+        const freshServerErrors = serverErrors.filter(
+          (item) => !persisted.some((existing) => existing.source === "server" && existing.message === item.message),
+        );
         if (freshServerErrors.length > 0) {
           entries = await appendProjectConsoleLogs(project.id, freshServerErrors);
         }

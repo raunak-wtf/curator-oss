@@ -239,11 +239,26 @@ async function cloudflareRequest<T>(path: string, init: RequestInit = {}): Promi
   return payload.result as T;
 }
 
-/** Finds the managed zone that owns a hostname by walking up its labels. */
+const COGNIX_DNS_COMMENT = "Managed by Cognix custom domains";
+
+function allowedManagedZoneNames(): Set<string> {
+  const raw = process.env.COGNIX_CF_MANAGED_DNS_ZONES?.trim() ?? "";
+  const zones = new Set<string>();
+  for (const part of raw.split(/[,;\s]+/)) {
+    const clean = part.trim().toLowerCase().replace(/\.$/, "");
+    if (clean) zones.add(clean);
+  }
+  return zones;
+}
+
+/** Finds an explicitly operator-allowlisted zone that owns a hostname by walking up its labels. */
 async function findZone(hostname: string) {
+  const allowedZones = allowedManagedZoneNames();
+  if (allowedZones.size === 0) return null;
   const labels = hostname.split(".");
   for (let index = 0; index < labels.length - 1; index += 1) {
-    const candidate = labels.slice(index).join(".");
+    const candidate = labels.slice(index).join(".").toLowerCase();
+    if (!allowedZones.has(candidate)) continue;
     const zones = await cloudflareRequest<{ id: string; name: string }[]>(
       `/zones?name=${encodeURIComponent(candidate)}&status=active`,
     );
@@ -253,7 +268,7 @@ async function findZone(hostname: string) {
 }
 
 async function findRecord(zoneId: string, record: DomainDnsRecord) {
-  const existing = await cloudflareRequest<{ id: string; content: string }[]>(
+  const existing = await cloudflareRequest<{ id: string; content: string; comment?: string | null }[]>(
     `/zones/${zoneId}/dns_records?type=${record.type}&name=${encodeURIComponent(record.name)}`,
   );
   return existing?.[0] ?? null;
@@ -265,13 +280,14 @@ function recordBody(record: DomainDnsRecord) {
     name: record.name,
     content: record.value,
     ttl: record.ttl,
+    comment: COGNIX_DNS_COMMENT,
     ...(record.type === "CNAME" ? { proxied: false } : {}),
   });
 }
 
 /**
- * Creates or updates the verification and routing records in the operator's DNS provider.
- * Returns false when no provider is configured so callers can fall back to manual instructions.
+ * Creates or updates the verification and routing records in an explicitly allowlisted DNS zone.
+ * Never overwrites pre-existing DNS records not created by Cognix.
  */
 export async function provisionDomainDns(domain: Pick<ProjectDomain, "hostname" | "verificationToken">) {
   if (!isDnsProviderConfigured) return false;
@@ -282,6 +298,9 @@ export async function provisionDomainDns(domain: Pick<ProjectDomain, "hostname" 
     const existing = await findRecord(zone.id, record);
     if (existing?.content === record.value) continue;
     if (existing) {
+      if (existing.comment !== COGNIX_DNS_COMMENT) {
+        return false;
+      }
       await cloudflareRequest(`/zones/${zone.id}/dns_records/${existing.id}`, {
         method: "PUT",
         body: recordBody(record),
@@ -293,14 +312,14 @@ export async function provisionDomainDns(domain: Pick<ProjectDomain, "hostname" 
   return true;
 }
 
-/** Removes the records Cognix created for a domain. Failures are ignored: detaching must still succeed. */
+/** Removes only records Cognix created for a domain. Failures are ignored: detaching must still succeed. */
 export async function removeDomainDns(domain: Pick<ProjectDomain, "hostname" | "verificationToken">) {
   if (!isDnsProviderConfigured) return false;
   const zone = await findZone(domain.hostname).catch(() => null);
   if (!zone) return false;
   for (const record of dnsRecordsFor(domain, domainTargets())) {
     const existing = await findRecord(zone.id, record).catch(() => null);
-    if (!existing) continue;
+    if (!existing || existing.comment !== COGNIX_DNS_COMMENT) continue;
     await cloudflareRequest(`/zones/${zone.id}/dns_records/${existing.id}`, { method: "DELETE" }).catch(() => null);
   }
   return true;

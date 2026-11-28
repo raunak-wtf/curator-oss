@@ -147,7 +147,7 @@ export async function POST(_request: Request, context: Context) {
     }
     const previewUrl = await ensurePreviewUrl(project);
     const updatedProject = await updateProject(project.id, viewer.id, {
-      status: previewUrl ? "ready" : "error",
+      status: previewUrl ? (project.publishedAt ? "published" : "ready") : "error",
       previewUrl: previewUrl ?? project.previewUrl,
     });
 

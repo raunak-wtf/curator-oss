@@ -2,7 +2,7 @@
 
 import { Check, CreditCard, Sparkles, X } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { PixelLoader } from "@/components/pixel-loader";
 
@@ -22,6 +22,15 @@ export function BillingPaywallDialog({
   onClose,
 }: BillingPaywallDialogProps) {
   const [startingCheckout, setStartingCheckout] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose, open]);
 
   if (!open) return null;
 
@@ -53,6 +62,9 @@ export function BillingPaywallDialog({
       role="dialog"
       aria-modal="true"
       aria-labelledby="billing-paywall-title"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
     >
       <div className="w-full max-w-md rounded-xl border border-white/15 bg-[#1d1d1d] p-5 text-white shadow-2xl">
         <div className="flex items-start justify-between gap-3">

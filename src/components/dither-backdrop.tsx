@@ -117,7 +117,7 @@ function luminance(img: HTMLImageElement, crop: Crop) {
   return { gray, width, height };
 }
 
-export function DitherBackdrop({
+function DitherBackdrop({
   className,
   fallback = "/landing/dither-hero.png",
   crop = HERO_CROP,
@@ -168,6 +168,7 @@ export function DitherBackdrop({
     img.src = SOURCE;
     let animId = 0;
     let disposed = false;
+    let removeResize: (() => void) | null = null;
 
     img.onload = () => {
       if (disposed) return;
@@ -211,6 +212,7 @@ export function DitherBackdrop({
       };
       resize();
       window.addEventListener("resize", resize);
+      removeResize = () => window.removeEventListener("resize", resize);
 
       const start = performance.now();
       const loop = (now: number) => {
@@ -220,14 +222,11 @@ export function DitherBackdrop({
         animId = requestAnimationFrame(loop);
       };
       animId = requestAnimationFrame(loop);
-
-      return () => {
-        window.removeEventListener("resize", resize);
-      };
     };
 
     return () => {
       disposed = true;
+      removeResize?.();
       cancelAnimationFrame(animId);
       gl.deleteProgram(program);
       gl.deleteShader(vs);

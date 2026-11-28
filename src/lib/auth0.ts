@@ -54,7 +54,7 @@ export async function getViewer(): Promise<Viewer | null> {
           authProviderLabel: parsedProvider.label,
           authMethod: parsedProvider.method,
           authSubject: session.user.sub,
-          isAdmin: isAdminEmail(session.user.email),
+          isAdmin: emailVerified && isAdminEmail(session.user.email),
         };
       }
     } catch (error) {
@@ -77,7 +77,7 @@ export async function requireViewer() {
 
 export async function requireAdmin() {
   const viewer = await requireViewer();
-  if (!viewer.isAdmin) {
+  if (!viewer.isAdmin || !viewer.emailVerified) {
     throw new Response("Administrator access required.", { status: 403 });
   }
   return viewer;

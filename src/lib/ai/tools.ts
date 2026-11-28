@@ -1,9 +1,18 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import path from "node:path";
-import type { Sandbox } from "@daytona/sdk";
 import { z } from "zod";
-import { devServerLogPath, getPreviewHealth, getPreviewUrl, getProjectFsRoot, getProjectRoot, readSandboxRuntimeLogs, runtimeLimitsPath, stopDevelopmentPreview } from "../daytona";
+import {
+  devServerLogPath,
+  getPreviewHealth,
+  getPreviewUrl,
+  getProjectFsRoot,
+  getProjectRoot,
+  readSandboxRuntimeLogs,
+  runtimeLimitsPath,
+  stopDevelopmentPreview,
+  type Sandbox,
+} from "../daytona";
 import { isProductionBuildCommand } from "./agent-policy";
 import { extractServerErrorsFromLog } from "../preview-console";
 import { appendProjectConsoleLogs, deleteProjectFile, listProjectConsoleLogs, upsertProjectFile, updateProject } from "../store";
@@ -396,9 +405,11 @@ export function isPrivateNetworkAddress(address: string) {
     return a === 0
       || a === 10
       || a === 127
+      || (a === 100 && b >= 64 && b <= 127)
       || (a === 169 && b === 254)
       || (a === 172 && b >= 16 && b <= 31)
       || (a === 192 && b === 168)
+      || (a === 198 && (b === 18 || b === 19))
       || a >= 224;
   }
   if (isIP(address) === 6) {
@@ -409,7 +420,8 @@ export function isPrivateNetworkAddress(address: string) {
       || normalized.startsWith("fd")
       || /^fe[89ab]/.test(normalized)
       || normalized.startsWith("ff")
-      || normalized.startsWith("::ffff:");
+      || normalized.startsWith("::ffff:")
+      || normalized.startsWith("64:ff9b:");
   }
   return true;
 }
@@ -997,7 +1009,10 @@ export async function executeAgentTool(
     }
     const previewUrl = await getPreviewUrl({ ...project, sandboxId: sandbox.id }, input.port);
     if (!previewUrl) throw new Error("Start the app before requesting a preview.");
-    await updateProject(project.id, project.ownerId, { previewUrl, status: "ready" });
+    await updateProject(project.id, project.ownerId, {
+      previewUrl,
+      status: project.publishedAt ? "published" : "ready",
+    });
     return { output: previewUrl, summary: `Preview is ready on port ${input.port}`, previewUrl };
   }
 

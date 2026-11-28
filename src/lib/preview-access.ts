@@ -1,10 +1,11 @@
-import { createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
+import { promisify } from "node:util";
 import type { PreviewAccessMode } from "./types";
+
+const scryptAsync = promisify(scryptCallback);
 
 export const PREVIEW_GRANT_COOKIE = "__cognix_preview_grant";
 export const PREVIEW_GRANT_QUERY_PARAM = "__cognix_preview_grant";
-export const PREVIEW_AUTH_CALLBACK_PATH = "/__cognix_preview_auth";
-export const DEFAULT_PUBLIC_PREVIEW_HOURS = 24;
 export const PREVIEW_OWNER_LEASE_MS = 2 * 60_000; // 2 minutes per heartbeat ping
 export const PREVIEW_GUEST_LEASE_MS = 10 * 60_000; // 10 minutes after an authorized guest opens the link
 
@@ -28,42 +29,49 @@ export type PreviewGrantPayload = {
 };
 
 function signingSecret(override?: string): string {
-  const secret = (
-    override ??
-    process.env.COGNIX_EDGE_SECRET ??
-    process.env.AUTH0_SECRET ??
-    ""
-  ).trim();
-  if (!secret) {
-    throw new Error("COGNIX_EDGE_SECRET or AUTH0_SECRET must be set to sign preview access tokens.");
+  const explicit = override?.trim() || process.env.COGNIX_EDGE_SECRET?.trim() || "";
+  if (explicit) return explicit;
+
+  // Local development fallback when COGNIX_EDGE_SECRET is unset: derive a domain-separated key
+  // so the raw AUTH0_SECRET is never used directly as a preview grant HMAC key.
+  const auth0Fallback = process.env.AUTH0_SECRET?.trim() || "";
+  if (auth0Fallback) {
+    return createHmac("sha256", "cognix-preview-grant-local-fallback-v1")
+      .update(auth0Fallback, "utf8")
+      .digest("hex");
   }
-  return secret;
+
+  throw new Error("COGNIX_EDGE_SECRET or AUTH0_SECRET must be set to sign preview access tokens.");
 }
 
 export function createPreviewShareKey(): string {
   return randomBytes(24).toString("base64url");
 }
 
-export function hashPreviewPasscode(passcode: string): string {
+export async function hashPreviewPasscode(passcode: string): Promise<string> {
   const salt = randomBytes(16).toString("hex");
-  const derived = scryptSync(passcode, salt, 32).toString("hex");
-  return `scrypt:${salt}:${derived}`;
+  const derived = (await scryptAsync(passcode, salt, 32)) as Buffer;
+  return `scrypt:${salt}:${derived.toString("hex")}`;
 }
 
-export function verifyPreviewPasscode(passcode: string, storedHash: string | null | undefined): boolean {
+export async function verifyPreviewPasscode(
+  passcode: string,
+  storedHash: string | null | undefined,
+): Promise<boolean> {
   if (!storedHash || !storedHash.startsWith("scrypt:")) return false;
   const parts = storedHash.split(":");
   if (parts.length !== 3) return false;
   const [, salt, hex] = parts;
-  if (!salt || !hex) return false;
+  if (!salt || !hex || hex.length % 2 !== 0) return false;
   const expected = Buffer.from(hex, "hex");
-  const actual = scryptSync(passcode, salt, 32);
+  if (expected.length !== 32) return false;
+  const actual = (await scryptAsync(passcode, salt, 32)) as Buffer;
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
 /**
  * Mints a compact HMAC-SHA256 signed token (`cg1.<base64url-json>.<base64url-hmac>`)
- * verifiable offline in both Next.js and the zero-dependency Node edge proxy.
+ * verifiable offline in Next.js, the Node edge proxy, and Cloudflare Workers.
  */
 export function signPreviewGrant(
   payload: Omit<PreviewGrantPayload, "exp"> & { ttlSeconds?: number; exp?: number },
@@ -101,10 +109,9 @@ export function verifyPreviewGrant(
   try {
     const expectedSig = createHmac("sha256", signingSecret(secretOverride))
       .update(`cg1.${body}`, "utf8")
-      .digest("base64url");
-    const expectedBuf = Buffer.from(expectedSig, "utf8");
-    const actualBuf = Buffer.from(sig, "utf8");
-    if (expectedBuf.length !== actualBuf.length || !timingSafeEqual(expectedBuf, actualBuf)) {
+      .digest();
+    const actualSig = Buffer.from(sig, "base64url");
+    if (expectedSig.length !== actualSig.length || !timingSafeEqual(expectedSig, actualSig)) {
       return null;
     }
     const decoded = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as PreviewGrantPayload;
@@ -128,6 +135,30 @@ export function isPublicPreviewActive(
   return Number.isFinite(expMs) && expMs > nowMs;
 }
 
+/**
+ * Strictly normalizes a relative in-app path, blocking `//evil.com`, `/\evil.com` authority confusion,
+ * control characters, and cross-origin resolution.
+ */
+export function sanitizeRelativePath(raw: string | null | undefined): string {
+  if (!raw || typeof raw !== "string") return "/";
+  const trimmed = raw.trim().slice(0, 500);
+  if (
+    !trimmed.startsWith("/") ||
+    trimmed.startsWith("//") ||
+    trimmed.includes("\\") ||
+    /[\u0000-\u001f\u007f]/.test(trimmed)
+  ) {
+    return "/";
+  }
+  try {
+    const parsed = new URL(trimmed, "https://cognix.invalid");
+    if (parsed.origin !== "https://cognix.invalid") return "/";
+    return `${parsed.pathname}${parsed.search}`;
+  } catch {
+    return "/";
+  }
+}
+
 export function buildPrivateShareUrl(previewUrl: string, shareKey: string): string {
   const url = new URL(previewUrl);
   url.pathname = "/auth";
@@ -137,8 +168,12 @@ export function buildPrivateShareUrl(previewUrl: string, shareKey: string): stri
 }
 
 export function buildOwnerPreviewFrameUrl(previewUrl: string, grantToken: string, nextPath = "/"): string {
-  const safeNext = nextPath.startsWith("/") && !nextPath.startsWith("//") ? nextPath : "/";
-  const url = new URL(safeNext, new URL(previewUrl).origin);
+  const baseOrigin = new URL(previewUrl).origin;
+  const safeNext = sanitizeRelativePath(nextPath);
+  const url = new URL(safeNext, baseOrigin);
+  if (url.origin !== baseOrigin) {
+    throw new Error("Cross-origin preview redirect blocked.");
+  }
   url.searchParams.set(PREVIEW_GRANT_QUERY_PARAM, grantToken);
   url.hash = "";
   return url.toString();

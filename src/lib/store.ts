@@ -1,6 +1,8 @@
 import { encryptSecret, decryptSecret } from './secrets-crypto';
 import { and, asc, desc, eq, gte, lte, ne, sql } from "drizzle-orm";
-import { db } from "./db";
+import * as dbModule from "./db";
+const { db } = dbModule;
+export const isDatabaseConfigured = Boolean(dbModule.isDatabaseConfigured);
 import {
   agentApprovals,
   attachments,
@@ -88,7 +90,7 @@ import {
 import { titleFromPrompt } from "./utils";
 
 /** Plain token values. Expiry fields are null for OAuth App tokens, which do not expire. */
-export type GitHubTokens = {
+type GitHubTokens = {
   accessToken: string;
   expiresAt: string | null;
   refreshToken: string | null;
@@ -110,6 +112,7 @@ type StoredGitHubTokens = {
 type MemoryUser = {
   id: string;
   email: string;
+  emailVerified?: boolean;
   name: string | null;
   avatarUrl: string | null;
   authProvider: string;
@@ -263,8 +266,12 @@ function mapAttachment(row: typeof attachments.$inferSelect): Attachment {
   };
 }
 
+const ENSURE_USER_TTL_MS = 2 * 60_000;
+const recentEnsuredUsers = new Map<string, number>();
+
 export async function ensureUser(viewer: Viewer) {
   const now = new Date();
+  const emailVerified = Boolean(viewer.emailVerified);
   const authProvider = viewer.authProvider || "unknown";
   const authProviderLabel = viewer.authProviderLabel || "Unknown";
   const authMethod: AuthMethod = viewer.authMethod || "oauth";
@@ -275,6 +282,7 @@ export async function ensureUser(viewer: Viewer) {
     const existing = memory.users.find((item) => item.id === viewer.id);
     if (existing) {
       existing.email = viewer.email;
+      existing.emailVerified = emailVerified;
       existing.name = viewer.name;
       existing.avatarUrl = viewer.picture ?? null;
       if (authProvider !== "unknown") {
@@ -288,6 +296,7 @@ export async function ensureUser(viewer: Viewer) {
       memory.users.push({
         id: viewer.id,
         email: viewer.email,
+        emailVerified,
         name: viewer.name,
         avatarUrl: viewer.picture ?? null,
         authProvider,
@@ -301,11 +310,18 @@ export async function ensureUser(viewer: Viewer) {
     return;
   }
 
+  const cacheKey = `${viewer.id}:${emailVerified ? "1" : "0"}:${authSubject ?? ""}:${viewer.email.toLowerCase()}`;
+  const cachedUntil = recentEnsuredUsers.get(cacheKey);
+  if (cachedUntil && cachedUntil > now.getTime()) {
+    return;
+  }
+
   await db
     .insert(users)
     .values({
       id: viewer.id,
       email: viewer.email,
+      emailVerified,
       name: viewer.name,
       avatarUrl: viewer.picture,
       authProvider,
@@ -318,6 +334,7 @@ export async function ensureUser(viewer: Viewer) {
       target: users.id,
       set: {
         email: viewer.email,
+        emailVerified,
         name: viewer.name,
         avatarUrl: viewer.picture,
         ...(authProvider !== "unknown"
@@ -333,24 +350,92 @@ export async function ensureUser(viewer: Viewer) {
       },
     });
 
-  if (!viewer.emailVerified) return;
+  if (recentEnsuredUsers.size >= 2_000) {
+    const oldestKey = recentEnsuredUsers.keys().next().value;
+    if (oldestKey) recentEnsuredUsers.delete(oldestKey);
+  }
+  recentEnsuredUsers.set(cacheKey, now.getTime() + ENSURE_USER_TTL_MS);
+
+  if (!emailVerified) return;
   const normalizedEmail = viewer.email.trim().toLowerCase();
   const legacyIdentities = await db
-    .select({ id: users.id })
+    .select({
+      id: users.id,
+      emailVerified: users.emailVerified,
+      authSubject: users.authSubject,
+    })
     .from(users)
     .where(and(sql`lower(${users.email}) = ${normalizedEmail}`, ne(users.id, viewer.id)));
+
   for (const identity of legacyIdentities) {
-    await db.update(projects).set({ ownerId: viewer.id }).where(eq(projects.ownerId, identity.id));
-    await db.update(attachments).set({ ownerId: viewer.id }).where(eq(attachments.ownerId, identity.id));
-    await db.update(creditUsageEvents).set({ userId: viewer.id }).where(eq(creditUsageEvents.userId, identity.id));
-    const [existingCanonicalSub] = await db
-      .select({ userId: userSubscriptions.userId })
-      .from(userSubscriptions)
-      .where(eq(userSubscriptions.userId, viewer.id))
-      .limit(1);
-    if (!existingCanonicalSub) {
-      await db.update(userSubscriptions).set({ userId: viewer.id }).where(eq(userSubscriptions.userId, identity.id));
+    // Only merge previously verified identities or the exact same Auth0 subject after email verification,
+    // preventing third-party unverified account injection.
+    const canSafelyMerge =
+      identity.emailVerified ||
+      identity.id.startsWith("account|") ||
+      (authSubject !== null && identity.authSubject === authSubject);
+    if (!canSafelyMerge) continue;
+
+    await Promise.all([
+      db.update(projects).set({ ownerId: viewer.id }).where(eq(projects.ownerId, identity.id)),
+      db.update(attachments).set({ ownerId: viewer.id }).where(eq(attachments.ownerId, identity.id)),
+      db.update(creditUsageEvents).set({ userId: viewer.id }).where(eq(creditUsageEvents.userId, identity.id)),
+      db.update(projectDomains).set({ ownerId: viewer.id }).where(eq(projectDomains.ownerId, identity.id)),
+      db.update(projectRepositories).set({ ownerId: viewer.id }).where(eq(projectRepositories.ownerId, identity.id)),
+      db.update(projectPreviewShares).set({ ownerId: viewer.id }).where(eq(projectPreviewShares.ownerId, identity.id)),
+      db.update(agentApprovals).set({ ownerId: viewer.id }).where(eq(agentApprovals.ownerId, identity.id)),
+    ]);
+
+    // Migrate skills without failing on duplicate `(owner_id, name)` constraints.
+    const [canonicalSkills, legacySkills] = await Promise.all([
+      db.select({ name: skills.name }).from(skills).where(eq(skills.ownerId, viewer.id)),
+      db.select({ id: skills.id, name: skills.name }).from(skills).where(eq(skills.ownerId, identity.id)),
+    ]);
+    const existingNames = new Set(canonicalSkills.map((s) => s.name));
+    for (const sk of legacySkills) {
+      if (!existingNames.has(sk.name)) {
+        await db.update(skills).set({ ownerId: viewer.id }).where(eq(skills.id, sk.id));
+        existingNames.add(sk.name);
+      }
     }
+
+    // Preserve GitHub connection if the canonical account does not have one yet.
+    const [existingGh] = await db
+      .select({ ownerId: githubConnections.ownerId })
+      .from(githubConnections)
+      .where(eq(githubConnections.ownerId, viewer.id))
+      .limit(1);
+    if (!existingGh) {
+      await db.update(githubConnections).set({ ownerId: viewer.id }).where(eq(githubConnections.ownerId, identity.id));
+    }
+
+    // Merge subscriptions without losing paid Dodo subscriptions or remaining credits.
+    const [[canonicalSub], [legacySub]] = await Promise.all([
+      db.select().from(userSubscriptions).where(eq(userSubscriptions.userId, viewer.id)).limit(1),
+      db.select().from(userSubscriptions).where(eq(userSubscriptions.userId, identity.id)).limit(1),
+    ]);
+    if (legacySub && !canonicalSub) {
+      await db.update(userSubscriptions).set({ userId: viewer.id }).where(eq(userSubscriptions.userId, identity.id));
+    } else if (legacySub && canonicalSub) {
+      const preferLegacyStatus = canonicalSub.status === "inactive" && legacySub.status !== "inactive";
+      await db.delete(userSubscriptions).where(eq(userSubscriptions.userId, identity.id));
+      await db
+        .update(userSubscriptions)
+        .set({
+          status: preferLegacyStatus ? legacySub.status : canonicalSub.status,
+          dodoCustomerId: canonicalSub.dodoCustomerId ?? legacySub.dodoCustomerId,
+          dodoSubscriptionId: canonicalSub.dodoSubscriptionId ?? legacySub.dodoSubscriptionId,
+          dodoProductId: canonicalSub.dodoProductId ?? legacySub.dodoProductId,
+          creditsBalanceHundredths: canonicalSub.creditsBalanceHundredths + legacySub.creditsBalanceHundredths,
+          lifetimeCreditsUsedHundredths:
+            canonicalSub.lifetimeCreditsUsedHundredths + legacySub.lifetimeCreditsUsedHundredths,
+          currentPeriodStart: canonicalSub.currentPeriodStart ?? legacySub.currentPeriodStart,
+          currentPeriodEnd: canonicalSub.currentPeriodEnd ?? legacySub.currentPeriodEnd,
+          updatedAt: now,
+        })
+        .where(eq(userSubscriptions.userId, viewer.id));
+    }
+
     await db.delete(users).where(eq(users.id, identity.id));
   }
 }
@@ -649,6 +734,10 @@ export async function deleteProject(id: string, ownerId: string): Promise<boolea
     memory.clouds = memory.clouds.filter((item) => item.projectId !== id);
     memory.repositories = memory.repositories.filter((item) => item.projectId !== id);
     memory.consoleLogs = (memory.consoleLogs ?? []).filter((item) => item.projectId !== id);
+    memory.analyticsEvents = (memory.analyticsEvents ?? []).filter((item) => item.projectId !== id);
+    memory.previewShares = (memory.previewShares ?? []).filter((item) => item.projectId !== id);
+    memory.previewPasscodeHashes?.delete(id);
+    memory.repositoryCache?.delete(id);
     return true;
   }
   const deleted = await db
@@ -1966,6 +2055,114 @@ export async function checkUserAgentEntitlement(viewer: Viewer): Promise<AgentEn
   return { allowed: true, subscription };
 }
 
+function safeNonNegInt(value: number, min = 0): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.max(min, Math.trunc(value));
+}
+
+/**
+ * Atomically reserves up to `desiredHoldHundredths` from an active subscriber's credit balance
+ * before starting a long-running agent stream, preventing concurrent-tab overdraft.
+ */
+export async function reserveUserAgentCredits(
+  viewer: Viewer,
+  desiredHoldHundredths: number,
+): Promise<
+  | { allowed: true; reservedHundredths: number; subscription: UserSubscription }
+  | { allowed: false; reason: "subscription_required" | "credits_exhausted"; message: string; subscription: UserSubscription }
+> {
+  const entitlement = await checkUserAgentEntitlement(viewer);
+  if (!entitlement.allowed) {
+    return {
+      allowed: false,
+      reason: entitlement.reason ?? "subscription_required",
+      message: entitlement.message ?? "Curator Pro ($10/month) is required to build apps.",
+      subscription: entitlement.subscription,
+    };
+  }
+  if (viewer.isAdmin) {
+    return { allowed: true, reservedHundredths: 0, subscription: entitlement.subscription };
+  }
+
+  const targetHold = Math.max(5, safeNonNegInt(desiredHoldHundredths, 50));
+  const now = new Date();
+
+  if (!db) {
+    memory.subscriptions ??= [];
+    const idx = memory.subscriptions.findIndex((s) => s.userId === viewer.id);
+    const current = idx >= 0 ? memory.subscriptions[idx] : defaultInactiveSubscription(viewer.id);
+    if (current.creditsBalanceHundredths <= 0) {
+      return {
+        allowed: false,
+        reason: "credits_exhausted",
+        message: "You have used all available credits for this billing cycle. Credits renew automatically on your next billing date.",
+        subscription: current,
+      };
+    }
+    const reserved = Math.min(targetHold, current.creditsBalanceHundredths);
+    const updated: UserSubscription = {
+      ...current,
+      creditsBalanceHundredths: current.creditsBalanceHundredths - reserved,
+      updatedAt: now.toISOString(),
+    };
+    if (idx >= 0) memory.subscriptions[idx] = updated;
+    else memory.subscriptions.push(updated);
+    return { allowed: true, reservedHundredths: reserved, subscription: updated };
+  }
+
+  // Atomic conditional reservation in PostgreSQL: deducts LEAST(balance, targetHold) only when balance > 0.
+  const [updatedRow] = await db
+    .update(userSubscriptions)
+    .set({
+      creditsBalanceHundredths: sql`GREATEST(0, ${userSubscriptions.creditsBalanceHundredths} - ${targetHold})`,
+      updatedAt: now,
+    })
+    .where(and(eq(userSubscriptions.userId, viewer.id), gte(userSubscriptions.creditsBalanceHundredths, 1)))
+    .returning();
+
+  if (!updatedRow) {
+    const latest = await getUserSubscription(viewer.id);
+    return {
+      allowed: false,
+      reason: "credits_exhausted",
+      message: "You have used all available credits for this billing cycle. Credits renew automatically on your next billing date.",
+      subscription: latest,
+    };
+  }
+
+  const reservedHundredths = Math.min(targetHold, entitlement.subscription.creditsBalanceHundredths);
+  return {
+    allowed: true,
+    reservedHundredths: Math.max(0, reservedHundredths),
+    subscription: mapUserSubscription(updatedRow),
+  };
+}
+
+export async function refundReservedCredits(userId: string, reservedHundredths: number): Promise<void> {
+  const refund = safeNonNegInt(reservedHundredths, 0);
+  if (refund <= 0) return;
+  const now = new Date();
+  if (!db) {
+    memory.subscriptions ??= [];
+    const idx = memory.subscriptions.findIndex((s) => s.userId === userId);
+    if (idx >= 0) {
+      memory.subscriptions[idx] = {
+        ...memory.subscriptions[idx],
+        creditsBalanceHundredths: memory.subscriptions[idx].creditsBalanceHundredths + refund,
+        updatedAt: now.toISOString(),
+      };
+    }
+    return;
+  }
+  await db
+    .update(userSubscriptions)
+    .set({
+      creditsBalanceHundredths: sql`${userSubscriptions.creditsBalanceHundredths} + ${refund}`,
+      updatedAt: now,
+    })
+    .where(eq(userSubscriptions.userId, userId));
+}
+
 export async function recordCreditUsage(input: {
   userId: string;
   projectId: string | null;
@@ -1982,9 +2179,23 @@ export async function recordCreditUsage(input: {
   cloudActions: number;
   durationMs: number;
   creditsHundredths: number;
+  reservedHundredths?: number;
   description: string;
 }): Promise<CreditUsageEvent> {
-  const safeCredits = Math.max(0, Math.trunc(input.creditsHundredths));
+  const safeCredits = safeNonNegInt(input.creditsHundredths, 0);
+  const alreadyReserved = safeNonNegInt(input.reservedHundredths ?? 0, 0);
+  // Positive netDelta means deduct additional credits beyond the pre-reserved hold;
+  // negative netDelta means the actual run cost less than the hold, so refund the difference.
+  const netDelta = safeCredits - alreadyReserved;
+  const promptTokens = safeNonNegInt(input.promptTokens, 0);
+  const completionTokens = safeNonNegInt(input.completionTokens, 0);
+  const totalTokens = safeNonNegInt(input.totalTokens, 0);
+  const turns = safeNonNegInt(input.turns, 1);
+  const toolCalls = safeNonNegInt(input.toolCalls, 0);
+  const filesChanged = safeNonNegInt(input.filesChanged, 0);
+  const commandsRun = safeNonNegInt(input.commandsRun, 0);
+  const cloudActions = safeNonNegInt(input.cloudActions, 0);
+  const durationMs = safeNonNegInt(input.durationMs, 0);
   const now = new Date();
 
   if (!db) {
@@ -1997,15 +2208,15 @@ export async function recordCreditUsage(input: {
       messageId: input.messageId,
       mode: input.mode,
       complexityTier: input.complexityTier,
-      promptTokens: input.promptTokens,
-      completionTokens: input.completionTokens,
-      totalTokens: input.totalTokens,
-      turns: input.turns,
-      toolCalls: input.toolCalls,
-      filesChanged: input.filesChanged,
-      commandsRun: input.commandsRun,
-      cloudActions: input.cloudActions,
-      durationMs: input.durationMs,
+      promptTokens,
+      completionTokens,
+      totalTokens,
+      turns,
+      toolCalls,
+      filesChanged,
+      commandsRun,
+      cloudActions,
+      durationMs,
       creditsHundredths: safeCredits,
       description: input.description,
       createdAt: now.toISOString(),
@@ -2015,7 +2226,7 @@ export async function recordCreditUsage(input: {
     const current = subIdx >= 0 ? memory.subscriptions[subIdx] : defaultInactiveSubscription(input.userId);
     const updated: UserSubscription = {
       ...current,
-      creditsBalanceHundredths: Math.max(0, current.creditsBalanceHundredths - safeCredits),
+      creditsBalanceHundredths: Math.max(0, current.creditsBalanceHundredths - netDelta),
       creditsUsedThisPeriodHundredths: current.creditsUsedThisPeriodHundredths + safeCredits,
       lifetimeCreditsUsedHundredths: current.lifetimeCreditsUsedHundredths + safeCredits,
       updatedAt: now.toISOString(),
@@ -2025,54 +2236,54 @@ export async function recordCreditUsage(input: {
     return event;
   }
 
-  const [eventRow] = await db
-    .insert(creditUsageEvents)
-    .values({
-      userId: input.userId,
-      projectId: input.projectId,
-      messageId: input.messageId,
-      mode: input.mode,
-      complexityTier: input.complexityTier,
-      promptTokens: Math.max(0, Math.trunc(input.promptTokens)),
-      completionTokens: Math.max(0, Math.trunc(input.completionTokens)),
-      totalTokens: Math.max(0, Math.trunc(input.totalTokens)),
-      turns: Math.max(1, Math.trunc(input.turns)),
-      toolCalls: Math.max(0, Math.trunc(input.toolCalls)),
-      filesChanged: Math.max(0, Math.trunc(input.filesChanged)),
-      commandsRun: Math.max(0, Math.trunc(input.commandsRun)),
-      cloudActions: Math.max(0, Math.trunc(input.cloudActions)),
-      durationMs: Math.max(0, Math.trunc(input.durationMs)),
-      creditsHundredths: safeCredits,
-      description: input.description.slice(0, 300),
-    })
-    .returning();
-
-  // Atomically update the user's subscription balance and usage counters
-  await db
-    .insert(userSubscriptions)
-    .values({
-      userId: input.userId,
-      planCode: PRO_PLAN_CODE,
-      status: "inactive",
-      priceCents: PRO_PLAN_PRICE_CENTS,
-      currency: PRO_PLAN_CURRENCY,
-      monthlyCreditsHundredths: PRO_MONTHLY_CREDITS_HUNDREDTHS,
-      creditsBalanceHundredths: 0,
-      creditsUsedThisPeriodHundredths: safeCredits,
-      lifetimeCreditsUsedHundredths: safeCredits,
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: userSubscriptions.userId,
-      set: {
-        creditsBalanceHundredths: sql`GREATEST(0, ${userSubscriptions.creditsBalanceHundredths} - ${safeCredits})`,
-        creditsUsedThisPeriodHundredths: sql`${userSubscriptions.creditsUsedThisPeriodHundredths} + ${safeCredits}`,
-        lifetimeCreditsUsedHundredths: sql`${userSubscriptions.lifetimeCreditsUsedHundredths} + ${safeCredits}`,
+  const [insertedEvents] = await db.batch([
+    db
+      .insert(creditUsageEvents)
+      .values({
+        userId: input.userId,
+        projectId: input.projectId,
+        messageId: input.messageId,
+        mode: input.mode,
+        complexityTier: input.complexityTier,
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        turns,
+        toolCalls,
+        filesChanged,
+        commandsRun,
+        cloudActions,
+        durationMs,
+        creditsHundredths: safeCredits,
+        description: input.description.slice(0, 300),
+      })
+      .returning(),
+    db
+      .insert(userSubscriptions)
+      .values({
+        userId: input.userId,
+        planCode: PRO_PLAN_CODE,
+        status: "inactive",
+        priceCents: PRO_PLAN_PRICE_CENTS,
+        currency: PRO_PLAN_CURRENCY,
+        monthlyCreditsHundredths: PRO_MONTHLY_CREDITS_HUNDREDTHS,
+        creditsBalanceHundredths: 0,
+        creditsUsedThisPeriodHundredths: safeCredits,
+        lifetimeCreditsUsedHundredths: safeCredits,
         updatedAt: now,
-      },
-    });
+      })
+      .onConflictDoUpdate({
+        target: userSubscriptions.userId,
+        set: {
+          creditsBalanceHundredths: sql`GREATEST(0, ${userSubscriptions.creditsBalanceHundredths} - ${netDelta})`,
+          creditsUsedThisPeriodHundredths: sql`${userSubscriptions.creditsUsedThisPeriodHundredths} + ${safeCredits}`,
+          lifetimeCreditsUsedHundredths: sql`${userSubscriptions.lifetimeCreditsUsedHundredths} + ${safeCredits}`,
+          updatedAt: now,
+        },
+      }),
+  ]);
 
-  return mapCreditUsageEvent(eventRow);
+  return mapCreditUsageEvent(insertedEvents[0]);
 }
 
 export async function listUserCreditUsage(userId: string, limit = 30): Promise<CreditUsageEvent[]> {
@@ -2121,6 +2332,14 @@ export async function claimBillingWebhookEvent(eventId: string, eventType: strin
   return inserted.length > 0;
 }
 
+export async function releaseBillingWebhookEvent(eventId: string): Promise<void> {
+  if (!db) {
+    memory.webhookEvents?.delete(eventId);
+    return;
+  }
+  await db.delete(billingWebhookEvents).where(eq(billingWebhookEvents.eventId, eventId));
+}
+
 export async function resolveUserIdForBilling(lookup: {
   userId?: string | null;
   dodoSubscriptionId?: string | null;
@@ -2141,8 +2360,9 @@ export async function resolveUserIdForBilling(lookup: {
     }
     if (lookup.email) {
       const norm = lookup.email.trim().toLowerCase();
-      const user = memory.users.find((u) => u.email.trim().toLowerCase() === norm);
-      if (user) return user.id;
+      const matching = memory.users.filter((u) => u.email.trim().toLowerCase() === norm);
+      const canonical = matching.find((u) => u.id.startsWith("account|") || u.emailVerified) ?? matching[0];
+      if (canonical) return canonical.id;
     }
     return lookup.userId ?? null;
   }
@@ -2173,6 +2393,7 @@ export async function resolveUserIdForBilling(lookup: {
       .select({ id: users.id })
       .from(users)
       .where(sql`lower(${users.email}) = ${norm}`)
+      .orderBy(sql`(${users.id} LIKE 'account|%') DESC`, desc(users.emailVerified), desc(users.lastSeenAt))
       .limit(1);
     if (row) return row.id;
   }
@@ -2192,6 +2413,53 @@ export async function applyDodoSubscriptionEvent(input: {
 }): Promise<UserSubscription> {
   const existing = await getUserSubscription(input.userId);
   const now = new Date();
+
+  // `payment.succeeded` often arrives concurrently with `subscription.active` / `subscription.renewed`.
+  // Only update payment metadata so a concurrent payment webhook never overwrites status or credit balance!
+  if (input.eventType === "payment.succeeded") {
+    const nextPaymentId = input.paymentId ?? existing.lastPaymentId;
+    const nextPaymentAt = input.paymentId ? now : existing.lastPaymentAt ? new Date(existing.lastPaymentAt) : null;
+    if (!db) {
+      memory.subscriptions ??= [];
+      const updated: UserSubscription = {
+        ...existing,
+        dodoCustomerId: input.customerId ?? existing.dodoCustomerId,
+        lastPaymentId: nextPaymentId,
+        lastPaymentAt: nextPaymentAt?.toISOString() ?? null,
+        updatedAt: now.toISOString(),
+      };
+      const idx = memory.subscriptions.findIndex((s) => s.userId === input.userId);
+      if (idx >= 0) memory.subscriptions[idx] = updated;
+      else memory.subscriptions.push(updated);
+      return updated;
+    }
+    const [row] = await db
+      .insert(userSubscriptions)
+      .values({
+        userId: input.userId,
+        planCode: PRO_PLAN_CODE,
+        status: "inactive",
+        priceCents: PRO_PLAN_PRICE_CENTS,
+        currency: PRO_PLAN_CURRENCY,
+        dodoCustomerId: input.customerId ?? null,
+        monthlyCreditsHundredths: PRO_MONTHLY_CREDITS_HUNDREDTHS,
+        creditsBalanceHundredths: 0,
+        lastPaymentId: nextPaymentId,
+        lastPaymentAt: nextPaymentAt,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: userSubscriptions.userId,
+        set: {
+          ...(input.customerId ? { dodoCustomerId: input.customerId } : {}),
+          ...(nextPaymentId ? { lastPaymentId: nextPaymentId, lastPaymentAt: nextPaymentAt } : {}),
+          updatedAt: now,
+        },
+      })
+      .returning();
+    return mapUserSubscription(row);
+  }
+
   const nextPeriodStart = input.currentPeriodStart
     ? new Date(input.currentPeriodStart)
     : existing.currentPeriodStart
@@ -2204,24 +2472,28 @@ export async function applyDodoSubscriptionEvent(input: {
       ? new Date(existing.currentPeriodEnd)
       : fallbackEnd;
 
+  const allowance = existing.monthlyCreditsHundredths || PRO_MONTHLY_CREDITS_HUNDREDTHS;
+  const rolloverCap = Math.max(PRO_MAX_ROLLOVER_CREDITS_HUNDREDTHS, allowance * 2);
+
   let status: SubscriptionStatus = existing.status;
   let creditsBalanceHundredths = existing.creditsBalanceHundredths;
   let creditsUsedThisPeriodHundredths = existing.creditsUsedThisPeriodHundredths;
   let cancelAtPeriodEnd = input.cancelAtPeriodEnd ?? existing.cancelAtPeriodEnd;
   let lastPaymentId = input.paymentId ?? existing.lastPaymentId;
   let lastPaymentAt = existing.lastPaymentAt ? new Date(existing.lastPaymentAt) : null;
+  let creditSqlOp: "activate" | "renew" | "keep" = "keep";
 
   switch (input.eventType) {
     case "subscription.active": {
       const isNewActivation =
         existing.status !== "active" ||
-        (input.subscriptionId && input.subscriptionId !== existing.dodoSubscriptionId) ||
-        existing.creditsBalanceHundredths <= 0;
+        Boolean(input.subscriptionId && input.subscriptionId !== existing.dodoSubscriptionId);
       status = "active";
       cancelAtPeriodEnd = false;
       if (isNewActivation) {
-        creditsBalanceHundredths = Math.max(existing.creditsBalanceHundredths, PRO_MONTHLY_CREDITS_HUNDREDTHS);
+        creditsBalanceHundredths = Math.min(rolloverCap, existing.creditsBalanceHundredths + allowance);
         creditsUsedThisPeriodHundredths = 0;
+        creditSqlOp = "activate";
       }
       if (input.paymentId) {
         lastPaymentId = input.paymentId;
@@ -2232,12 +2504,9 @@ export async function applyDodoSubscriptionEvent(input: {
     case "subscription.renewed": {
       status = "active";
       cancelAtPeriodEnd = false;
-      // Lovable-style rollover: carry unused credits forward up to 2x monthly cap
-      creditsBalanceHundredths = Math.min(
-        PRO_MAX_ROLLOVER_CREDITS_HUNDREDTHS,
-        existing.creditsBalanceHundredths + PRO_MONTHLY_CREDITS_HUNDREDTHS,
-      );
+      creditsBalanceHundredths = Math.min(rolloverCap, existing.creditsBalanceHundredths + allowance);
       creditsUsedThisPeriodHundredths = 0;
+      creditSqlOp = "renew";
       if (input.paymentId) {
         lastPaymentId = input.paymentId;
         lastPaymentAt = now;
@@ -2246,7 +2515,7 @@ export async function applyDodoSubscriptionEvent(input: {
     }
     case "subscription.updated":
     case "subscription.plan_changed": {
-      if (existing.status === "inactive") status = "active";
+      // Never promote an inactive/unpaid subscription to active without an explicit `subscription.active` event.
       break;
     }
     case "subscription.on_hold":
@@ -2268,13 +2537,6 @@ export async function applyDodoSubscriptionEvent(input: {
       status = "failed";
       break;
     }
-    case "payment.succeeded": {
-      if (input.paymentId) {
-        lastPaymentId = input.paymentId;
-        lastPaymentAt = now;
-      }
-      break;
-    }
     case "payment.failed": {
       if (existing.status === "active") {
         status = "on_hold";
@@ -2294,7 +2556,7 @@ export async function applyDodoSubscriptionEvent(input: {
     dodoCustomerId: input.customerId ?? existing.dodoCustomerId,
     dodoSubscriptionId: input.subscriptionId ?? existing.dodoSubscriptionId,
     dodoProductId: input.productId ?? existing.dodoProductId,
-    monthlyCreditsHundredths: PRO_MONTHLY_CREDITS_HUNDREDTHS,
+    monthlyCreditsHundredths: allowance,
     creditsBalanceHundredths,
     creditsUsedThisPeriodHundredths,
     lifetimeCreditsUsedHundredths: existing.lifetimeCreditsUsedHundredths,
@@ -2314,6 +2576,11 @@ export async function applyDodoSubscriptionEvent(input: {
     else memory.subscriptions.push(nextSub);
     return nextSub;
   }
+
+  const sqlBalanceExpr =
+    creditSqlOp === "activate" || creditSqlOp === "renew"
+      ? sql`LEAST(GREATEST(${PRO_MAX_ROLLOVER_CREDITS_HUNDREDTHS}, ${userSubscriptions.monthlyCreditsHundredths} * 2), ${userSubscriptions.creditsBalanceHundredths} + ${userSubscriptions.monthlyCreditsHundredths})`
+      : userSubscriptions.creditsBalanceHundredths;
 
   const [row] = await db
     .insert(userSubscriptions)
@@ -2344,9 +2611,8 @@ export async function applyDodoSubscriptionEvent(input: {
         dodoCustomerId: nextSub.dodoCustomerId,
         dodoSubscriptionId: nextSub.dodoSubscriptionId,
         dodoProductId: nextSub.dodoProductId,
-        monthlyCreditsHundredths: nextSub.monthlyCreditsHundredths,
-        creditsBalanceHundredths: nextSub.creditsBalanceHundredths,
-        creditsUsedThisPeriodHundredths: nextSub.creditsUsedThisPeriodHundredths,
+        creditsBalanceHundredths: sqlBalanceExpr,
+        ...(creditSqlOp !== "keep" ? { creditsUsedThisPeriodHundredths: 0 } : {}),
         currentPeriodStart: nextPeriodStart,
         currentPeriodEnd: nextPeriodEnd,
         cancelAtPeriodEnd: nextSub.cancelAtPeriodEnd,
@@ -2370,12 +2636,17 @@ export async function adminAdjustUserBilling(input: {
 }): Promise<UserSubscription> {
   const existing = await getUserSubscription(input.userId);
   const now = new Date();
-  const nextBalance =
-    typeof input.setCreditsBalanceHundredths === "number"
-      ? Math.max(0, Math.trunc(input.setCreditsBalanceHundredths))
-      : Math.max(0, existing.creditsBalanceHundredths + Math.trunc(input.grantCreditsHundredths ?? 0));
+  const hasExactSet = typeof input.setCreditsBalanceHundredths === "number" && Number.isFinite(input.setCreditsBalanceHundredths);
+  const deltaHundredths = Number.isFinite(input.grantCreditsHundredths)
+    ? Math.trunc(input.grantCreditsHundredths!)
+    : 0;
+  const nextBalance = hasExactSet
+    ? safeNonNegInt(input.setCreditsBalanceHundredths!, 0)
+    : Math.max(0, existing.creditsBalanceHundredths + deltaHundredths);
   const nextMonthly =
-    typeof input.monthlyCreditsHundredths === "number" && input.monthlyCreditsHundredths > 0
+    typeof input.monthlyCreditsHundredths === "number" &&
+    Number.isFinite(input.monthlyCreditsHundredths) &&
+    input.monthlyCreditsHundredths > 0
       ? Math.trunc(input.monthlyCreditsHundredths)
       : existing.monthlyCreditsHundredths;
   const nextStatus = input.setStatus ?? existing.status;
@@ -2431,7 +2702,9 @@ export async function adminAdjustUserBilling(input: {
       set: {
         status: nextStatus,
         monthlyCreditsHundredths: nextMonthly,
-        creditsBalanceHundredths: nextBalance,
+        creditsBalanceHundredths: hasExactSet
+          ? nextBalance
+          : sql`GREATEST(0, ${userSubscriptions.creditsBalanceHundredths} + ${deltaHundredths})`,
         cancelAtPeriodEnd: nextCancelAtPeriodEnd,
         currentPeriodStart: periodStart,
         currentPeriodEnd: periodEnd,
@@ -2462,6 +2735,7 @@ export async function getAdminDashboardData(): Promise<{
   let rawUsers: {
     id: string;
     email: string;
+    emailVerified: boolean;
     name: string | null;
     avatarUrl: string | null;
     authProvider: string;
@@ -2487,6 +2761,7 @@ export async function getAdminDashboardData(): Promise<{
     rawUsers = memory.users.map((u) => ({
       id: u.id,
       email: u.email,
+      emailVerified: u.emailVerified !== false,
       name: u.name,
       avatarUrl: u.avatarUrl,
       authProvider: u.authProvider,
@@ -2554,6 +2829,7 @@ export async function getAdminDashboardData(): Promise<{
     rawUsers = userRows.map((u) => ({
       id: u.id,
       email: u.email,
+      emailVerified: u.emailVerified !== false,
       name: u.name ?? null,
       avatarUrl: u.avatarUrl ?? null,
       authProvider: u.authProvider || "unknown",
@@ -2628,7 +2904,7 @@ export async function getAdminDashboardData(): Promise<{
       authProvider: u.authProvider,
       authProviderLabel: u.authProviderLabel,
       authMethod: u.authMethod,
-      isAdmin: isAdminEmail(u.email),
+      isAdmin: u.emailVerified && isAdminEmail(u.email),
       createdAt: u.createdAt,
       lastSeenAt: u.lastSeenAt,
       subscriptionStatus: sub.status,
@@ -2775,7 +3051,7 @@ export async function updateProjectPreviewAccess(
       ? undefined
       : patch.passcode === null || !patch.passcode.trim()
         ? null
-        : hashPreviewPasscode(patch.passcode.trim());
+        : await hashPreviewPasscode(patch.passcode.trim());
 
   if (!db) {
     const idx = memory.projects.findIndex((p) => p.id === projectId && p.ownerId === ownerId);
@@ -2842,6 +3118,14 @@ export async function createOrUpdateProjectPreviewShare(input: {
 
   if (!db) {
     memory.previewShares ??= [];
+    const pIdx = memory.projects.findIndex((p) => p.id === input.projectId && p.ownerId === input.ownerId);
+    if (pIdx >= 0 && (memory.projects[pIdx].previewAccessMode ?? "owner") === "owner") {
+      memory.projects[pIdx] = {
+        ...memory.projects[pIdx],
+        previewAccessMode: "private",
+        updatedAt: new Date().toISOString(),
+      };
+    }
     const existingIdx = memory.previewShares.findIndex(
       (item) => item.projectId === input.projectId && item.email === email,
     );
@@ -2926,8 +3210,12 @@ export async function revokeProjectPreviewShare(
     if (memory.previewShares.length === before) return false;
     const pIdx = memory.projects.findIndex((p) => p.id === projectId && p.ownerId === ownerId);
     if (pIdx >= 0) {
+      const remaining = memory.previewShares.some((item) => item.projectId === projectId);
       memory.projects[pIdx] = {
         ...memory.projects[pIdx],
+        ...(memory.projects[pIdx].previewAccessMode === "private" && !remaining
+          ? { previewAccessMode: "owner" as const }
+          : {}),
         previewAccessVersion: (memory.projects[pIdx].previewAccessVersion ?? 1) + 1,
       };
     }
@@ -2947,10 +3235,21 @@ export async function revokeProjectPreviewShare(
 
   if (deleted.length === 0) return false;
 
+  const remainingRows = await db
+    .select({ id: projectPreviewShares.id })
+    .from(projectPreviewShares)
+    .where(eq(projectPreviewShares.projectId, projectId))
+    .limit(1);
+
   // Bump previewAccessVersion so any active guest cookie for the revoked share stops working immediately.
   await db
     .update(projects)
     .set({
+      ...(remainingRows.length === 0
+        ? {
+            previewAccessMode: sql`CASE WHEN ${projects.previewAccessMode} = 'private' THEN 'owner' ELSE ${projects.previewAccessMode} END`,
+          }
+        : {}),
       previewAccessVersion: sql`${projects.previewAccessVersion} + 1`,
       updatedAt: new Date(),
     })
@@ -3051,35 +3350,64 @@ export async function recordPreviewShareAccess(shareId: string): Promise<void> {
 }
 
 export async function touchProjectPreviewSession(projectId: string, leaseMs: number): Promise<string> {
-  const until = new Date(Date.now() + Math.max(15_000, leaseMs));
+  const candidateMs = Date.now() + Math.max(15_000, leaseMs);
+  const until = new Date(candidateMs);
   if (!db) {
     const item = memory.projects.find((p) => p.id === projectId);
-    if (item) item.previewActiveUntil = until.toISOString();
+    if (item) {
+      const currentMs = item.previewActiveUntil ? Date.parse(item.previewActiveUntil) : 0;
+      const bestMs = Number.isFinite(currentMs) ? Math.max(currentMs, candidateMs) : candidateMs;
+      item.previewActiveUntil = new Date(bestMs).toISOString();
+      return item.previewActiveUntil;
+    }
     return until.toISOString();
   }
-  await db
+  const [row] = await db
     .update(projects)
-    .set({ previewActiveUntil: until })
-    .where(eq(projects.id, projectId));
-  return until.toISOString();
+    .set({
+      previewActiveUntil: sql`GREATEST(COALESCE(${projects.previewActiveUntil}, to_timestamp(0)), ${until})`,
+    })
+    .where(eq(projects.id, projectId))
+    .returning({ previewActiveUntil: projects.previewActiveUntil });
+  return row?.previewActiveUntil?.toISOString() ?? until.toISOString();
 }
 
-export async function clearProjectPreviewSession(projectId: string, ownerId: string): Promise<void> {
+export async function clearProjectPreviewSession(
+  projectId: string,
+  ownerId: string,
+  maxOwnerLeaseHorizonMs?: number,
+): Promise<void> {
+  const cutoff =
+    typeof maxOwnerLeaseHorizonMs === "number" && maxOwnerLeaseHorizonMs > 0
+      ? new Date(Date.now() + maxOwnerLeaseHorizonMs)
+      : null;
+
   if (!db) {
     const item = memory.projects.find((p) => p.id === projectId && p.ownerId === ownerId);
-    if (item) item.previewActiveUntil = null;
+    if (!item) return;
+    if (cutoff && item.previewActiveUntil) {
+      const currentMs = Date.parse(item.previewActiveUntil);
+      if (Number.isFinite(currentMs) && currentMs > cutoff.getTime()) {
+        // Keep longer active guest lease intact while owner closes the editor tab.
+        return;
+      }
+    }
+    item.previewActiveUntil = null;
     return;
   }
+
   await db
     .update(projects)
     .set({ previewActiveUntil: null })
-    .where(and(eq(projects.id, projectId), eq(projects.ownerId, ownerId)));
-}
-
-export async function hasActivePrivatePreviewShare(projectId: string): Promise<boolean> {
-  const shares = await listProjectPreviewShares(projectId);
-  const nowMs = Date.now();
-  return shares.some((s) => !s.expiresAt || Date.parse(s.expiresAt) > nowMs);
+    .where(
+      cutoff
+        ? and(
+            eq(projects.id, projectId),
+            eq(projects.ownerId, ownerId),
+            lte(projects.previewActiveUntil, cutoff),
+          )
+        : and(eq(projects.id, projectId), eq(projects.ownerId, ownerId)),
+    );
 }
 
 export async function getProjectPreviewLeaseStatus(projectId: string): Promise<string | null> {

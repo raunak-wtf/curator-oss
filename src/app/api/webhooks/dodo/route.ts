@@ -1,11 +1,13 @@
 import {
   extractDodoEventDetails,
+  getDodoProductId,
   isDodoWebhookConfigured,
   verifyDodoWebhook,
 } from "@/lib/billing/dodo";
 import {
   applyDodoSubscriptionEvent,
   claimBillingWebhookEvent,
+  releaseBillingWebhookEvent,
   resolveUserIdForBilling,
 } from "@/lib/store";
 
@@ -46,16 +48,21 @@ export async function POST(request: Request) {
     return Response.json({ error: message }, { status: 401 });
   }
 
-  const claimed = await claimBillingWebhookEvent(verified.eventId, verified.eventType);
-  if (!claimed) {
-    return Response.json({ received: true, duplicate: true });
-  }
-
   if (!HANDLED_EVENTS.has(verified.eventType)) {
     return Response.json({ received: true, ignored: true, eventType: verified.eventType });
   }
 
-  const details = extractDodoEventDetails(verified.data);
+  const details = extractDodoEventDetails(verified.data, verified.eventType);
+  const configuredProductId = getDodoProductId();
+  if (
+    configuredProductId &&
+    details.productId &&
+    verified.eventType.startsWith("subscription.") &&
+    details.productId !== configuredProductId
+  ) {
+    return Response.json({ received: true, ignoredProduct: true, eventType: verified.eventType });
+  }
+
   const userId = await resolveUserIdForBilling({
     userId: details.userId,
     dodoSubscriptionId: details.subscriptionId,
@@ -64,23 +71,34 @@ export async function POST(request: Request) {
   });
 
   if (!userId) {
+    // Return 503 without claiming the event ID so Dodo retries once the user finishes first sign-in.
     return Response.json(
-      { received: true, unresolvedUser: true, eventType: verified.eventType },
-      { status: 202 },
+      { error: "Target user account not found yet; retry later.", eventType: verified.eventType },
+      { status: 503 },
     );
   }
 
-  await applyDodoSubscriptionEvent({
-    userId,
-    eventType: verified.eventType,
-    customerId: details.customerId,
-    subscriptionId: details.subscriptionId,
-    productId: details.productId,
-    paymentId: details.paymentId,
-    currentPeriodStart: details.currentPeriodStart,
-    currentPeriodEnd: details.currentPeriodEnd,
-    cancelAtPeriodEnd: details.cancelAtPeriodEnd,
-  });
+  const claimed = await claimBillingWebhookEvent(verified.eventId, verified.eventType);
+  if (!claimed) {
+    return Response.json({ received: true, duplicate: true });
+  }
+
+  try {
+    await applyDodoSubscriptionEvent({
+      userId,
+      eventType: verified.eventType,
+      customerId: details.customerId,
+      subscriptionId: details.subscriptionId,
+      productId: details.productId,
+      paymentId: details.paymentId,
+      currentPeriodStart: details.currentPeriodStart,
+      currentPeriodEnd: details.currentPeriodEnd,
+      cancelAtPeriodEnd: details.cancelAtPeriodEnd,
+    });
+  } catch (error) {
+    await releaseBillingWebhookEvent(verified.eventId).catch(() => undefined);
+    throw error;
+  }
 
   return Response.json({ received: true, eventType: verified.eventType });
 }

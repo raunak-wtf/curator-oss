@@ -312,13 +312,6 @@ export async function listNeonBranches(neonProjectId: string) {
   return res.branches ?? [];
 }
 
-export async function getNeonBranch(neonProjectId: string, branchId: string) {
-  const res = await neonRequest<{ branch: NeonBranch }>(
-    `/projects/${encodeURIComponent(neonProjectId)}/branches/${encodeURIComponent(branchId)}`,
-  );
-  return res.branch;
-}
-
 export async function createNeonBranch(
   neonProjectId: string,
   input: {
@@ -693,7 +686,7 @@ export function isNeonHttpCompatibleUrl(databaseUrl: string | undefined) {
     const parsed = new URL(databaseUrl);
     return (
       (parsed.protocol === "postgres:" || parsed.protocol === "postgresql:") &&
-      /neon\.tech$/i.test(parsed.hostname)
+      /(?:^|\.)neon\.tech$/i.test(parsed.hostname)
     );
   } catch {
     return false;
@@ -784,7 +777,9 @@ export function splitSqlStatements(sqlText: string): string[] {
 
     // Dollar-quoted PostgreSQL string (`$$` or `$tag$`)
     if (ch === "$") {
-      const tagMatch = sqlText.slice(i).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/);
+      const dollarTagPattern = /\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/y;
+      dollarTagPattern.lastIndex = i;
+      const tagMatch = dollarTagPattern.exec(sqlText);
       if (tagMatch) {
         const tag = tagMatch[0];
         const endIdx = sqlText.indexOf(tag, i + tag.length);

@@ -23,8 +23,12 @@ function clearFlowCookie(response: NextResponse) {
   return response;
 }
 
+function publicBaseUrl(request: NextRequest): string {
+  return process.env.APP_BASE_URL?.trim() || request.nextUrl.origin;
+}
+
 function finish(request: NextRequest, returnTo: string, result: string) {
-  const target = new URL("/github/connected", request.url);
+  const target = new URL("/github/connected", publicBaseUrl(request));
   target.searchParams.set("result", result);
   target.searchParams.set("returnTo", safeReturnPath(returnTo));
   return clearFlowCookie(NextResponse.redirect(target));
@@ -32,7 +36,7 @@ function finish(request: NextRequest, returnTo: string, result: string) {
 
 /** Starts a fresh flow through the connect route, which sets a new state cookie. */
 function restart(request: NextRequest, returnTo: string, mode: "authorize" | "install") {
-  const target = new URL("/api/github/connect", request.url);
+  const target = new URL("/api/github/connect", publicBaseUrl(request));
   target.searchParams.set("returnTo", safeReturnPath(returnTo));
   target.searchParams.set("mode", mode);
   return clearFlowCookie(NextResponse.redirect(target));
@@ -48,7 +52,7 @@ function restart(request: NextRequest, returnTo: string, mode: "authorize" | "in
 export async function GET(request: NextRequest) {
   const viewer = await getViewer();
   const params = request.nextUrl.searchParams;
-  if (!viewer) return NextResponse.redirect(new URL("/auth/login", request.url));
+  if (!viewer) return NextResponse.redirect(new URL("/auth/login", publicBaseUrl(request)));
 
   let returnTo = "/";
   try {

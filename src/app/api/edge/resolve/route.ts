@@ -1,8 +1,13 @@
 import { getPreviewProxyTarget, getPublishedProxyTarget, publishedProxyHeaders } from "@/lib/daytona";
 import { hostnameFromHeader, isTrustedEdgeRequest, parseAppsHostname } from "@/lib/domains";
-import { isPublicPreviewActive } from "@/lib/preview-access";
+import { isPublicPreviewActive, PREVIEW_GUEST_LEASE_MS } from "@/lib/preview-access";
 import { badgeHrefFor } from "@/lib/remix";
-import { getProjectForEdgePreview, getPublishedProject, getPublishedProjectByHostname } from "@/lib/store";
+import {
+  getProjectForEdgePreview,
+  getPublishedProject,
+  getPublishedProjectByHostname,
+  touchProjectPreviewSession,
+} from "@/lib/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -81,6 +86,11 @@ export async function GET(request: Request) {
         },
         { status: 423, headers: noStore },
       );
+    }
+
+    // When private collaborators are actively viewing a shared preview, keep the guest lease warm across navigations.
+    if (mode !== "owner" && isEditorOrGuestActive && !publicActive) {
+      void touchProjectPreviewSession(project.id, PREVIEW_GUEST_LEASE_MS).catch(() => undefined);
     }
 
     const target = await getPreviewProxyTarget(project, { fresh }).catch(() => null);

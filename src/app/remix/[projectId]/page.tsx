@@ -3,6 +3,7 @@ import Link from "next/link";
 import { RemixButton } from "@/components/remix-button";
 import { getViewer } from "@/lib/auth0";
 import { ensurePreviewUrl, getPublishedAppRuntimeUrl } from "@/lib/daytona";
+import { isPublicPreviewActive } from "@/lib/preview-access";
 import { getRemixableProject, getUserName } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
@@ -11,8 +12,8 @@ export const metadata: Metadata = { title: "Remix · Curator", robots: { index: 
 type Props = { params: Promise<{ projectId: string }> };
 
 /**
- * Public remix page. Shows a preview and a Remix button, never the project's code, chat, or files.
- * Signed-out visitors don't see the project's name; signed-in visitors see it and who made it.
+ * Public remix page. Shows a preview (when published or publicly shared) and a Remix button,
+ * never the project's code, chat, or files.
  */
 export default async function RemixPage({ params }: Props) {
   const { projectId } = await params;
@@ -33,9 +34,17 @@ export default async function RemixPage({ params }: Props) {
     );
   }
 
+  const isOwnerOrAdmin = Boolean(viewer && (viewer.id === project.ownerId || viewer.isAdmin));
+  const canShowDevPreview =
+    isOwnerOrAdmin ||
+    (isPublicPreviewActive(project.previewAccessMode ?? "owner", project.previewPublicExpiresAt) &&
+      !project.previewHasPasscode);
+
   const previewUrl = project.publishedAt
     ? await getPublishedAppRuntimeUrl(project).catch(() => null)
-    : await ensurePreviewUrl(project).catch(() => null);
+    : canShowDevPreview
+      ? await ensurePreviewUrl(project).catch(() => null)
+      : null;
   const creator = viewer ? await getUserName(project.ownerId) : null;
 
   return (
@@ -51,7 +60,9 @@ export default async function RemixPage({ params }: Props) {
         <iframe title="App preview" src={previewUrl} className="min-h-0 flex-1 border-0 bg-white" referrerPolicy="strict-origin-when-cross-origin" />
       ) : (
         <div className="grid flex-1 place-items-center px-4 text-center text-[13px] text-white/55">
-          The preview is starting. You can still remix the app.
+          {project.publishedAt || canShowDevPreview
+            ? "The preview is starting. You can still remix the app."
+            : "Development preview is private. Remix this project to launch your own live copy."}
         </div>
       )}
     </main>

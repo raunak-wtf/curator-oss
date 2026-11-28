@@ -856,10 +856,22 @@ server.on("upgrade", async (req, clientSocket, head) => {
   }
 
   const target = await resolveTarget(hostname);
-  if (target.isPreview && target.previewAccess && !isPreviewRequestAuthorized(req, hostname, target.previewAccess)) {
-    clientSocket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
-    clientSocket.destroy();
-    return;
+  if (target.isPreview) {
+    const wsOrigin = req.headers.origin;
+    if (typeof wsOrigin === "string" && wsOrigin.trim()) {
+      const originHost = normalizeHostname(wsOrigin);
+      const builderHost = normalizeHostname(COGNIX_PUBLIC_ORIGIN);
+      if (!originHost || (originHost !== hostname && originHost !== builderHost)) {
+        clientSocket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+        clientSocket.destroy();
+        return;
+      }
+    }
+    if (target.previewAccess && !isPreviewRequestAuthorized(req, hostname, target.previewAccess)) {
+      clientSocket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+      clientSocket.destroy();
+      return;
+    }
   }
   if (target.kind !== "proxy") {
     clientSocket.write("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");

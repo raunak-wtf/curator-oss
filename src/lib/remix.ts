@@ -18,10 +18,6 @@ export function badgeHrefFor(project: Pick<Project, "id" | "publicRemix">) {
   return project.publicRemix ? `${base}/remix/${project.id}?ref=badge` : `${base}/?ref=badge`;
 }
 
-export function remixUrlFor(projectId: string) {
-  return `${appBase()}/remix/${projectId}`;
-}
-
 const MAX_TEXT_FILE = 1_000_000;
 
 /** Creates the copy right away and builds its sandbox in the background, so the remixer lands in it immediately. */

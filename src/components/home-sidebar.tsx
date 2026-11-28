@@ -342,10 +342,10 @@ export function HomeSidebar({
                       >
                         <div
                           className={cn(
-                            "h-full rounded-full transition-[width] duration-300",
+                            "h-full w-full origin-left rounded-full transition-transform duration-300 motion-reduce:transition-none",
                             isEmpty ? "bg-red-400" : isLow ? "bg-amber-400" : "bg-indigo-400",
                           )}
-                          style={{ width: `${pct}%` }}
+                          style={{ transform: `scaleX(${pct / 100})` }}
                         />
                       </div>
                       {isLow ? (

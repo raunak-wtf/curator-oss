@@ -87,6 +87,21 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Enforce CSRF Origin verification on all cookie-authenticated mutating API requests.
+  if (
+    request.nextUrl.pathname.startsWith("/api/") &&
+    !request.nextUrl.pathname.startsWith("/api/edge/") &&
+    ["POST", "PUT", "PATCH", "DELETE"].includes(request.method.toUpperCase())
+  ) {
+    const originHeader = request.headers.get("origin");
+    if (originHeader) {
+      const originHost = hostnameFromHeader(originHeader);
+      if (!originHost || (originHost !== hostname && !isAppHostname(originHost))) {
+        return Response.json({ error: "Cross-origin request rejected." }, { status: 403 });
+      }
+    }
+  }
+
   if (!auth0) return NextResponse.next();
   const response = await auth0.middleware(request);
 

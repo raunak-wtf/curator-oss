@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUp, AtSign, FileEdit, MessageCircleDashed, Mic, Plus } from "lucide-react";
+import { ArrowUp, AtSign, Mic, Plus } from "lucide-react";
 import { PixelLoader } from "@/components/pixel-loader";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
@@ -14,6 +14,7 @@ import { PendingUpload } from "@/components/pending-upload";
 import { ApprovalModeMenu } from "@/components/security/approval-mode-menu";
 import { RepoSelector } from "@/components/security/repo-selector";
 import { useSkillCommands } from "@/components/skills/use-skill-commands";
+import { useVoiceInput } from "@/components/use-voice-input";
 import type { ApprovalMode, Project, Viewer } from "@/lib/types";
 import { validateUpload } from "@/lib/upload-policy";
 import { cn } from "@/lib/utils";
@@ -34,9 +35,15 @@ export function HomeShell({ viewer, projects = [], initialRepository = null, bil
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [prompt, setPrompt] = useState("");
-  // The URL decides the mode: Security mode lives at /security-scanner.
   const pathname = usePathname();
-  const mode: "code" | "security" = pathname?.startsWith(SECURITY_PATH) ? "security" : "code";
+  const routeMode = pathname?.startsWith(SECURITY_PATH) ? "security" : "code";
+  const [prevPathname, setPrevPathname] = useState(pathname);
+  const [mode, setMode] = useState<"code" | "security">(routeMode);
+  if (pathname !== prevPathname) {
+    setPrevPathname(pathname);
+    setMode(routeMode);
+  }
+
   const [repository, setRepository] = useState<string | null>(initialRepository);
   // Security mode: how the agent acts on its first run. Defaults to the last choice made anywhere.
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("auto");
@@ -61,10 +68,12 @@ export function HomeShell({ viewer, projects = [], initialRepository = null, bil
   const [files, setFiles] = useState<File[]>([]);
   const [isCreating, setIsCreating] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
-  const [isListening, setIsListening] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [paywall, setPaywall] = useState<{ reason: "subscription_required" | "credits_exhausted"; message?: string } | null>(null);
   const skillCommands = useSkillCommands({ prompt, setPrompt, textareaRef, signedIn: Boolean(viewer) });
+  const voice = useVoiceInput((transcript) => {
+    setPrompt((prev) => (prev ? `${prev} ${transcript}` : transcript));
+  });
 
   function addFiles(incoming: File[]) {
     const valid: File[] = [];
@@ -134,38 +143,12 @@ export function HomeShell({ viewer, projects = [], initialRepository = null, bil
     }
   }
 
-  function handleVoiceInput() {
-    if (!("webkitSpeechRecognition" in window || "SpeechRecognition" in window)) {
-      toast.error("Speech recognition is not supported in this browser.");
-      return;
-    }
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      const recognition = new SpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = false;
-      recognition.onstart = () => setIsListening(true);
-      recognition.onend = () => setIsListening(false);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      recognition.onresult = (event: any) => {
-        const transcript = event.results[0]?.[0]?.transcript;
-        if (transcript) {
-          setPrompt((prev) => (prev ? `${prev} ${transcript}` : transcript));
-        }
-      };
-      recognition.start();
-    } catch {
-      setIsListening(false);
-      toast.error("Could not activate microphone.");
-    }
-  }
-
   const canSubmit = (prompt.trim().length >= 2 || (mode === "security" && Boolean(repository))) && !isCreating;
 
-  /** Switches mode by changing the URL in place, so the typed prompt and attachments stay. */
+  /** Switches mode by updating local state + URL in place, so the typed prompt and attachments stay. */
   function switchMode(next: "code" | "security") {
     if (next === mode) return;
+    setMode(next);
     const url = next === "security" ? `${SECURITY_PATH}${repository ? `?repo=${encodeURIComponent(repository)}` : ""}` : "/";
     window.history.pushState(null, "", url);
   }
@@ -202,14 +185,6 @@ export function HomeShell({ viewer, projects = [], initialRepository = null, bil
         {/* Top Header Row */}
         <header className="relative z-20 flex h-12 shrink-0 items-center justify-between px-2 md:justify-end md:px-3">
           <SidebarMobileTrigger onOpen={() => setSidebarOpen(true)} />
-          <button
-            type="button"
-            className={toolButton}
-            title="Chat actions"
-            aria-label="Chat actions"
-          >
-            <MessageCircleDashed className="size-4" />
-          </button>
         </header>
 
         {/* Center Stage */}
@@ -326,7 +301,7 @@ export function HomeShell({ viewer, projects = [], initialRepository = null, bil
                     ref={fileInputRef}
                     type="file"
                     multiple
-                    accept="image/*,.pdf,.md,.txt,.json,.csv,.doc,.docx"
+                    accept="image/*,.pdf,.md,.txt,.json"
                     className="hidden"
                     onChange={(e) => {
                       addFiles(Array.from(e.target.files ?? []));
@@ -344,15 +319,6 @@ export function HomeShell({ viewer, projects = [], initialRepository = null, bil
                   </button>
                   <button
                     type="button"
-                    onClick={() => toast.info("Canvas workspace ready.")}
-                    className={toolButton}
-                    title="Workspace document"
-                    aria-label="Workspace document"
-                  >
-                    <FileEdit className="size-3.5" />
-                  </button>
-                  <button
-                    type="button"
                     onClick={() => {
                       setPrompt((prev) => `${prev} @`);
                       textareaRef.current?.focus();
@@ -365,16 +331,16 @@ export function HomeShell({ viewer, projects = [], initialRepository = null, bil
                   </button>
                 </div>
 
-                {/* Right action tools (no model selector) */}
+                {/* Right action tools */}
                 <div className="flex items-center gap-1">
                   {mode === "security" ? <ApprovalModeMenu value={approvalMode} onChange={chooseApprovalMode} disabled={isCreating} /> : null}
                   <button
                     type="button"
-                    onClick={handleVoiceInput}
-                    className={cn(toolButton, isListening && "bg-red-500/15 text-red-400 hover:bg-red-500/20 hover:text-red-300")}
-                    title="Voice dictation"
-                    aria-label={isListening ? "Listening for dictation" : "Voice dictation"}
-                    aria-pressed={isListening}
+                    onClick={voice.start}
+                    className={cn(toolButton, voice.listening && "bg-red-500/15 text-red-400 hover:bg-red-500/20 hover:text-red-300")}
+                    title={voice.listening ? "Stop voice dictation" : "Voice dictation"}
+                    aria-label={voice.listening ? "Stop voice dictation" : "Voice dictation"}
+                    aria-pressed={voice.listening}
                   >
                     <Mic className="size-4" />
                   </button>
@@ -433,7 +399,7 @@ export function HomeShell({ viewer, projects = [], initialRepository = null, bil
         open={Boolean(paywall)}
         reason={paywall?.reason ?? "subscription_required"}
         message={paywall?.message}
-        returnPath="/"
+        returnPath={mode === "security" ? SECURITY_PATH : "/"}
         onClose={() => setPaywall(null)}
       />
     </div>

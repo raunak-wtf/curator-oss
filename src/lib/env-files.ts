@@ -18,6 +18,8 @@ export const RESERVED_SECRET_NAMES = new Set([
   "HOSTNAME",
   "NEXT_TELEMETRY_DISABLED",
   "NODE_OPTIONS",
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
   "PATH",
   "HOME",
 ]);
@@ -48,7 +50,7 @@ export function isEnvFilePath(value: string) {
 }
 
 /** Quote one dotenv value so multi-line keys, `#`, `$`, quotes, and spaces survive Next.js parsing. */
-export function quoteEnvValue(value: string) {
+function quoteEnvValue(value: string) {
   const escaped = value
     .replaceAll("\\", "\\\\")
     .replaceAll("\"", "\\\"")

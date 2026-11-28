@@ -57,8 +57,8 @@ export async function POST(request: Request, context: Context) {
       return Response.json({ active: true, activeUntil }, { headers: noStore });
     }
 
-    // Owner closed the Curator project tab: clear the editor lease immediately and schedule preview shutdown.
-    await clearProjectPreviewSession(project.id, viewer.id);
+    // Owner closed the Curator project tab: clear the editor lease (preserving any longer guest lease) and schedule preview shutdown.
+    await clearProjectPreviewSession(project.id, viewer.id, PREVIEW_OWNER_LEASE_MS + 10_000);
     const timer = setTimeout(() => {
       closeTimers.delete(project.id);
       void (async () => {

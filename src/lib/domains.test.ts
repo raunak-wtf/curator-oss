@@ -102,6 +102,7 @@ describe("wildcard apps domain routing", () => {
     expect(isAppHostname("notes-app.curatorsite.in", appsEnv)).toBe(false);
     expect(isAppHostname(`${previewSlug}.curatorsite.in`, appsEnv)).toBe(false);
     expect(() => normalizeCustomHostname("notes-app.curatorsite.in", appsEnv)).toThrow(DomainRequestError);
+    expect(() => normalizeCustomHostname("sub.edge.curatorsite.in", appsEnv)).toThrow(DomainRequestError);
     expect(() => normalizeCustomHostname("curator.codes", appsEnv)).toThrow(DomainRequestError);
     expect(directPreviewUrl(uuid, appsEnv)).toBe(`https://${previewSlug}.curatorsite.in`);
     expect(directPublishedUrl("notes-app", appsEnv)).toBe("https://notes-app.curatorsite.in");

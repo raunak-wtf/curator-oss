@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   getPublishedProject: vi.fn(),
   getPublishedProjectByHostname: vi.fn(),
   hasRegisteredDomain: vi.fn(),
+  touchProjectPreviewSession: vi.fn().mockResolvedValue(undefined),
   getPreviewProxyTarget: vi.fn(),
   getPublishedProxyTarget: vi.fn(),
 }));
@@ -16,6 +17,7 @@ vi.mock("@/lib/store", () => ({
   getPublishedProject: mocks.getPublishedProject,
   getPublishedProjectByHostname: mocks.getPublishedProjectByHostname,
   hasRegisteredDomain: mocks.hasRegisteredDomain,
+  touchProjectPreviewSession: mocks.touchProjectPreviewSession,
 }));
 
 vi.mock("@/lib/daytona", async (importOriginal) => {

@@ -372,8 +372,8 @@ export function BillingClient({ viewer, initialSummary, checkoutStatus }: Billin
                 aria-label="Remaining monthly credits"
               >
                 <div
-                  className="h-full rounded-full bg-indigo-400 transition-[width] duration-300"
-                  style={{ width: `${creditPercent}%` }}
+                  className="h-full w-full origin-left rounded-full bg-indigo-400 transition-transform duration-300 motion-reduce:transition-none"
+                  style={{ transform: `scaleX(${creditPercent / 100})` }}
                 />
               </div>
 

@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { DomainDnsRecord, DomainSetup, ProjectDomain, ProjectDomainView } from "./types";
 
 export const VERIFICATION_PREFIX = "_cognix-challenge";
@@ -26,10 +27,9 @@ export const EDGE_HOST_HEADER = "x-cognix-edge-host";
 export const EDGE_SECRET_HEADER = "x-cognix-edge-secret";
 
 function constantTimeEqual(a: string, b: string) {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let index = 0; index < a.length; index += 1) diff |= a.charCodeAt(index) ^ b.charCodeAt(index);
-  return diff === 0;
+  const digestA = createHash("sha256").update(a, "utf8").digest();
+  const digestB = createHash("sha256").update(b, "utf8").digest();
+  return timingSafeEqual(digestA, digestB) && a.length === b.length;
 }
 
 /** True when the request carries the shared secret of the Cognix edge worker. */
@@ -347,7 +347,12 @@ export function normalizeCustomHostname(input: string, env: DomainEnv = process.
   if (labels[0] === VERIFICATION_PREFIX) {
     throw new DomainRequestError("Add the domain itself, not its verification record.");
   }
-  if (isAppHostname(hostname, env) || Boolean(parseAppsHostname(hostname, env))) {
+  const configuredAppsDomain = appsDomain(env);
+  if (
+    isAppHostname(hostname, env) ||
+    Boolean(parseAppsHostname(hostname, env)) ||
+    (configuredAppsDomain && (hostname === configuredAppsDomain || hostname.endsWith(`.${configuredAppsDomain}`)))
+  ) {
     throw new DomainRequestError("That hostname already belongs to Cognix. Use a domain you control.");
   }
 

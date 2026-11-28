@@ -36,11 +36,21 @@ const IDEMPOTENT_SCHEMA_PATCHES = [
     "created_at" timestamp with time zone DEFAULT now() NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS "project_console_logs_project_created_idx" ON "project_console_logs" ("project_id", "created_at")`,
+  `ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "email_verified" boolean DEFAULT false NOT NULL`,
   `ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "auth_provider" text DEFAULT 'unknown' NOT NULL`,
   `ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "auth_provider_label" text DEFAULT 'Unknown' NOT NULL`,
   `ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "auth_method" text DEFAULT 'oauth' NOT NULL`,
   `ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "auth_subject" text`,
   `ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "last_seen_at" timestamp with time zone DEFAULT now() NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS "users_lower_email_idx" ON "users" (lower("email"))`,
+  `ALTER TABLE "github_connections" ADD COLUMN IF NOT EXISTS "token_expires_at" timestamp with time zone`,
+  `ALTER TABLE "github_connections" ADD COLUMN IF NOT EXISTS "refresh_ciphertext" text`,
+  `ALTER TABLE "github_connections" ADD COLUMN IF NOT EXISTS "refresh_iv" text`,
+  `ALTER TABLE "github_connections" ADD COLUMN IF NOT EXISTS "refresh_auth_tag" text`,
+  `ALTER TABLE "github_connections" ADD COLUMN IF NOT EXISTS "refresh_expires_at" timestamp with time zone`,
+  `ALTER TABLE "project_repositories" ADD COLUMN IF NOT EXISTS "cached_sync" jsonb`,
+  `ALTER TABLE "project_repositories" ADD COLUMN IF NOT EXISTS "cached_commits" jsonb`,
+  `ALTER TABLE "project_repositories" ADD COLUMN IF NOT EXISTS "commits_fetched_at" timestamp with time zone`,
   `CREATE TABLE IF NOT EXISTS "user_subscriptions" (
     "user_id" text PRIMARY KEY NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
     "plan_code" text DEFAULT 'pro_monthly' NOT NULL,
@@ -85,6 +95,7 @@ const IDEMPOTENT_SCHEMA_PATCHES = [
     "created_at" timestamp with time zone DEFAULT now() NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS "credit_usage_events_user_created_idx" ON "credit_usage_events" ("user_id", "created_at")`,
+  `CREATE INDEX IF NOT EXISTS "credit_usage_events_project_idx" ON "credit_usage_events" ("project_id")`,
   `CREATE INDEX IF NOT EXISTS "credit_usage_events_created_idx" ON "credit_usage_events" ("created_at")`,
   `CREATE TABLE IF NOT EXISTS "billing_webhook_events" (
     "event_id" text PRIMARY KEY NOT NULL,
@@ -140,11 +151,31 @@ async function ensureHostSchemaUpToDate(connectionString: string): Promise<void>
   return schemaHealPromise;
 }
 
+function extractHostname(value: string | URL | Request): string {
+  try {
+    if (typeof value === "string") return new URL(value).hostname.toLowerCase();
+    if (value instanceof URL) return value.hostname.toLowerCase();
+    return new URL(value.url).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
 export function createResilientNeonFetch(
   connectionString: string,
   baseFetch: typeof fetch = globalThis.fetch,
 ): typeof fetch {
+  const hostDbHostname = (() => {
+    try {
+      return connectionString ? new URL(connectionString).hostname.toLowerCase() : "";
+    } catch {
+      return "";
+    }
+  })();
+
   return async (input, init) => {
+    const reqHost = extractHostname(input);
+    const isHostDbRequest = !hostDbHostname || !reqHost || reqHost === hostDbHostname;
     let healedSchema = false;
 
     for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
@@ -159,7 +190,7 @@ export function createResilientNeonFetch(
           continue;
         }
 
-        if (response.status === 400 && !healedSchema && !schemaHealingActive && connectionString) {
+        if (isHostDbRequest && response.status === 400 && !healedSchema && !schemaHealingActive && connectionString) {
           const clonedText = await response.clone().text().catch(() => "");
           // PostgreSQL 42703 = undefined_column, 42P01 = undefined_table
           if (/"code"\s*:\s*"(?:42703|42P01)"/.test(clonedText)) {

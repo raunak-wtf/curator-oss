@@ -376,6 +376,9 @@ export async function inspectBetterAuthDatabase(
 }
 
 export async function setBetterAuthUserVerified(databaseUrl: string, userId: string, verified: boolean) {
+  if (!isNeonHttpCompatibleUrl(databaseUrl)) {
+    throw new Error("A managed Neon PostgreSQL connection is required.");
+  }
   const sql = neon(databaseUrl, { fetchOptions: { cache: "no-store", signal: AbortSignal.timeout(AUTH_QUERY_TIMEOUT_MS) } });
   const cols = await loadPublicColumns(sql);
   const userTable = resolveAuthTable(cols, ["user", "users"], ["email"]);
@@ -391,6 +394,9 @@ export async function setBetterAuthUserVerified(databaseUrl: string, userId: str
 }
 
 export async function revokeBetterAuthUserSessions(databaseUrl: string, userId: string) {
+  if (!isNeonHttpCompatibleUrl(databaseUrl)) {
+    throw new Error("A managed Neon PostgreSQL connection is required.");
+  }
   const sql = neon(databaseUrl, { fetchOptions: { cache: "no-store", signal: AbortSignal.timeout(AUTH_QUERY_TIMEOUT_MS) } });
   const cols = await loadPublicColumns(sql);
   const sessionTable = resolveAuthTable(cols, ["session", "sessions"], ["token", "expiresAt", "expires_at"]);
@@ -405,6 +411,9 @@ export async function revokeBetterAuthUserSessions(databaseUrl: string, userId: 
 }
 
 export async function deleteBetterAuthUser(databaseUrl: string, userId: string) {
+  if (!isNeonHttpCompatibleUrl(databaseUrl)) {
+    throw new Error("A managed Neon PostgreSQL connection is required.");
+  }
   const sql = neon(databaseUrl, { fetchOptions: { cache: "no-store", signal: AbortSignal.timeout(AUTH_QUERY_TIMEOUT_MS) } });
   const cols = await loadPublicColumns(sql);
   const userTable = resolveAuthTable(cols, ["user", "users"], ["email"]);

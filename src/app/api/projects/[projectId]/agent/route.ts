@@ -3,12 +3,31 @@ import { requireViewer } from "@/lib/auth0";
 import { runAgent } from "@/lib/ai/runner";
 import { errorResponse, notFound } from "@/lib/http";
 import { SKILLS_PER_PROMPT, skillReferences } from "@/lib/skills";
-import { checkUserAgentEntitlement, createMessage, getAttachment, getProject, getSkillsByNames, listMessages, updateProject } from "@/lib/store";
+import {
+  createMessage,
+  getAttachment,
+  getProject,
+  getSkillsByNames,
+  listMessages,
+  refundReservedCredits,
+  reserveUserAgentCredits,
+  updateProject,
+} from "@/lib/store";
 import type { AgentEvent, Attachment } from "@/lib/types";
 import { visualSelectionsSchema } from "@/lib/visual-edit";
 
 export const runtime = "nodejs";
 export const maxDuration = 900;
+
+declare global {
+  var __cognixActiveProjectAgentRuns: Map<string, number> | undefined;
+}
+
+const activeProjectRuns =
+  globalThis.__cognixActiveProjectAgentRuns ??
+  (globalThis.__cognixActiveProjectAgentRuns = new Map<string, number>());
+
+const RUN_LOCK_MAX_AGE_MS = 16 * 60_000;
 
 type Context = { params: Promise<{ projectId: string }> };
 
@@ -36,20 +55,18 @@ function agentErrorMessage(error: unknown) {
 export async function POST(request: Request, context: Context) {
   try {
     const viewer = await requireViewer();
-    const entitlement = await checkUserAgentEntitlement(viewer);
-    if (!entitlement.allowed) {
-      return Response.json(
-        {
-          error: entitlement.message ?? "An active Curator Pro subscription ($10/month) is required.",
-          code: entitlement.reason === "credits_exhausted" ? "CREDITS_EXHAUSTED" : "SUBSCRIPTION_REQUIRED",
-          billingUrl: "/billing",
-        },
-        { status: 402 },
-      );
-    }
     const { projectId } = await context.params;
     const project = await getProject(projectId, viewer.id);
     if (!project) return notFound();
+
+    const existingStartedAt = activeProjectRuns.get(project.id);
+    if (existingStartedAt && Date.now() - existingStartedAt < RUN_LOCK_MAX_AGE_MS) {
+      return Response.json(
+        { error: "A build is already running for this project. Wait for it to finish before sending another prompt." },
+        { status: 409 },
+      );
+    }
+
     const body = z
       .object({
         prompt: z.string().trim().min(1).max(40_000),
@@ -66,29 +83,57 @@ export async function POST(request: Request, context: Context) {
       })
       .parse(await request.json());
 
-    const history = await listMessages(project.id);
-    const skills = await getSkillsByNames(viewer.id, skillReferences(body.prompt).slice(0, SKILLS_PER_PROMPT));
-    const requestedAttachmentIds = [...new Set(body.attachmentIds)];
-    const resolvedAttachments = (
-      await Promise.all(requestedAttachmentIds.map((id) => getAttachment(id, viewer.id)))
-    ).filter((attachment): attachment is Attachment => attachment?.projectId === project.id);
-    if (resolvedAttachments.length !== requestedAttachmentIds.length) {
+    const desiredHoldHundredths = project.mode !== "security" && body.chatMode === "plan" ? 100 : 50;
+    const reservation = await reserveUserAgentCredits(viewer, desiredHoldHundredths);
+    if (!reservation.allowed) {
       return Response.json(
-        { error: "One or more attachments are unavailable. Remove them, upload again, and resend the prompt." },
-        { status: 400 },
+        {
+          error: reservation.message,
+          code: reservation.reason === "credits_exhausted" ? "CREDITS_EXHAUSTED" : "SUBSCRIPTION_REQUIRED",
+          billingUrl: "/billing",
+        },
+        { status: 402 },
       );
     }
-    await createMessage(project.id, "user", body.prompt, {
-      attachmentIds: resolvedAttachments.map((item) => item.id),
-      attachments: resolvedAttachments.map((item) => ({
-        id: item.id,
-        name: item.name,
-        contentType: item.contentType,
-        size: item.size,
-      })),
-      visualSelections: body.visualSelections,
-      ...(project.mode !== "security" && body.chatMode === "plan" ? { chatMode: "plan" } : {}),
-    });
+
+    let reservedHundredths = reservation.reservedHundredths;
+    activeProjectRuns.set(project.id, Date.now());
+
+    let history;
+    let skills;
+    let resolvedAttachments: Attachment[];
+    try {
+      history = await listMessages(project.id);
+      skills = await getSkillsByNames(viewer.id, skillReferences(body.prompt).slice(0, SKILLS_PER_PROMPT));
+      const requestedAttachmentIds = [...new Set(body.attachmentIds)];
+      resolvedAttachments = (
+        await Promise.all(requestedAttachmentIds.map((id) => getAttachment(id, viewer.id)))
+      ).filter((attachment): attachment is Attachment => attachment?.projectId === project.id);
+      if (resolvedAttachments.length !== requestedAttachmentIds.length) {
+        activeProjectRuns.delete(project.id);
+        await refundReservedCredits(viewer.id, reservedHundredths).catch(() => undefined);
+        return Response.json(
+          { error: "One or more attachments are unavailable. Remove them, upload again, and resend the prompt." },
+          { status: 400 },
+        );
+      }
+      await createMessage(project.id, "user", body.prompt, {
+        attachmentIds: resolvedAttachments.map((item) => item.id),
+        attachments: resolvedAttachments.map((item) => ({
+          id: item.id,
+          name: item.name,
+          contentType: item.contentType,
+          size: item.size,
+        })),
+        visualSelections: body.visualSelections,
+        ...(project.mode !== "security" && body.chatMode === "plan" ? { chatMode: "plan" } : {}),
+      });
+    } catch (prepError) {
+      activeProjectRuns.delete(project.id);
+      await refundReservedCredits(viewer.id, reservedHundredths).catch(() => undefined);
+      reservedHundredths = 0;
+      throw prepError;
+    }
 
     const encoder = new TextEncoder();
     let streamOpen = true;
@@ -117,17 +162,19 @@ export async function POST(request: Request, context: Context) {
           skills,
           approvalMode: body.approvalMode,
           chatMode: body.chatMode,
+          reservedCreditsHundredths: reservedHundredths,
           emit,
         })
           .catch(async (error) => {
             const message = agentErrorMessage(error);
             await Promise.allSettled([
-              updateProject(project.id, viewer.id, { status: "error" }),
+              updateProject(project.id, viewer.id, { status: project.publishedAt ? "published" : "error" }),
               createMessage(project.id, "assistant", message, { error: true }),
             ]);
             emit({ type: "error", message });
           })
           .finally(() => {
+            activeProjectRuns.delete(project.id);
             if (heartbeat) {
               clearInterval(heartbeat);
               heartbeat = null;

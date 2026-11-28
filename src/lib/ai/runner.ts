@@ -15,7 +15,7 @@ import {
   restartDevelopmentPreview,
   syncProjectEnv,
 } from "../daytona";
-import { extractServerErrorsFromLog, selectActionableConsoleErrors } from "../preview-console";
+import { extractServerErrorsFromLog, redactConsoleSecrets, selectActionableConsoleErrors } from "../preview-console";
 import { isSecretsEncryptionConfigured } from "../secrets-crypto";
 import {
   appendProjectConsoleLogs,
@@ -30,6 +30,7 @@ import {
   listProjectConsoleLogs,
   listSecretNames,
   recordCreditUsage,
+  refundReservedCredits,
   updateAttachmentSandboxPath,
   updateMessageMetadata,
   updateProject,
@@ -178,13 +179,19 @@ export async function runAgent(input: {
   approvalMode?: ApprovalMode;
   /** Build mode only: "plan" inspects read-only and returns an implementation plan without modifying files. */
   chatMode?: BuildChatMode;
+  /** Pre-reserved credit hold in hundredths to settle at completion or refund on pre-LLM error. */
+  reservedCreditsHundredths?: number;
   emit: Emit;
 }) {
   const { emit, prompt } = input;
   const approvalMode: ApprovalMode = input.approvalMode ?? "auto";
   const planMode = input.project.mode !== "security" && input.chatMode === "plan";
+  const reservedHold = Math.max(0, Math.trunc(input.reservedCreditsHundredths ?? 0));
 
   if (!isAgentConfigured) {
+    if (reservedHold > 0) {
+      await refundReservedCredits(input.project.ownerId, reservedHold).catch(() => undefined);
+    }
     await emit({ type: "status", label: "Waiting for a model connection" });
     const content =
       "Cognix is ready to build this project, but the AI model connection is not configured on this server yet.";
@@ -205,7 +212,12 @@ export async function runAgent(input: {
       break;
     } catch (error) {
       lastSandboxError = error;
-      if (sandboxAttempt >= 3) throw error;
+      if (sandboxAttempt >= 3) {
+        if (reservedHold > 0) {
+          await refundReservedCredits(input.project.ownerId, reservedHold).catch(() => undefined);
+        }
+        throw error;
+      }
       await emit({ type: "status", label: `Reconnecting workspace (attempt ${sandboxAttempt + 1}/3)…` });
       await new Promise((resolve) => setTimeout(resolve, 1_000 * sandboxAttempt));
     }
@@ -456,7 +468,13 @@ export async function runAgent(input: {
     return chars;
   }
 
-  async function chargeRunCredits(messageId: string, durationMs: number) {
+  let creditsSettled = false;
+
+  async function chargeRunCredits(messageId: string | null, durationMs: number) {
+    if (creditsSettled) {
+      return { creditsChargedHundredths: 0, complexityTier: "standard" as const, totalTokens: totalPromptTokens + totalCompletionTokens };
+    }
+    creditsSettled = true;
     const mode: "build" | "plan" | "security" = security ? "security" : planMode ? "plan" : "build";
     const cloudActions = usedTools.filter((name) => CLOUD_ACTION_TOOLS.has(name)).length;
     const calc = calculateAgentCredits({
@@ -487,6 +505,7 @@ export async function runAgent(input: {
       cloudActions,
       durationMs,
       creditsHundredths: calc.creditsHundredths,
+      reservedHundredths: reservedHold,
       description: calc.description,
     }).catch(() => undefined);
     const usageMeta = {
@@ -494,7 +513,9 @@ export async function runAgent(input: {
       complexityTier: calc.complexityTier,
       totalTokens,
     };
-    await updateMessageMetadata(messageId, project.id, usageMeta).catch(() => undefined);
+    if (messageId) {
+      await updateMessageMetadata(messageId, project.id, usageMeta).catch(() => undefined);
+    }
     return usageMeta;
   }
 
@@ -522,7 +543,9 @@ export async function runAgent(input: {
         : {}),
     });
     const usageMeta = await chargeRunCredits(message.id, runDurationMs);
-    await updateProject(project.id, project.ownerId, { status: project.previewUrl ? "ready" : "draft" });
+    await updateProject(project.id, project.ownerId, {
+      status: project.publishedAt ? "published" : project.previewUrl ? "ready" : "draft",
+    });
     await emit({
       type: "done",
       messageId: message.id,
@@ -719,6 +742,7 @@ export async function runAgent(input: {
     return null;
   }
 
+  try {
   let completedNaturally = false;
   for (let turn = 0; turn < maxAgentTurns; turn += 1) {
     if (shouldRefreshAgentContext(turn)) {
@@ -1266,7 +1290,11 @@ export async function runAgent(input: {
         });
       }
 
-      messages.push({ role: "tool", tool_call_id: call.id, content: toolOutput });
+      messages.push({
+        role: "tool",
+        tool_call_id: call.id,
+        content: redactConsoleSecrets(toolOutput, Object.values(decryptedSecrets)),
+      });
     }
 
     if (pendingRequest) {
@@ -1441,7 +1469,10 @@ export async function runAgent(input: {
 
   const previewUrl = await getPreviewUrl({ ...project, sandboxId: sandbox.id }, 3000);
   if (!previewUrl) throw new Error("Could not create a live preview URL for port 3000.");
-  await updateProject(project.id, project.ownerId, { previewUrl, status: "ready" });
+  await updateProject(project.id, project.ownerId, {
+    previewUrl,
+    status: project.publishedAt ? "published" : "ready",
+  });
   await emit({ type: "preview", url: previewUrl, sandboxId: sandbox.id });
   previewReady = true;
 
@@ -1504,7 +1535,9 @@ export async function runAgent(input: {
       : "Verified the existing app",
   });
   const usageMeta = await chargeRunCredits(message.id, runDurationMs);
-  await updateProject(project.id, project.ownerId, { status: previewReady ? "ready" : "error" });
+  await updateProject(project.id, project.ownerId, {
+    status: previewReady ? (project.publishedAt ? "published" : "ready") : "error",
+  });
   await emit({
     type: "done",
     messageId: message.id,
@@ -1517,4 +1550,15 @@ export async function runAgent(input: {
     ...usageMeta,
   });
   return message;
+  } catch (runError) {
+    if (!creditsSettled) {
+      if (modelTurnsExecuted > 0) {
+        await chargeRunCredits(null, Date.now() - runStartedAt).catch(() => undefined);
+      } else if (reservedHold > 0) {
+        creditsSettled = true;
+        await refundReservedCredits(project.ownerId, reservedHold).catch(() => undefined);
+      }
+    }
+    throw runError;
+  }
 }

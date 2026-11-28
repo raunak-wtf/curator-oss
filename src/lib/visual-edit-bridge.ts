@@ -1,4 +1,4 @@
-import type { Sandbox } from "@daytona/sdk";
+import type { Sandbox } from "./daytona";
 
 const BRIDGE_ASSET = "public/__cognix_visual_edit.js";
 const LAYOUT_CANDIDATES = [

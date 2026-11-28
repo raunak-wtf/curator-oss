@@ -15,7 +15,7 @@ import {
   X,
 } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { formatCredits, formatCurrencyCents } from "@/lib/credits";
 import type {
@@ -104,6 +104,15 @@ export function AdminClient({ viewer, initialData }: AdminClientProps) {
   const [monthlyAllowance, setMonthlyAllowance] = useState("90");
   const [nextStatus, setNextStatus] = useState<SubscriptionStatus>("active");
   const [isSavingAdjust, setIsSavingAdjust] = useState(false);
+
+  useEffect(() => {
+    if (!selectedUser) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !isSavingAdjust) setSelectedUser(null);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isSavingAdjust, selectedUser]);
 
   const refresh = useCallback(async () => {
     setIsRefreshing(true);
@@ -397,7 +406,7 @@ export function AdminClient({ viewer, initialData }: AdminClientProps) {
                 aria-selected={activeTab === "users"}
                 onClick={() => setActiveTab("users")}
                 className={cn(
-                  "h-8 rounded-md px-3 text-[12px] font-medium transition-colors",
+                  "h-8 rounded-md px-3 text-[12px] font-medium tabular-nums transition-colors",
                   activeTab === "users" ? "bg-white/[0.12] text-white" : "text-white/55 hover:text-white",
                 )}
               >
@@ -409,7 +418,7 @@ export function AdminClient({ viewer, initialData }: AdminClientProps) {
                 aria-selected={activeTab === "usage"}
                 onClick={() => setActiveTab("usage")}
                 className={cn(
-                  "h-8 rounded-md px-3 text-[12px] font-medium transition-colors",
+                  "h-8 rounded-md px-3 text-[12px] font-medium tabular-nums transition-colors",
                   activeTab === "usage" ? "bg-white/[0.12] text-white" : "text-white/55 hover:text-white",
                 )}
               >
@@ -473,6 +482,7 @@ export function AdminClient({ viewer, initialData }: AdminClientProps) {
                   <option value="on_hold">On hold</option>
                   <option value="cancelled">Cancelled</option>
                   <option value="expired">Expired</option>
+                  <option value="failed">Failed</option>
                 </select>
 
                 {hasFilters ? (
@@ -732,6 +742,7 @@ export function AdminClient({ viewer, initialData }: AdminClientProps) {
                   <option value="on_hold">On hold</option>
                   <option value="cancelled">Cancelled</option>
                   <option value="expired">Expired</option>
+                  <option value="failed">Failed</option>
                 </select>
               </label>
 

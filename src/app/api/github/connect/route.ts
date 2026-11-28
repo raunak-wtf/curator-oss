@@ -6,13 +6,18 @@ import { ensureUser } from "@/lib/store";
 
 export const runtime = "nodejs";
 
+function publicBaseUrl(requestUrl: URL): string {
+  return process.env.APP_BASE_URL?.trim() || requestUrl.origin;
+}
+
 /** Starts the GitHub OAuth flow for the signed-in Cognix user. */
 export async function GET(request: Request) {
   const url = new URL(request.url);
+  const base = publicBaseUrl(url);
   const returnTo = safeReturnPath(url.searchParams.get("returnTo"));
   const viewer = await getViewer();
   if (!viewer) {
-    return NextResponse.redirect(new URL(`/auth/login?returnTo=${encodeURIComponent(returnTo)}`, url));
+    return NextResponse.redirect(new URL(`/auth/login?returnTo=${encodeURIComponent(returnTo)}`, base));
   }
   await ensureUser(viewer);
 
@@ -22,7 +27,7 @@ export async function GET(request: Request) {
     const response = NextResponse.redirect(authorizeUrl);
     response.cookies.set(GITHUB_OAUTH_COOKIE, cookie, {
       httpOnly: true,
-      secure: url.protocol === "https:",
+      secure: base.startsWith("https://") || url.protocol === "https:",
       sameSite: "lax",
       path: GITHUB_OAUTH_COOKIE_PATH,
       maxAge: maxAgeSeconds,
@@ -31,7 +36,7 @@ export async function GET(request: Request) {
     return response;
   } catch (error) {
     const code = error instanceof GitHubError ? error.code : "unavailable";
-    const target = new URL("/github/connected", url);
+    const target = new URL("/github/connected", base);
     target.searchParams.set("result", code === "not_configured" ? "not_configured" : "error");
     target.searchParams.set("returnTo", returnTo);
     return NextResponse.redirect(target);

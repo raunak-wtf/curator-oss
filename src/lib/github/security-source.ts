@@ -1,6 +1,5 @@
 import path from "node:path";
-import type { Sandbox } from "@daytona/sdk";
-import { getProjectFsRoot, getProjectRoot, getSandbox, readProjectSnapshot } from "../daytona";
+import { getProjectFsRoot, getProjectRoot, getSandbox, readProjectSnapshot, type Sandbox } from "../daytona";
 import { createMessage, deleteProjectFile, getDecryptedSecrets, listProjectFiles, updateProject, upsertProjectFile } from "../store";
 import type { Project, SecuritySource } from "../types";
 import { GitHubError, github } from "./client";

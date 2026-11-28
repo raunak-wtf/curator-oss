@@ -27,11 +27,11 @@ describe("Bucketline Cognix Cloud Storage helpers", () => {
     expect(() => normalizeObjectKey("../secrets.txt")).toThrow(/Invalid object key/);
 
     const cdnUrl = buildPublicCdnUrl(
-      "https://cloudnest-cdn-vault.lovable.app/api/public/cdn/9f8c1a2b3d4e5f60a7b8c9d0e1f2a3b4/cx-4be40d88-media/",
+      "https://cloud.curator.codes/api/public/cdn/9f8c1a2b3d4e5f60a7b8c9d0e1f2a3b4/cx-4be40d88-media/",
       "avatars/user 1.png",
     );
     expect(cdnUrl).toBe(
-      "https://cloudnest-cdn-vault.lovable.app/api/public/cdn/9f8c1a2b3d4e5f60a7b8c9d0e1f2a3b4/cx-4be40d88-media/avatars/user%201.png",
+      "https://cloud.curator.codes/api/public/cdn/9f8c1a2b3d4e5f60a7b8c9d0e1f2a3b4/cx-4be40d88-media/avatars/user%201.png",
     );
   });
 
@@ -41,14 +41,14 @@ describe("Bucketline Cognix Cloud Storage helpers", () => {
         bucket: "cx-4be40d88-storage",
         accessKeyId: "AKIAEXAMPLEKEY123456",
         secretAccessKey: "secret-example-key-value",
-        s3Endpoint: "https://cloudnest-cdn-vault.lovable.app/api/public/s3",
+        s3Endpoint: "https://cloud.curator.codes/api/public/s3",
         s3Region: "auto",
       },
       { method: "GET", key: "docs/invoice.pdf", expiresInSeconds: 3600 },
     );
 
     expect(presigned.url).toContain(
-      "https://cloudnest-cdn-vault.lovable.app/api/public/s3/cx-4be40d88-storage/docs/invoice.pdf?",
+      "https://cloud.curator.codes/api/public/s3/cx-4be40d88-storage/docs/invoice.pdf?",
     );
     expect(presigned.url).toContain("X-Amz-Algorithm=AWS4-HMAC-SHA256");
     expect(presigned.url).toContain("X-Amz-Expires=3600");

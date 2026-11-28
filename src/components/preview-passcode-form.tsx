@@ -1,16 +1,19 @@
 "use client";
 
 import { KeyRound, Lock } from "lucide-react";
+import Link from "next/link";
 import { useState } from "react";
 
 export function PreviewPasscodeForm({
   host,
   projectTitle,
   nextPath,
+  ownerSignInHref,
 }: {
   host: string;
   projectTitle: string;
   nextPath: string;
+  ownerSignInHref?: string;
 }) {
   const [passcode, setPasscode] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -63,7 +66,7 @@ export function PreviewPasscodeForm({
                 autoFocus
                 required
                 placeholder="Passcode"
-                className="h-10 w-full rounded-lg border border-white/15 bg-[#151515] pl-9 pr-3 text-[13px] text-white placeholder:text-white/35 outline-none focus:border-white/30"
+                className="h-10 w-full rounded-lg border border-white/15 bg-[#151515] pl-9 pr-3 text-[13px] text-white placeholder:text-white/35 focus:border-white/30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#9f94ff]"
               />
             </div>
           </label>
@@ -82,6 +85,19 @@ export function PreviewPasscodeForm({
             {submitting ? "Unlocking…" : "Unlock preview"}
           </button>
         </form>
+
+        <div className="mt-4 flex items-center justify-between border-t border-white/[0.08] pt-3 text-[12px] text-white/55">
+          {ownerSignInHref ? (
+            <a href={ownerSignInHref} className="hover:text-white">
+              Sign in as owner
+            </a>
+          ) : (
+            <span />
+          )}
+          <Link href="/" className="hover:text-white">
+            Go to Curator
+          </Link>
+        </div>
       </div>
     </div>
   );

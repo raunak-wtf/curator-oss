@@ -767,12 +767,21 @@ export function WorkspaceClient({
     window.addEventListener("beforeunload", sendClose);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
+    // Avoid firing `close` during synchronous React 19 StrictMode mount->cleanup->remount cycles.
+    let activeLongEnoughToClose = false;
+    const armTimer = window.setTimeout(() => {
+      activeLongEnoughToClose = true;
+    }, 1_000);
+
     return () => {
+      window.clearTimeout(armTimer);
       window.clearInterval(interval);
       window.removeEventListener("pagehide", sendClose);
       window.removeEventListener("beforeunload", sendClose);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-      sendClose();
+      if (activeLongEnoughToClose) {
+        sendClose();
+      }
     };
   }, [project.id, security]);
 
@@ -1392,7 +1401,17 @@ export function WorkspaceClient({
 
         while (true) {
           const { value: chunk, done } = await reader.read();
-          if (done) break;
+          if (done) {
+            buffer += decoder.decode();
+            const trailing = buffer.trim();
+            if (trailing) {
+              for (const rawLine of trailing.split("\n")) {
+                const trimmedLine = rawLine.trim();
+                if (trimmedLine) handleEvent(JSON.parse(trimmedLine) as AgentEvent);
+              }
+            }
+            break;
+          }
           buffer += decoder.decode(chunk, { stream: true });
           let newline = buffer.indexOf("\n");
           while (newline >= 0) {

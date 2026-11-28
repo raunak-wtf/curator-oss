@@ -9,6 +9,9 @@ import {
   ensureUser,
   getUserSubscription,
   recordCreditUsage,
+  refundReservedCredits,
+  releaseBillingWebhookEvent,
+  reserveUserAgentCredits,
 } from "../store";
 import type { Viewer } from "../types";
 
@@ -16,7 +19,7 @@ import type { Viewer } from "../types";
 const TEST_WEBHOOK_SECRET = `whsec_${Buffer.from("0123456789abcdef0123456789abcdef").toString("base64")}`;
 
 describe("Dodo Payments webhooks & $10/month no-free-tier entitlement", () => {
-  it("verifies valid Standard Webhooks signatures and rejects tampered payloads", () => {
+  it("verifies valid Standard Webhooks signatures, rejects tampered payloads, and distinguishes payment vs subscription IDs", () => {
     const payload = JSON.stringify({
       type: "subscription.active",
       timestamp: "2026-11-28T00:00:00Z",
@@ -45,11 +48,23 @@ describe("Dodo Payments webhooks & $10/month no-free-tier entitlement", () => {
     expect(verified.eventId).toBe(msgId);
     expect(verified.eventType).toBe("subscription.active");
 
-    const parsed = extractDodoEventDetails(verified.data);
+    const parsed = extractDodoEventDetails(verified.data, verified.eventType);
     expect(parsed.userId).toBe("account|buyer1");
     expect(parsed.customerId).toBe("cus_test_123");
     expect(parsed.subscriptionId).toBe("sub_test_123");
     expect(parsed.customerEmail).toBe("buyer@example.com");
+
+    // `payment.succeeded` payload `id` (`pay_...`) must NOT overwrite `subscriptionId`
+    const paymentParsed = extractDodoEventDetails(
+      {
+        id: "pay_test_999",
+        customer: { customer_id: "cus_test_123", email: "buyer@example.com" },
+        metadata: { user_id: "account|buyer1" },
+      },
+      "payment.succeeded",
+    );
+    expect(paymentParsed.subscriptionId).toBeNull();
+    expect(paymentParsed.customerId).toBe("cus_test_123");
 
     expect(() =>
       verifyDodoWebhook(
@@ -64,7 +79,7 @@ describe("Dodo Payments webhooks & $10/month no-free-tier entitlement", () => {
     ).toThrow();
   });
 
-  it("enforces no free tier, activates on subscription.active, deducts credits, and rolls over on renewal", async () => {
+  it("enforces no free tier, guards webhook ordering, reserves/settles credits atomically, and rolls over on renewal", async () => {
     const userId = `test-user-${crypto.randomUUID()}`;
     const viewer: Viewer = {
       id: userId,
@@ -78,15 +93,26 @@ describe("Dodo Payments webhooks & $10/month no-free-tier entitlement", () => {
     };
     await ensureUser(viewer);
 
-    // 1. Unsubscribed user is blocked (no free tier)
+    // 1. Unsubscribed user is blocked (no free tier), and out-of-order `subscription.updated` or `payment.succeeded` cannot grant free access
     const beforeSub = await checkUserAgentEntitlement(viewer);
     expect(beforeSub.allowed).toBe(false);
     expect(beforeSub.reason).toBe("subscription_required");
 
-    // 2. Webhook idempotency claim
+    const prematureUpdate = await applyDodoSubscriptionEvent({
+      userId,
+      eventType: "subscription.updated",
+      customerId: `cus_${userId}`,
+      subscriptionId: `sub_${userId}`,
+    });
+    expect(prematureUpdate.status).toBe("inactive");
+    expect(prematureUpdate.creditsBalanceHundredths).toBe(0);
+
+    // 2. Webhook idempotency claim + release on transient error
     const evtId = `evt_${crypto.randomUUID()}`;
     expect(await claimBillingWebhookEvent(evtId, "subscription.active")).toBe(true);
     expect(await claimBillingWebhookEvent(evtId, "subscription.active")).toBe(false);
+    await releaseBillingWebhookEvent(evtId);
+    expect(await claimBillingWebhookEvent(evtId, "subscription.active")).toBe(true);
 
     // 3. Activate $10/month Curator Pro subscription -> grants 90.00 credits (9000 hundredths)
     const activated = await applyDodoSubscriptionEvent({
@@ -100,10 +126,26 @@ describe("Dodo Payments webhooks & $10/month no-free-tier entitlement", () => {
     expect(activated.status).toBe("active");
     expect(activated.creditsBalanceHundredths).toBe(9000);
 
+    // Out-of-order `payment.succeeded` must never clobber active status or credit balance
+    const afterPaymentEvt = await applyDodoSubscriptionEvent({
+      userId,
+      eventType: "payment.succeeded",
+      customerId: `cus_${userId}_confirmed`,
+    });
+    expect(afterPaymentEvt.status).toBe("active");
+    expect(afterPaymentEvt.creditsBalanceHundredths).toBe(9000);
+    expect(afterPaymentEvt.dodoCustomerId).toBe(`cus_${userId}_confirmed`);
+
     const afterSub = await checkUserAgentEntitlement(viewer);
     expect(afterSub.allowed).toBe(true);
 
-    // 4. Deduct 1.25 credits (125 hundredths) for an agent run
+    // 4. Pre-run reservation + exact delta settlement (reserve 50, total run costs 125 -> deducts remaining 75)
+    const reserved = await reserveUserAgentCredits(viewer, 50);
+    expect(reserved.allowed).toBe(true);
+    if (!reserved.allowed) throw new Error("expected reservation to be allowed");
+    expect(reserved.reservedHundredths).toBe(50);
+    expect((await getUserSubscription(userId)).creditsBalanceHundredths).toBe(8950);
+
     await recordCreditUsage({
       userId,
       projectId: null,
@@ -120,12 +162,20 @@ describe("Dodo Payments webhooks & $10/month no-free-tier entitlement", () => {
       cloudActions: 0,
       durationMs: 12_000,
       creditsHundredths: 125,
+      reservedHundredths: reserved.reservedHundredths,
       description: "Build run · 3 files · 5 actions",
     });
 
     const afterRun = await getUserSubscription(userId);
     expect(afterRun.creditsBalanceHundredths).toBe(8875);
     expect(afterRun.creditsUsedThisPeriodHundredths).toBe(125);
+
+    // Refunding an aborted pre-run reservation restores the reserved credits
+    const abortedReserve = await reserveUserAgentCredits(viewer, 50);
+    if (!abortedReserve.allowed) throw new Error("expected reservation to be allowed");
+    expect(abortedReserve.reservedHundredths).toBe(50);
+    await refundReservedCredits(userId, abortedReserve.reservedHundredths);
+    expect((await getUserSubscription(userId)).creditsBalanceHundredths).toBe(8875);
 
     // 5. Renewal rolls over unused credits up to 180.00 credit cap
     const renewed = await applyDodoSubscriptionEvent({

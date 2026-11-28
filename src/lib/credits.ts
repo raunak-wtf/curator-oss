@@ -39,7 +39,13 @@ export type AgentCreditCalculation = {
   description: string;
 };
 
+function safeInt(value: number, min = 0, fallback = min): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.trunc(value));
+}
+
 function roundToNearestFiveHundredths(hundredths: number): number {
+  if (!Number.isFinite(hundredths)) return 5;
   return Math.max(5, Math.round(hundredths / 5) * 5);
 }
 
@@ -55,13 +61,13 @@ function roundToNearestFiveHundredths(hundredths: number): number {
  *   - Full-stack build (DB/Auth/Storage + verification loop): ~1.80–4.50+ credits
  */
 export function calculateAgentCredits(input: AgentCreditInput): AgentCreditCalculation {
-  const promptTokens = Math.max(0, Math.trunc(input.promptTokens));
-  const completionTokens = Math.max(0, Math.trunc(input.completionTokens));
-  const turns = Math.max(1, Math.trunc(input.turns));
-  const toolCalls = Math.max(0, Math.trunc(input.toolCalls));
-  const filesChanged = Math.max(0, Math.trunc(input.filesChanged));
-  const commandsRun = Math.max(0, Math.trunc(input.commandsRun));
-  const cloudActions = Math.max(0, Math.trunc(input.cloudActions));
+  const promptTokens = safeInt(input.promptTokens, 0);
+  const completionTokens = safeInt(input.completionTokens, 0);
+  const turns = safeInt(input.turns, 1);
+  const toolCalls = safeInt(input.toolCalls, 0);
+  const filesChanged = safeInt(input.filesChanged, 0);
+  const commandsRun = safeInt(input.commandsRun, 0);
+  const cloudActions = safeInt(input.cloudActions, 0);
 
   // Token work component (hundredths of a credit)
   const tokenEffort =
@@ -125,7 +131,8 @@ export function estimateTokensFromChars(charCount: number): number {
 }
 
 export function formatCredits(creditsHundredths: number): string {
-  const value = creditsHundredths / 100;
+  const safe = Number.isFinite(creditsHundredths) ? creditsHundredths : 0;
+  const value = safe / 100;
   return value.toLocaleString("en-US", {
     minimumFractionDigits: value % 1 === 0 ? 0 : 2,
     maximumFractionDigits: 2,
@@ -133,10 +140,11 @@ export function formatCredits(creditsHundredths: number): string {
 }
 
 export function formatCurrencyCents(cents: number, currency = "USD"): string {
+  const safe = Number.isFinite(cents) ? cents : 0;
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency,
-    minimumFractionDigits: cents % 100 === 0 ? 0 : 2,
+    minimumFractionDigits: safe % 100 === 0 ? 0 : 2,
     maximumFractionDigits: 2,
-  }).format(cents / 100);
+  }).format(safe / 100);
 }

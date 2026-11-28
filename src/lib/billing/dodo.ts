@@ -1,6 +1,7 @@
 import DodoPayments from "dodopayments";
 import { Webhook } from "standardwebhooks";
 import { PRO_PLAN_CODE } from "../credits";
+import { sanitizeRelativePath } from "../preview-access";
 import type { Viewer } from "../types";
 
 export type DodoEnvironment = "test_mode" | "live_mode";
@@ -55,9 +56,10 @@ export async function createProCheckoutSession(input: {
   }
   const client = createDodoClient();
   const baseUrl = resolveBillingBaseUrl(input.requestOrigin);
-  const safePath = input.returnPath && input.returnPath.startsWith("/") ? input.returnPath : "/billing";
-  const separator = safePath.includes("?") ? "&" : "?";
-  const returnUrl = `${baseUrl}${safePath}${separator}checkout=success`;
+  const safePath = input.returnPath ? sanitizeRelativePath(input.returnPath) : "/billing";
+  const normalizedPath = safePath === "/" && input.returnPath && input.returnPath.trim() !== "/" ? "/billing" : safePath;
+  const separator = normalizedPath.includes("?") ? "&" : "?";
+  const returnUrl = `${baseUrl}${normalizedPath}${separator}checkout=success`;
   const cancelUrl = `${baseUrl}/billing?checkout=cancelled`;
 
   const session = await client.checkoutSessions.create({
@@ -188,11 +190,17 @@ function readIsoDate(obj: Record<string, unknown>, ...keys: string[]): string | 
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
 }
 
-export function extractDodoEventDetails(data: Record<string, unknown>): ParsedDodoSubscriptionPayload {
+export function extractDodoEventDetails(
+  data: Record<string, unknown>,
+  eventType = "",
+): ParsedDodoSubscriptionPayload {
   const metadata =
     data.metadata && typeof data.metadata === "object" ? (data.metadata as Record<string, unknown>) : {};
   const customer =
     data.customer && typeof data.customer === "object" ? (data.customer as Record<string, unknown>) : {};
+
+  const isPaymentEvent = eventType.startsWith("payment.");
+  const isSubscriptionEvent = !eventType || eventType.startsWith("subscription.");
 
   const userId = readString(metadata, "user_id", "userId");
   const customerEmail =
@@ -200,9 +208,13 @@ export function extractDodoEventDetails(data: Record<string, unknown>): ParsedDo
     readString(metadata, "user_email", "email") ??
     readString(data, "customer_email");
   const customerId = readString(customer, "customer_id", "id") ?? readString(data, "customer_id");
-  const subscriptionId = readString(data, "subscription_id", "id");
+  const subscriptionId = isSubscriptionEvent
+    ? readString(data, "subscription_id", "id")
+    : readString(data, "subscription_id");
   const productId = readString(data, "product_id");
-  const paymentId = readString(data, "payment_id");
+  const paymentId = isPaymentEvent
+    ? readString(data, "payment_id", "id")
+    : readString(data, "payment_id");
   const currentPeriodStart = readIsoDate(data, "previous_billing_date", "created_at", "current_period_start");
   const currentPeriodEnd = readIsoDate(data, "next_billing_date", "expires_at", "current_period_end");
   const cancelAtPeriodEnd =

@@ -9,6 +9,7 @@ import {
   isPublicPreviewActive,
   PREVIEW_GUEST_LEASE_MS,
   PREVIEW_OWNER_LEASE_MS,
+  sanitizeRelativePath,
   signPreviewGrant,
 } from "@/lib/preview-access";
 import {
@@ -25,11 +26,6 @@ type Props = {
   searchParams: Promise<{ host?: string; key?: string; next?: string; mode?: string }>;
 };
 
-function sanitizeNext(raw?: string): string {
-  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return "/";
-  return raw.slice(0, 500);
-}
-
 function isIsoExpired(iso: string | null | undefined): boolean {
   if (!iso) return false;
   return Date.parse(iso) <= Date.now();
@@ -44,7 +40,7 @@ export default async function PreviewAuthPage({ searchParams }: Props) {
   const query = await searchParams;
   const host = hostnameFromHeader(query.host);
   const shareKey = query.key?.trim() || "";
-  const nextPath = sanitizeNext(query.next);
+  const nextPath = sanitizeRelativePath(query.next);
   const appsMatch = host ? parseAppsHostname(host) : null;
 
   if (!host || !appsMatch || appsMatch.kind !== "preview") {
@@ -87,28 +83,10 @@ export default async function PreviewAuthPage({ searchParams }: Props) {
 
   const previewOrigin = `https://${host}`;
   const publicActive = isPublicPreviewActive(project.previewAccessMode ?? "owner", project.previewPublicExpiresAt);
-
-  // Public preview with passcode lock (no Curator sign-in required)
-  if (publicActive && project.previewHasPasscode && !shareKey && query.mode === "passcode") {
-    return <PreviewPasscodeForm host={host} projectTitle={project.title} nextPath={nextPath} />;
-  }
-
-  // Public preview without passcode: grant immediately and bounce back
-  if (publicActive && !project.previewHasPasscode && !shareKey) {
-    redirect(`${previewOrigin}${nextPath}`);
-  }
-
   const viewer = await getViewer();
-  const returnParams = new URLSearchParams({ host, next: nextPath });
-  if (shareKey) returnParams.set("key", shareKey);
-  const selfReturnTo = `/preview-auth?${returnParams.toString()}`;
 
-  if (!viewer) {
-    redirect(`/auth/login?returnTo=${encodeURIComponent(selfReturnTo)}`);
-  }
-
-  // 1. Project owner (or Curator admin) always gets immediate preview access
-  if (viewer.id === project.ownerId || viewer.isAdmin) {
+  // 1. Project owner (or verified Curator admin) always gets immediate preview access without passcode prompts.
+  if (viewer && (viewer.id === project.ownerId || viewer.isAdmin)) {
     await touchProjectPreviewSession(project.id, PREVIEW_OWNER_LEASE_MS);
     const grant = signPreviewGrant({
       pid: project.id,
@@ -121,7 +99,67 @@ export default async function PreviewAuthPage({ searchParams }: Props) {
     redirect(buildOwnerPreviewFrameUrl(previewOrigin, grant, nextPath));
   }
 
-  // 2. Private invite link (`/auth?key={sharing_key}`): verify key AND exact authenticated Curator email!
+  // 2. Public preview with passcode lock (no Curator sign-in required for guests)
+  if (publicActive && project.previewHasPasscode && !shareKey) {
+    const returnParams = new URLSearchParams({ host, next: nextPath });
+    const ownerSignInHref = `/auth/login?returnTo=${encodeURIComponent(`/preview-auth?${returnParams.toString()}`)}`;
+    return (
+      <PreviewPasscodeForm
+        host={host}
+        projectTitle={project.title}
+        nextPath={nextPath}
+        ownerSignInHref={!viewer ? ownerSignInHref : undefined}
+      />
+    );
+  }
+
+  // 3. Public preview without passcode: touch guest session and bounce back cleanly
+  if (publicActive && !project.previewHasPasscode && !shareKey) {
+    await touchProjectPreviewSession(project.id, PREVIEW_GUEST_LEASE_MS);
+    redirect(`${previewOrigin}${nextPath}`);
+  }
+
+  const returnParams = new URLSearchParams({ host, next: nextPath });
+  if (shareKey) returnParams.set("key", shareKey);
+  const selfReturnTo = `/preview-auth?${returnParams.toString()}`;
+
+  if (!viewer) {
+    redirect(`/auth/login?returnTo=${encodeURIComponent(selfReturnTo)}`);
+  }
+
+  // Require verified email before matching any private email invitation to block unverified-email impersonation.
+  if (!viewer.emailVerified) {
+    return (
+      <div className="flex min-h-dvh items-center justify-center bg-[#141414] px-4 text-white">
+        <div className="w-full max-w-md rounded-xl border border-white/[0.1] bg-[#1c1c1c] p-6">
+          <div className="flex items-center gap-2.5 text-amber-300">
+            <ShieldAlert className="size-5 shrink-0" aria-hidden="true" />
+            <h1 className="text-[16px] font-semibold text-white">Verify your email to view this preview</h1>
+          </div>
+          <p className="mt-2.5 text-[13px] leading-relaxed text-white/65">
+            Your Curator account (<strong className="font-medium text-white">{viewer.email}</strong>) has not verified its email address yet.
+            Verify your email or sign in with a verified social account to open private previews.
+          </p>
+          <div className="mt-5 flex flex-wrap items-center gap-2.5">
+            <a
+              href={`/auth/logout?returnTo=${encodeURIComponent(selfReturnTo)}`}
+              className="inline-flex h-9 items-center rounded-lg bg-white px-4 text-[13px] font-semibold text-black hover:bg-white/90"
+            >
+              Switch account
+            </a>
+            <Link
+              href="/"
+              className="inline-flex h-9 items-center rounded-lg border border-white/15 px-3.5 text-[13px] font-medium text-white/80 hover:bg-white/[0.06] hover:text-white"
+            >
+              Back to Curator
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 4. Private invite link (`/auth?key={sharing_key}`): verify key AND exact verified Curator email
   if (shareKey) {
     const share = await findPreviewShareByKey(project.id, shareKey);
     if (!share) {
@@ -198,7 +236,6 @@ export default async function PreviewAuthPage({ searchParams }: Props) {
       );
     }
 
-    // Valid invited user with matching Curator email!
     await Promise.all([
       recordPreviewShareAccess(share.id),
       touchProjectPreviewSession(project.id, PREVIEW_GUEST_LEASE_MS),
@@ -216,8 +253,8 @@ export default async function PreviewAuthPage({ searchParams }: Props) {
     redirect(buildOwnerPreviewFrameUrl(previewOrigin, grant, nextPath));
   }
 
-  // 3. Direct preview URL visit without key: allow if this email has an active invite on a private preview
-  if (project.previewAccessMode === "private") {
+  // 5. Direct preview URL visit without key: allow if this verified email has an active invite and mode is not locked to owner-only
+  if (project.previewAccessMode !== "owner") {
     const emailShare = await findPreviewShareByEmail(project.id, viewer.email);
     if (emailShare && !isIsoExpired(emailShare.expiresAt)) {
       await Promise.all([
@@ -231,13 +268,13 @@ export default async function PreviewAuthPage({ searchParams }: Props) {
         ver: project.previewAccessVersion ?? 1,
         email: viewer.email,
         sid: emailShare.id,
-        ttlSeconds: 12 * 3600,
+        ttlSeconds: shareGrantTtlSeconds(emailShare.expiresAt),
       });
       redirect(buildOwnerPreviewFrameUrl(previewOrigin, grant, nextPath));
     }
   }
 
-  // 4. Owner-only (or not invited): deny access cleanly
+  // 6. Owner-only (or not invited): deny access cleanly
   return (
     <div className="flex min-h-dvh items-center justify-center bg-[#141414] px-4 text-white">
       <div className="w-full max-w-md rounded-xl border border-white/[0.1] bg-[#1c1c1c] p-6">

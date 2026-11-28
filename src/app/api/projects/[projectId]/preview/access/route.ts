@@ -32,7 +32,13 @@ export async function GET(_request: Request, context: Context) {
 const patchSchema = z.object({
   mode: z.enum(["owner", "public", "private"]).optional(),
   publicDurationHours: z.number().int().min(1).max(168).optional(),
-  passcode: z.string().trim().max(64).nullable().optional(),
+  passcode: z
+    .string()
+    .trim()
+    .min(4, "Passcode must be at least 4 characters.")
+    .max(64, "Passcode can be at most 64 characters.")
+    .nullable()
+    .optional(),
   revokeAll: z.boolean().optional(),
 });
 
